@@ -1,0 +1,17 @@
+# Python build / cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+
+# 本地配置（含项目路径，不入库）
+comic-understand-long/.cosmic-understand/config.json
+comic-understand-long/.cosmic-understand/ok-cosmic.json
+.claude/settings.local.json
+
+# 验收 / 运行临时产物
+coverage.json
+coverage.jso
