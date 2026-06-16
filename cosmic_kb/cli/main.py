@@ -4,8 +4,9 @@
     cosmic_kb --version       # 版本输出
     cosmic_kb doctor          # 检查 skill_assets 资产接线
     cosmic_kb ingest <路径>   # 阶段1：摄取源码 + 解析覆盖率/可信度报告
+    cosmic_kb meta <dym|zip|dir...>  # 阶段2：解析 dym / 整包 / 多包 / 目录元数据
 
-后续阶段在此挂载更多子命令（meta / bridge / report / ask ...）。
+后续阶段在此挂载更多子命令（bridge / report / ask ...）。
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 from .. import __version__
 from .. import _assets
@@ -72,9 +74,102 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_meta(args: argparse.Namespace) -> int:
+    """阶段2：解析 dym / 整包 zip / 多包 / 目录元数据，产出 JSON 快照 / 分类计数报告。
+
+    入参可同时给多个：单个 .dym、单个 .zip、含多个 zip 的目录、或多个 zip 路径。
+    生产项目通常一个 zip ≈ 一个业务模块 → 多包时跨模块汇总（验收补强项）。
+    """
+    from ..metadata import dym_parser, package_loader
+    from ..metadata.template_loader import TemplateRegistry
+    from ..report import meta_report
+
+    # 1) 校验 + 展开输入：目录→其下 zip，文件按后缀归类。
+    zips: list[Path] = []
+    dyms: list[Path] = []
+    for raw in args.paths:
+        if not os.path.exists(raw):
+            print(f"错误: 路径不存在: {raw}", file=sys.stderr)
+            return 2
+        if os.path.isdir(raw):
+            found = package_loader.discover_zips(raw)
+            if not found:
+                print(f"警告: 目录下未发现 .zip: {raw}", file=sys.stderr)
+            zips.extend(found)
+        elif raw.lower().endswith(".zip"):
+            zips.append(Path(raw))
+        elif raw.lower().endswith(".dym"):
+            dyms.append(Path(raw))
+        else:
+            print(f"错误: 不支持的输入(需 .dym / .zip / 含 zip 的目录): {raw}", file=sys.stderr)
+            return 2
+
+    registry = TemplateRegistry(args.template_dir) if args.template_dir else TemplateRegistry()
+
+    # 2) zip 优先（dym 与 zip 混传时只处理 zip，给出提示）。
+    if zips:
+        if dyms:
+            print("提示: 多包模式仅处理 zip/目录，已忽略同时传入的 .dym 文件", file=sys.stderr)
+
+        # 单包：保持原单包报告（信息更全：列出全部表单）。
+        if len(zips) == 1:
+            def _progress(done: int, total: int, _member: str) -> None:
+                if not args.json and (done % 50 == 0 or done == total):
+                    print(f"\r解析中 {done}/{total} …", end="", file=sys.stderr, flush=True)
+
+            result = package_loader.load_package(
+                zips[0], template_registry=registry, progress=_progress, limit=args.limit
+            )
+            if not args.json:
+                print("", file=sys.stderr)  # 进度行收尾换行
+            if args.json:
+                print(json.dumps(meta_report.package_summary(result), ensure_ascii=False, indent=2))
+            else:
+                print(meta_report.render_package(result, max_list=args.max_list))
+            return 1 if result.failed_entries and not result.ok_entries else 0
+
+        # 多包：跨模块汇总。
+        def _mp_progress(name: str, done: int, total: int, _member: str) -> None:
+            if not args.json and (done % 50 == 0 or done == total):
+                print(f"\r[{name}] 解析中 {done}/{total} …", end="", file=sys.stderr, flush=True)
+
+        multi = package_loader.load_packages(
+            zips, template_registry=registry, progress=_mp_progress, limit=args.limit
+        )
+        if not args.json:
+            print("", file=sys.stderr)
+        if args.json:
+            print(json.dumps(meta_report.multi_package_summary(multi), ensure_ascii=False, indent=2))
+        else:
+            print(meta_report.render_multi_package(multi, max_list=args.max_list))
+        return 1 if multi.failed_count and not multi.ok_count else 0
+
+    # 3) 纯 dym（一个或多个）。
+    if not dyms:
+        print("错误: 未发现可解析的 .dym / .zip", file=sys.stderr)
+        return 2
+
+    rc = 0
+    models = []
+    for d in dyms:
+        try:
+            models.append(dym_parser.parse_file(str(d), template_registry=registry))
+        except Exception as exc:
+            print(f"解析失败: {d}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            rc = 1
+
+    if args.json:
+        # 单个保持裸对象（向后兼容）；多个汇成数组。
+        payload = models[0].to_dict() if len(models) == 1 else [m.to_dict() for m in models]
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        for model in models:
+            print(meta_report.render_model(model))
+    return rc
+
+
 # 仍未实现的占位子命令，列出来让骨架自描述、也避免 AI 误调不存在的命令。
 _PLANNED = [
-    ("meta", "阶段2  解析 dym / 整包 zip 元数据"),
     ("bridge", "阶段3  元数据 ClassName ↔ 源码文件桥接"),
     ("report", "阶段4  项目地图 / 接手者理解报告"),
     ("java", "阶段5-7  Java 行为 / 字段路径 / 入库判断"),
@@ -123,6 +218,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="文本报告中每类问题最多列出的文件数（默认 30）",
     )
     ingest.set_defaults(func=_cmd_ingest)
+
+    meta = sub.add_parser(
+        "meta",
+        help="阶段2：解析 dym / 整包 zip / 多包 / 目录元数据，产出 JSON 快照/分类计数报告",
+    )
+    meta.add_argument(
+        "paths", nargs="+",
+        help="一个或多个：.dym 文件、整包 .zip、或含多个 zip 的目录（多包跨模块汇总）",
+    )
+    meta.add_argument(
+        "--json", action="store_true", help="输出 MetaModel/整包 JSON 快照而非文本报告"
+    )
+    meta.add_argument(
+        "--template-dir",
+        help="继承根模板目录（含 bos_billtpl/bos_basetpl）；默认 samples/bos_temp",
+    )
+    meta.add_argument(
+        "--limit", type=int, default=None,
+        help="整包模式：仅解析前 N 个 dym（抽样/调试）",
+    )
+    meta.add_argument(
+        "--max-list", type=int, default=50,
+        help="整包文本报告里最多列出的表单数（默认 50；全部见 --json）",
+    )
+    meta.set_defaults(func=_cmd_meta)
 
     return parser
 
