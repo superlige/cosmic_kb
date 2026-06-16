@@ -5,8 +5,9 @@
     cosmic_kb doctor          # 检查 skill_assets 资产接线
     cosmic_kb ingest <路径>   # 阶段1：摄取源码 + 解析覆盖率/可信度报告
     cosmic_kb meta <dym|zip|dir...>  # 阶段2：解析 dym / 整包 / 多包 / 目录元数据
+    cosmic_kb bridge <源码根> <dym|zip|dir...>  # 阶段3：元数据 ClassName ↔ 源码桥接
 
-后续阶段在此挂载更多子命令（bridge / report / ask ...）。
+后续阶段在此挂载更多子命令（report / ask ...）。
 """
 
 from __future__ import annotations
@@ -168,9 +169,85 @@ def _cmd_meta(args: argparse.Namespace) -> int:
     return rc
 
 
+def _collect_models(paths: list[str], registry) -> tuple[list, int]:
+    """把 meta 风格的输入（.dym / .zip / 含 zip 的目录）展开成 MetaModel 列表。
+
+    返回 (models, rc)；rc 非 0 表示输入有误（调用方据此退出）。复用阶段 2 的解析器，
+    桥接只取其产物，不重复造解析逻辑。
+    """
+    from ..metadata import dym_parser, package_loader
+
+    zips: list[Path] = []
+    dyms: list[Path] = []
+    for raw in paths:
+        if not os.path.exists(raw):
+            print(f"错误: 路径不存在: {raw}", file=sys.stderr)
+            return [], 2
+        if os.path.isdir(raw):
+            zips.extend(package_loader.discover_zips(raw))
+        elif raw.lower().endswith(".zip"):
+            zips.append(Path(raw))
+        elif raw.lower().endswith(".dym"):
+            dyms.append(Path(raw))
+        else:
+            print(f"错误: 不支持的输入(需 .dym / .zip / 含 zip 的目录): {raw}", file=sys.stderr)
+            return [], 2
+
+    models: list = []
+    for z in zips:
+        try:
+            res = package_loader.load_package(z, template_registry=registry)
+            models.extend(e.model for e in res.ok_entries)
+        except Exception as exc:
+            print(f"整包打开失败: {z}: {type(exc).__name__}: {exc}", file=sys.stderr)
+    for d in dyms:
+        try:
+            models.append(dym_parser.parse_file(str(d), template_registry=registry))
+        except Exception as exc:
+            print(f"解析失败: {d}: {type(exc).__name__}: {exc}", file=sys.stderr)
+    return models, 0
+
+
+def _cmd_bridge(args: argparse.Namespace) -> int:
+    """阶段3：把元数据插件 ClassName 桥接到源码 .java，产出桥接可信度报告。"""
+    from ..ingest import scanner
+    from ..bridge import linker
+    from ..metadata.template_loader import TemplateRegistry
+    from ..report import bridge_report
+
+    # 1) 源码侧：扫描项目根。
+    try:
+        scan_result = scanner.scan(args.source_root, follow_symlinks=args.follow_symlinks)
+    except FileNotFoundError as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return 2
+
+    # 2) 元数据侧：展开 dym/zip/目录 → MetaModel 列表。
+    registry = TemplateRegistry(args.template_dir) if args.template_dir else TemplateRegistry()
+    models, rc = _collect_models(args.meta, registry)
+    if rc:
+        return rc
+    if not models:
+        print("错误: 未解析出任何元数据表单（检查 dym/zip 输入）", file=sys.stderr)
+        return 2
+
+    # 3) 桥接。
+    result = linker.link(scan_result, models)
+
+    if args.json:
+        print(json.dumps(bridge_report.summary(result), ensure_ascii=False, indent=2))
+    else:
+        print(bridge_report.render(result, max_list=args.max_list))
+
+    # 退出码：有 project 插件却命中率为 0 时给非零，便于脚本判断桥接是否可信。
+    s = bridge_report.summary(result)
+    if s["project_plugin_total"] and s["hit_count"] == 0:
+        return 1
+    return 0
+
+
 # 仍未实现的占位子命令，列出来让骨架自描述、也避免 AI 误调不存在的命令。
 _PLANNED = [
-    ("bridge", "阶段3  元数据 ClassName ↔ 源码文件桥接"),
     ("report", "阶段4  项目地图 / 接手者理解报告"),
     ("java", "阶段5-7  Java 行为 / 字段路径 / 入库判断"),
     ("ask", "阶段9  自然语言问答（查 KB 取证）"),
@@ -243,6 +320,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="整包文本报告里最多列出的表单数（默认 50；全部见 --json）",
     )
     meta.set_defaults(func=_cmd_meta)
+
+    bridge = sub.add_parser(
+        "bridge",
+        help="阶段3：元数据 ClassName ↔ 源码 .java 桥接，产出桥接可信度报告",
+    )
+    bridge.add_argument("source_root", help="苍穹项目源码根目录")
+    bridge.add_argument(
+        "meta", nargs="+",
+        help="一个或多个元数据输入：.dym 文件、整包 .zip、或含 zip 的目录",
+    )
+    bridge.add_argument(
+        "--json", action="store_true", help="输出机器可读 JSON 而非文本报告"
+    )
+    bridge.add_argument(
+        "--template-dir",
+        help="继承根模板目录（含 bos_billtpl/bos_basetpl）；默认 samples/bos_temp",
+    )
+    bridge.add_argument(
+        "--follow-symlinks", action="store_true", help="扫源码时跟随符号链接（默认不跟随）"
+    )
+    bridge.add_argument(
+        "--max-list", type=int, default=30,
+        help="文本报告中每类清单最多列出条数（默认 30；全部见 --json）",
+    )
+    bridge.set_defaults(func=_cmd_bridge)
 
     return parser
 

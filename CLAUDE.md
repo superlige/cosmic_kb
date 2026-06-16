@@ -45,21 +45,27 @@
 ## 当前进度
 
 - ✅ 阶段 0（脚手架 + 资产复用）、阶段 1（源码摄取 + 解析可信度报告）已完成并人工验收。
-- ✅ **阶段 2（元数据解析 + 整包处理）已完成并人工验收**：三类 dym 统一解析为
-  `MetaModel`、hex oid 模板回填、整包双层 zip；`cosmic_kb meta <dym|zip>`；32 passed。
-- ⬜ **下一步：阶段 3（元数据 `<ClassName>` ↔ 源码桥接）** —— `bridge/linker.py`：
-  ClassName→源码文件、三态分类、多 ISV 前缀、桥接报告。
+- ✅ 阶段 2（元数据解析 + 整包处理）：三类 dym 统一解析为 `MetaModel`、hex oid 模板回填、
+  整包双层 zip；`cosmic_kb meta <dym|zip>`。
+- ✅ **阶段 3（元数据 `<ClassName>` ↔ 源码桥接）已完成并人工验收**：
+  `bridge/namespace.py`（源码 FQN 索引 + 前缀发现）+ `bridge/linker.py`（五态分类、孤儿
+  收录并标常量类）+ `report/bridge_report.py`；`cosmic_kb bridge <源码根> <dym|zip>`；
+  真实整包命中率 91.1%、孤儿 1075（常量 207 + 真孤儿 868）；59 passed。
+- ⬜ **下一步：阶段 4（知识图谱存储 + 项目地图 / 理解报告）** —— `graph/schema.sql` +
+  `store.py`（SQLite + FTS5 幂等重建）、`report/project_map.py`（按代码包前缀聚类模块）、
+  `report/overview.py`（接手者一键理解报告）。
 - 详细进度与每阶段"实现了什么 + 验收记录"见 `docs/阶段验收.md`。
 
 ## 常用命令（Windows / PowerShell）
 
 ```powershell
 pip install -e ".[parse,encoding,dev]"   # 装含解析+编码+测试的可编辑安装
-pytest -q                                # 跑测试（当前 32 passed）
+pytest -q                                # 跑测试（当前 59 passed）
 cosmic_kb --version                      # 版本
 cosmic_kb doctor                         # 资产体检（需 skill_assets/ok-cosmic-docs.db）
 cosmic_kb ingest "<项目源码根>"          # 阶段1：摄取 + 覆盖率/可信度报告（--json 可留档）
 cosmic_kb meta "<dym 或整包 zip>"        # 阶段2：解析元数据，分类计数报告/JSON 快照（--json）
+cosmic_kb bridge "<项目源码根>" "<dym|zip|目录>"  # 阶段3：ClassName↔源码桥接报告（--json）
 ```
 > 若 `cosmic_kb` 脚本入口不可用，等价用 `python -m cosmic_kb.cli.main ...`。
 
