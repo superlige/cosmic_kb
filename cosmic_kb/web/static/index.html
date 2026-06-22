@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cosmic KB · 字段级排障</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1>苍穹项目排障 · 字段级定位</h1>
+    <div class="searchbar">
+      <select id="mode" title="检索类型">
+        <option value="field">字段(按层级) → 谁改了它</option>
+        <option value="whois">类名/报错 → 绑在哪</option>
+        <option value="bill">单据标识 → 单据视图</option>
+      </select>
+      <input id="q" type="text" placeholder="单据.字段 / 单据.分录.字段 / 单据.分录.子分录.字段" autofocus />
+      <button id="go">查询</button>
+    </div>
+    <div id="hint" class="hint"></div>
+  </header>
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="overview">概览 · 信任度</button>
+    <button class="tab" data-tab="coverage">扫描可信度</button>
+    <button class="tab" data-tab="blind">盲区与隐藏入口</button>
+    <button class="tab" data-tab="modules">模块与重点单据</button>
+    <button class="tab" data-tab="result" id="tab-result-btn">搜索结果</button>
+  </nav>
+  <main>
+    <section id="tab-overview" class="tabpane card active"></section>
+    <section id="tab-coverage" class="tabpane card"></section>
+    <section id="tab-blind" class="tabpane card"></section>
+    <section id="tab-modules" class="tabpane card"></section>
+    <section id="tab-result" class="tabpane"></section>
+  </main>
+  <footer>仅本机 · 只读 · 数据来自 Cosmic KB（cosmic_kb build 落库）</footer>
+  <script src="/app.js"></script>
+</body>
+</html>

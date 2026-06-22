@@ -34,8 +34,11 @@ def summary(result: BridgeResult) -> dict[str, Any]:
     uniq_linked = {b.class_name for b in linked}
     uniq_missing = {b.class_name for b in missing}
 
-    # 孤儿按角色：constant=常量/标识类（喂阶段6/9），unknown=真孤儿（阶段4风险关注）。
+    # 孤儿按角色：plugin=继承插件基类却未绑定（重要信号）、constant=常量类、unknown=真孤儿。
     orphan_by_role = dict(Counter(o.role for o in result.orphans))
+    plugin_orphans = [o for o in result.orphans if o.role == "plugin"]
+    # 插件孤儿按命中的基类聚合，便于一眼看清"哪些类型的插件没被绑定"。
+    plugin_orphan_by_base = dict(Counter(o.plugin_base or "?" for o in plugin_orphans))
 
     return {
         "source_file_count": result.source_file_count,
@@ -55,6 +58,12 @@ def summary(result: BridgeResult) -> dict[str, Any]:
         "unique_missing_classes": len(uniq_missing),
         "orphan_count": len(result.orphans),
         "orphan_by_role": orphan_by_role,
+        "plugin_orphan_count": len(plugin_orphans),
+        "plugin_orphan_by_base": plugin_orphan_by_base,
+        "plugin_orphans": [
+            {"fqn": o.fqn, "relpath": o.relpath, "plugin_base": o.plugin_base}
+            for o in plugin_orphans
+        ],
         "plugin_type_counts": dict(Counter(b.plugin_type for b in result.bindings)),
         "code_prefixes": result.code_prefixes,
         "meta_prefixes": result.meta_prefixes,
@@ -135,7 +144,8 @@ def render(result: BridgeResult, *, max_list: int = 30) -> str:
     obr = s["orphan_by_role"]
     lines.append(
         f"  孤儿类(未被绑定)        : {s['orphan_count']}"
-        f"   （常量类 {obr.get('constant', 0)} / 真孤儿 {obr.get('unknown', 0)}）"
+        f"   （插件类 {obr.get('plugin', 0)} / 常量类 {obr.get('constant', 0)}"
+        f" / 真孤儿 {obr.get('unknown', 0)}）"
     )
     lines.append("")
     lines.append("插件按归属: " + _fmt_counter(s["plugin_type_counts"]))
@@ -170,12 +180,25 @@ def render(result: BridgeResult, *, max_list: int = 30) -> str:
         for b in s["linked_by_name"][:max_list]:
             lines.append(f"    - {b['class_name']} → {b['source_relpath']}")
 
+    # 插件孤儿：继承苍穹插件基类却无元数据绑定 —— 死代码/元数据未给全的重要信号，重点列。
+    if s["plugin_orphans"]:
+        lines.append("")
+        n = min(max_list, len(s["plugin_orphans"]))
+        lines.append(
+            f"⚠ 继承插件基类却未被绑定 {len(s['plugin_orphans'])} 个（前 {n}）: "
+            + _fmt_counter(s["plugin_orphan_by_base"], limit=8)
+        )
+        for o in s["plugin_orphans"][:max_list]:
+            lines.append(f"    - {o['fqn']}  ({o['plugin_base']})")
+        if len(s["plugin_orphans"]) > max_list:
+            lines.append(f"    …… 另有 {len(s['plugin_orphans']) - max_list} 个（--json 看全部）")
+
     # 孤儿类样本（常量类标注 [const]，与真孤儿区分；常量类喂阶段6/9、不算阶段4风险）
     if result.orphans:
         lines.append("")
         lines.append(f"孤儿类样本（共 {len(result.orphans)}，前 {min(max_list, len(result.orphans))}）:")
         for o in result.orphans[:max_list]:
-            tag = " [const]" if o.role == "constant" else ""
+            tag = {"constant": " [const]", "plugin": " [plugin]"}.get(o.role, "")
             lines.append(f"    - {o.fqn}{tag}  ({o.relpath})")
         if len(result.orphans) > max_list:
             lines.append(f"    …… 另有 {len(result.orphans) - max_list} 个（--json 看全部）")

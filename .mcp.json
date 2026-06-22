@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "cosmic_kb": {
+      "command": "python",
+      "args": ["-m", "cosmic_kb.cli.main", "mcp", "--db", "cosmic_kb.db"],
+      "env": {}
+    }
+  }
+}

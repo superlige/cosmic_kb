@@ -25,6 +25,7 @@ from pathlib import Path
 from . import dym_io
 from .model import (
     ComboItem,
+    ConvertInfo,
     MetaEntity,
     MetaField,
     MetaModel,
@@ -55,6 +56,7 @@ _FORM_TYPE_BY_MODEL = {
     "WidgetFormModel": "widget",
     "ParameterFormModel_bill": "param",
     "ParameterFormModel_application": "param",
+    "ConvertRuleModel": "convert",
 }
 
 # 平台插件命名空间（无源码、由 SDK 文档解释）。设计决策：平台 = kd.bos.*；
@@ -323,6 +325,78 @@ def _parse_fields(
     return fields
 
 
+# ── 转换规则（ConvertRuleModel / .cr）────────────────────────────────
+def _parse_convert_rule(root: ET.Element, source_file: str | None) -> MetaModel:
+    """解析单据转换规则 `.cr`：单据上下游关系 + 单据转换插件。
+
+    结构（见 samples/trans 勘探）：
+        DeployMetadata/DesignMetas/DesignConvertRuleMeta
+          ├─ Id / Name / Isv / Enabled / SourceEntityNumber / TargetEntityNumber  ← 关系本体
+          └─ DataXml/ConvertRuleMetadata/RuleElement/ConvertRuleElement
+                ├─ Name                                       规则中文名
+                ├─ LinkEntityPolicy//{Source,Target}EntryKey  分录级映射（可无）
+                ├─ FieldMapPolicy//FieldMaps/FieldMapItem     字段映射（计数）
+                └─ PlugInPolicy//Plugins/CRPlugin/ClassName   单据转换插件（可多个）
+    转换规则不是表单（无实体/字段），故 entities/fields 留空，关系挂在 model.convert，
+    转换插件复用 MetaPlugin（plugin_type='convert'）走通用桥接。
+    """
+    meta = root.find(".//DesignConvertRuleMeta")
+    assert meta is not None  # 调用方已确认存在
+    rule_meta = meta.find(".//ConvertRuleMetadata")
+
+    # 关系本体：优先取 DesignConvertRuleMeta 直接子（外层稳定），缺则退 ConvertRuleMetadata。
+    def _wrap_text(tag: str) -> str | None:
+        return meta.findtext(tag) or (rule_meta.findtext(tag) if rule_meta is not None else None)
+
+    source_entity = _wrap_text("SourceEntityNumber")
+    target_entity = _wrap_text("TargetEntityNumber")
+    isv = _wrap_text("Isv")
+    rule_id = _wrap_text("Id")
+    enabled = _parse_bool(meta.findtext("Enabled"))
+
+    # 规则中文名、分录映射、字段映射条数、转换插件：在 ConvertRuleElement 内。
+    name: str | None = None
+    source_entry: str | None = None
+    target_entry: str | None = None
+    field_map_count = 0
+    plugins: list[MetaPlugin] = []
+    if rule_meta is not None:
+        for elem in rule_meta.iter("ConvertRuleElement"):
+            name = name or elem.findtext("Name")
+            source_entry = source_entry or elem.findtext(".//SourceEntryKey")
+            target_entry = target_entry or elem.findtext(".//TargetEntryKey")
+            field_map_count += sum(1 for _ in elem.iter("FieldMapItem"))
+            for cr in elem.iter("CRPlugin"):
+                cn = cr.findtext("ClassName")
+                if not cn:
+                    continue
+                plugins.append(MetaPlugin(
+                    class_name=cn,
+                    plugin_type="convert",
+                    source=_plugin_source(cn),  # type: ignore[arg-type]
+                    description=cr.findtext("Description") or cr.findtext("DisplayName"),
+                ))
+    name = name or _wrap_text("Name")
+
+    return MetaModel(
+        key=rule_id,                # 规则无独立编号，用 snowflake Id 作稳定键
+        name=name,
+        model_type=meta.findtext("ModelType") or "ConvertRuleModel",
+        form_type="convert",
+        isv=isv,
+        source_file=source_file,
+        plugins=plugins,
+        convert=ConvertInfo(
+            source_entity=source_entity,
+            target_entity=target_entity,
+            source_entry=source_entry,
+            target_entry=target_entry,
+            field_map_count=field_map_count,
+            enabled=enabled,
+        ),
+    )
+
+
 # ── 顶层入口 ────────────────────────────────────────────────────────
 def _first_child(elem: ET.Element | None) -> ET.Element | None:
     if elem is None:
@@ -337,6 +411,10 @@ def parse_element(
     source_file: str | None = None,
 ) -> MetaModel:
     """从已解析的 dym 根元素构建 MetaModel。"""
+    # 转换规则（.cr）走独立分支：它没有 DesignFormMeta/DesignEntityMeta，结构与三类表单不同。
+    if root.find(".//DesignConvertRuleMeta") is not None:
+        return _parse_convert_rule(root, source_file)
+
     design_form = root.find(".//DesignFormMeta")
     design_entity = root.find(".//DesignEntityMeta")
 

@@ -28,12 +28,14 @@ FieldLevel = Literal["header", "entry", "subentry", "unknown"]
 # ── 表单类型（form_type，归一 ModelType）────────────────────────────
 # 阶段 2 主攻 bill/basedata/dynamic 三类；整包里还会遇到报表/卡片/参数等其它
 # ModelType，如实标注（report/widget/param）而非含糊的 unknown，解不出才记 unknown。
+# convert = 转换规则（ConvertRuleModel）：不是表单，而是单据上下游关系，复用本模型承载
+# （见 ConvertInfo），区别在 form_type 与 model.convert 字段。
 FormType = Literal[
-    "bill", "basedata", "dynamic", "report", "widget", "param", "unknown"
+    "bill", "basedata", "dynamic", "report", "widget", "param", "convert", "unknown"
 ]
 
-# ── 插件归属（预留 writeback 反写插件分支，本阶段无样例，留接口）──────
-PluginType = Literal["form", "list", "op", "writeback", "unknown"]
+# ── 插件归属（writeback 反写插件 / convert 单据转换插件）──────────────
+PluginType = Literal["form", "list", "op", "writeback", "convert", "unknown"]
 
 # ── 插件来源 ────────────────────────────────────────────────────────
 PluginSource = Literal["project", "platform", "unknown"]
@@ -164,6 +166,33 @@ class MetaPlugin:
 
 
 @dataclass
+class ConvertInfo:
+    """转换规则（ConvertRuleModel / `.cr`）特有信息：单据上下游关系。
+
+    转换规则不是表单，没有实体/字段，本质是「源单据→目标单据」的一条 BOTP 关系，
+    可绑定单据转换插件（AbstractConvertPlugIn 子类，进 MetaModel.plugins，
+    plugin_type='convert'）。这里只承载关系本体与映射规模，插件走通用 plugins 桥接。
+    """
+
+    source_entity: str | None      # 源单据(上游) 标识（SourceEntityNumber）
+    target_entity: str | None      # 目标单据(下游) 标识（TargetEntityNumber）
+    source_entry: str | None = None  # 源分录 key（LinkEntityPolicy/SourceEntryKey），表头级转换为 None
+    target_entry: str | None = None  # 目标分录 key（LinkEntityPolicy/TargetEntryKey）
+    field_map_count: int = 0       # 字段映射条数（FieldMapItem 计数，规模线索）
+    enabled: bool | None = None    # 规则是否启用（Enabled）
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_entity": self.source_entity,
+            "target_entity": self.target_entity,
+            "source_entry": self.source_entry,
+            "target_entry": self.target_entry,
+            "field_map_count": self.field_map_count,
+            "enabled": self.enabled,
+        }
+
+
+@dataclass
 class MetaModel:
     """单个 dym 解析后的完整模型。"""
 
@@ -172,6 +201,9 @@ class MetaModel:
     model_type: str | None        # 原始 ModelType（BillFormModel/...）
     form_type: FormType           # 归一类型 bill/basedata/dynamic
     isv: str | None               # 元数据 ISV 标识（cqkd），仅作报告产物，不作定位依据
+    app_key: str | None = None    # 所属应用标识（appKey）；整包按目录回填，单 dym 为 None。
+    # appKey 是阶段 4 模块识别的主锚（平台应用级标识，不受开发者包路径风格影响），
+    # 比"代码包前缀"可靠 —— 见 docs/开发计划.md 阶段 4「模块识别（多信号）」。
     inherit_path: list[str] = field(default_factory=list)  # 继承链（根→直接父）
     entities: list[MetaEntity] = field(default_factory=list)
     fields: list[MetaField] = field(default_factory=list)
@@ -179,14 +211,16 @@ class MetaModel:
     operations: list[MetaOperation] = field(default_factory=list)
     source_file: str | None = None  # 来源 dym 路径（相对/绝对，便于追溯）
     warnings: list[str] = field(default_factory=list)  # 解析过程中的存疑提示
+    convert: "ConvertInfo | None" = None  # 仅 form_type=='convert' 时有值（单据上下游关系）
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "key": self.key,
             "name": self.name,
             "model_type": self.model_type,
             "form_type": self.form_type,
             "isv": self.isv,
+            "app_key": self.app_key,
             "inherit_path": self.inherit_path,
             "source_file": self.source_file,
             "entities": [e.to_dict() for e in self.entities],
@@ -195,3 +229,6 @@ class MetaModel:
             "plugins": [p.to_dict() for p in self.plugins],
             "warnings": self.warnings,
         }
+        if self.convert is not None:
+            d["convert"] = self.convert.to_dict()
+        return d

@@ -51,8 +51,12 @@ class Binding:
     note: str | None = None        # 降级/未命中原因，示可信度
 
 
-# 孤儿角色：constant=常量/标识定义类（喂阶段6/9，阶段4风险不计）；unknown=待定（真孤儿）。
-OrphanRole = Literal["constant", "unknown"]
+# 孤儿角色（未被任何元数据插件绑定的源码类的轻量标签）：
+#   plugin   = 继承了苍穹插件基类（传递闭包）的插件实现类，却无元数据绑定 —— 重要信号
+#              （死代码 / 元数据未给全），区别于普通 service/util。
+#   constant = 常量/标识定义类（喂阶段6/9，阶段4风险不计）。
+#   unknown  = 待定（真孤儿，阶段4风险关注）。
+OrphanRole = Literal["plugin", "constant", "unknown"]
 
 # 常量类信号（轻量、只认包名/类名，不解析字段体——那是阶段5/6）。
 #   包名段含 cons/const/...；或类名以 Const/Constant(s) 结尾。
@@ -63,8 +67,13 @@ _CONST_PKG_SEG = frozenset({"cons", "const", "consts", "constant", "constants"})
 _CONST_NAME_RE = re.compile(r"Const(?:ant)?s?$")
 
 
-def _orphan_role(simple: str, package: str | None) -> OrphanRole:
-    """按包名/类名给孤儿打轻量角色标签。命中常量信号→constant，否则 unknown。"""
+def _orphan_role(simple: str, package: str | None, plugin_base: str | None) -> OrphanRole:
+    """按继承/包名/类名给孤儿打轻量角色标签。
+
+    优先级：plugin（继承苍穹插件基类，最强信号）> constant（常量类）> unknown（真孤儿）。
+    """
+    if plugin_base:
+        return "plugin"
     if package:
         segs = {s.lower() for s in package.split(".")}
         if segs & _CONST_PKG_SEG:
@@ -82,6 +91,7 @@ class OrphanClass:
     relpath: str
     package: str | None
     role: OrphanRole = "unknown"
+    plugin_base: str | None = None  # role=='plugin' 时记命中的苍穹插件基类，便于核对
 
 
 @dataclass
@@ -149,10 +159,20 @@ def _external_reason(class_name: str | None, plugin_source: str) -> tuple[str, f
     return None
 
 
-def link(scan_result: "ScanResult", models: Iterable["MetaModel"]) -> BridgeResult:
-    """执行桥接：源码索引 × 元数据插件 → 分类绑定 + 孤儿 + 前缀。"""
+def link(
+    scan_result: "ScanResult",
+    models: Iterable["MetaModel"],
+    *,
+    index: "namespace.SourceIndex | None" = None,
+) -> BridgeResult:
+    """执行桥接：源码索引 × 元数据插件 → 分类绑定 + 孤儿 + 前缀。
+
+    index：可传入已建好的源码命名空间索引复用——阶段 4 的 build 流程会先建一次索引
+    同时喂桥接与模块识别，避免对成百上千文件重复解析（守红线「规模大」）。None 则自建。
+    """
     models = list(models)
-    index = namespace.build_index(scan_result)
+    if index is None:
+        index = namespace.build_index(scan_result)
 
     result = BridgeResult(
         source_file_count=len(index.units),
@@ -226,13 +246,17 @@ def link(scan_result: "ScanResult", models: Iterable["MetaModel"]) -> BridgeResu
         result.bindings.append(b)
 
     # 孤儿：所有源码顶层 FQN 中，未被任何绑定命中的。打轻量角色标签。
+    # 先做插件基类传递闭包：识别「继承了苍穹插件基类」的类型简单名（含经过项目中间基类）。
+    plugin_simple = namespace.resolve_plugin_classes(index)
     for unit in index.units:
         for fqn, simple in zip(unit.all_fqns, unit.all_types):
             if fqn not in bound_fqns:
+                base = plugin_simple.get(simple)
                 result.orphans.append(
                     OrphanClass(
                         fqn=fqn, relpath=unit.relpath, package=unit.package,
-                        role=_orphan_role(simple, unit.package),
+                        role=_orphan_role(simple, unit.package, base),
+                        plugin_base=base,
                     )
                 )
 

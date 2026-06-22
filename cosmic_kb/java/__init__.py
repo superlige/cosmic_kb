@@ -4,6 +4,8 @@
 识别插件类型、事件方法、字段读写、DynamicObject 路径、入库判断。
 遇到不认识的符号（kd.bos.*、SaveServiceHelper）一律当外部已知符号，用 SDK 目录解释，而非报错。
 
-计划模块：parser.py(阶段1)、plugin_classifier.py / event_extractor.py / field_access.py(阶段5)、
-path_tracer.py(阶段6)、persistence.py(阶段7)。
+模块：parser.py(阶段1，解析状态)、ast_index.py(AST 语义遍历)、constants.py(全局常量值表)、
+plugin_classifier.py / event_extractor.py / field_access.py(阶段5)、call_graph.py(阶段6 类内
+调用链)、persistence.py(阶段7 落库判定)、analyze.py(编排，产出 plugin_method / field_access)。
+跨类工具函数调用链追踪留待阶段6 后续（本轮类内，跨类标 unknown 留证据）。
 """

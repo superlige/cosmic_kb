@@ -23,14 +23,23 @@ parse = ["tree-sitter>=0.21", "tree-sitter-java>=0.21"]
 encoding = ["charset-normalizer>=3.0"]
 # 阶段 9：中文名↔标识模糊匹配候选
 fuzzy = ["rapidfuzz>=3.0"]
+# 段二接入：MCP 服务器（把取证命令暴露成 MCP 工具供 LLM 宿主调用）
+mcp = ["mcp>=1.0"]
 # 开发与验收
 dev = ["pytest>=7"]
 
 [project.scripts]
 cosmic_kb = "cosmic_kb.cli.main:main"
+cosmic_kb-mcp = "cosmic_kb.mcp.server:main"
 
 [tool.setuptools.packages.find]
 include = ["cosmic_kb*"]
+
+# 阶段4：graph/schema.sql 是 KB 建表脚本，需随包一起分发（非编辑安装也能读到）。
+# 阶段4.5：web/static/* 是本地 Web 前端，同理需随包分发。
+[tool.setuptools.package-data]
+"cosmic_kb.graph" = ["*.sql"]
+"cosmic_kb.web" = ["static/*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "cosmic_kb.__version__" }

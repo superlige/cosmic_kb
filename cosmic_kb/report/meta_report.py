@@ -138,17 +138,25 @@ def render_package(result: Any, *, max_list: int = 50) -> str:
     lines.append(f"按类型: {_fmt_counter(dict(ft))}")
     lines.append(f"按应用(appKey): {_fmt_counter({k or '?': v for k, v in apps.items()})}")
 
+    # 转换规则（单据上下游关系）单列——它不是表单，混进表单清单会误导。
+    converts = [e for e in result.ok_entries if e.model.form_type == "convert"]
+    forms = [e for e in result.ok_entries if e.model.form_type != "convert"]
+
     # 列出全部表单（量大时截断，但给出总数）。
     lines.append("")
-    lines.append(f"表单清单（前 {min(max_list, ok)} / 共 {ok}）:")
-    for e in result.ok_entries[:max_list]:
+    lines.append(f"表单清单（前 {min(max_list, len(forms))} / 共 {len(forms)}）:")
+    for e in forms[:max_list]:
         m = e.model
         lines.append(
             f"  {m.key or '?':<32} {m.name or '?':<20} "
             f"[{m.form_type}] 字段{len(m.fields)} 插件{len(m.plugins)}"
         )
-    if ok > max_list:
-        lines.append(f"  …… 另有 {ok - max_list} 个（用 --json 查看全部）")
+    if len(forms) > max_list:
+        lines.append(f"  …… 另有 {len(forms) - max_list} 个（用 --json 查看全部）")
+
+    if converts:
+        lines.append("")
+        lines.append(_render_convert_block(converts, max_list=max_list))
 
     if failed:
         lines.append("")
@@ -156,6 +164,24 @@ def render_package(result: Any, *, max_list: int = 50) -> str:
         for e in result.failed_entries[:20]:
             lines.append(f"    - {e.member}: {e.error}")
 
+    return "\n".join(lines)
+
+
+def _render_convert_block(converts: list, *, max_list: int = 50) -> str:
+    """转换规则（单据上下游关系）清单：源单据 → 目标单据 [转换插件数]。"""
+    lines: list[str] = []
+    n = len(converts)
+    with_plugin = sum(1 for e in converts if e.model.plugins)
+    lines.append(f"转换规则: {n} 条（含转换插件 {with_plugin} 条），单据上下游（前 {min(max_list, n)}）:")
+    for e in converts[:max_list]:
+        c = e.model.convert
+        src = (c.source_entity if c else None) or "?"
+        tgt = (c.target_entity if c else None) or "?"
+        pn = len(e.model.plugins)
+        ptag = f"  插件{pn}" if pn else ""
+        lines.append(f"  {src} → {tgt}  «{e.model.name or '?'}»{ptag}")
+    if n > max_list:
+        lines.append(f"  …… 另有 {n - max_list} 条（用 --json 查看全部）")
     return "\n".join(lines)
 
 
@@ -245,6 +271,7 @@ def package_summary(result: Any) -> dict[str, Any]:
                 "field_total": len(e.model.fields),
                 "plugin_total": len(e.model.plugins),
                 "entity_count": len(e.model.entities),
+                **({"convert": e.model.convert.to_dict()} if e.model.convert else {}),
             }
             for e in result.ok_entries
         ],

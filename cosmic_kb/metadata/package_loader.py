@@ -26,8 +26,9 @@ from .dym_parser import parse_element
 from .model import MetaModel
 from .template_loader import TemplateRegistry
 
-# 内层 metadata 目录下的 dym（排除多语言 .dymx）。
-_DYM_SUFFIX = ".dym"
+# 内层 metadata 目录下的元数据：dym（表单）+ cr（转换规则）。
+# 排除多语言资源 .dymx / .crx（本阶段不取）。
+_META_SUFFIXES = (".dym", ".cr")
 
 
 @dataclass
@@ -108,6 +109,10 @@ def _app_key_from_member(member: str) -> str | None:
     return None
 
 
+def _is_meta_member(name: str) -> bool:
+    return name.lower().endswith(_META_SUFFIXES)
+
+
 def _iter_inner_zips(outer: zipfile.ZipFile):
     """产出外层 zip 里 dm/ 下的内层 zip 字节。"""
     for name in outer.namelist():
@@ -139,13 +144,20 @@ def load_package(
                 result.manifest = _parse_manifest(outer.read(name))
                 break
 
-        # 2) 收集内层所有 dym 成员（先列清单，便于报总数/进度）。
-        pending: list[tuple[bytes, str]] = []  # (dym 字节, 成员路径)
+        # 2) 收集内层所有元数据成员（dym 表单 + cr 转换规则），先列清单便于报总数/进度。
+        pending: list[tuple[bytes, str]] = []  # (元数据字节, 成员路径)
         for _inner_name, inner_bytes in _iter_inner_zips(outer):
             with zipfile.ZipFile(io.BytesIO(inner_bytes)) as inner:
                 for member in inner.namelist():
-                    if member.lower().endswith(_DYM_SUFFIX):
+                    if _is_meta_member(member):
                         pending.append((inner.read(member), member))
+
+        # 2b) 单层 zip 兜底：无双层 dm 结构（如单独导出的 metadata/ 再打包，见 samples/trans）
+        # 时，直接扫外层 zip 自身的 dym/cr 成员，避免整包零产出。
+        if not pending:
+            for member in outer.namelist():
+                if _is_meta_member(member):
+                    pending.append((outer.read(member), member))
 
         total = len(pending) if limit is None else min(limit, len(pending))
         for idx, (dym_bytes, member) in enumerate(pending):
@@ -158,6 +170,9 @@ def load_package(
                 entry.model = parse_element(
                     root, template_registry=registry, source_file=member
                 )
+                # 回填 appKey —— 它是阶段 4 模块识别的主锚，须随 model 一起流转，
+                # 不能在 _collect_models 扁平化（丢弃 PackageEntry）时丢失。
+                entry.model.app_key = app_key
             except Exception as exc:  # 单个 dym 出错不拖垮整包
                 entry.error = f"{type(exc).__name__}: {exc}"
             result.entries.append(entry)

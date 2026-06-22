@@ -15,3 +15,6 @@ comic-understand-long/.cosmic-understand/ok-cosmic.json
 # 验收 / 运行临时产物
 coverage.json
 coverage.jso
+
+# KB 是建库产物（cosmic_kb build 可重建的 SQLite 二进制），不入库
+*.db
