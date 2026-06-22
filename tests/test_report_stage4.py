@@ -181,7 +181,7 @@ def test_cli_build_and_report(tmp_path: Path):
         rc = main(["build", str(tmp_path), str(dym), "--db", str(db)])
     assert rc == 0
     assert db.is_file()
-    assert "KB 已重建" in buf.getvalue()
+    assert "KB 已建好" in buf.getvalue()
 
     # report overview --json（读 KB）
     buf = io.StringIO()

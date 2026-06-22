@@ -250,7 +250,43 @@ def _cmd_bridge(args: argparse.Namespace) -> int:
     return 0
 
 
-DEFAULT_DB = "cosmic_kb.db"
+DEFAULT_DB = "cosmic_kb.db"  # KB 文件默认名（随项目源码根落盘，便于「就近发现」）
+
+
+def _discover_db(start: Path | None = None) -> Path | None:
+    """从 start（默认 cwd）向上逐级查找 DEFAULT_DB，像 git 找 `.git`。
+
+    让用户 cd 进被分析项目（或其任意子目录）后，读类命令无需 --db 即就近用对 KB。
+    多项目场景下每个 KB 都随自己源码树落盘，互不干扰。
+    """
+    cur = (start or Path.cwd()).resolve()
+    for d in (cur, *cur.parents):
+        cand = d / DEFAULT_DB
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _resolve_db(args: argparse.Namespace) -> str:
+    """统一解析 KB 路径。优先级：--db > COSMIC_KB_DB > 建库随源码根 > 向上发现 > cwd 兜底。
+
+    设计目标（多项目支持·方案A）：一项目一 KB、各随源码树落盘 → 永不互相覆盖；
+    cd 进项目目录即自动就近发现，免去每次手敲 --db。
+    """
+    if getattr(args, "db", None):  # 1) 用户显式指定，最高优先级
+        return str(args.db)
+    env = os.environ.get("COSMIC_KB_DB")  # 2) 环境变量（MCP 宿主/脚本常用）
+    if env:
+        return env
+    src = getattr(args, "source_root", None)
+    if getattr(args, "creating", False) and src:  # 3) build：随源码根落盘
+        return str(Path(src) / DEFAULT_DB)
+    found = _discover_db()  # 4) 读类命令：从 cwd 向上就近发现
+    if found:
+        return str(found)
+    if src:  # 5) 读类命令「KB 缺失→临时重建」兜底：落到源码根，与 build 一致
+        return str(Path(src) / DEFAULT_DB)
+    return DEFAULT_DB  # 6) 最终兜底：cwd/cosmic_kb.db（向后兼容老用法）
 
 
 def _build_kb(args: argparse.Namespace, db_path: str) -> tuple[dict | None, int]:
@@ -293,13 +329,13 @@ def _cmd_build(args: argparse.Namespace) -> int:
     counts, rc = _build_kb(args, args.db)
     if rc:
         return rc
-    print(f"✅ KB 已重建: {args.db}")
+    print(f"✅ KB 已建好: {args.db}")
     order = ["module", "form", "entity", "field", "plugin", "convert_rule", "operation",
              "source_class", "binding", "plugin_method", "field_access", "coarse_field_hit",
              "edge", "search"]
     print("  " + "  ".join(f"{k}={counts[k]}" for k in order if k in counts))
-    suffix = f" --db {args.db}" if args.db != DEFAULT_DB else ""
-    print(f"  下一步: cosmic_kb trace <字段标识>{suffix}   或  cosmic_kb web{suffix}")
+    print("  下一步: 在该项目目录下直接  cosmic_kb trace <字段标识>   （自动就近发现此 KB）")
+    print(f"          或在任意目录    cosmic_kb trace <字段标识> --db {args.db}")
     return 0
 
 
@@ -498,10 +534,8 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
     from ..graph import store
     from ..mcp import server as mcp_server
 
-    # 工具内部按 COSMIC_KB_DB 开库；这里把 --db 传过去，缺省与 DEFAULT_DB 一致。
-    os.environ.setdefault("COSMIC_KB_DB", args.db)
-    if args.db != DEFAULT_DB:
-        os.environ["COSMIC_KB_DB"] = args.db
+    # 工具内部按 COSMIC_KB_DB 开库；args.db 已由 _resolve_db 解析为具体路径，直接注入。
+    os.environ["COSMIC_KB_DB"] = args.db
     if not store.kb_exists(args.db):
         print(
             f"错误: KB 不存在或版本不符: {args.db}\n"
@@ -605,7 +639,10 @@ def build_parser() -> argparse.ArgumentParser:
         "meta", nargs="+",
         help="一个或多个元数据输入：.dym 文件、整包 .zip、或含 zip 的目录",
     )
-    build.add_argument("--db", default=DEFAULT_DB, help=f"KB 文件路径（默认 {DEFAULT_DB}）")
+    build.add_argument(
+        "--db", default=None,
+        help=f"KB 文件路径（默认随源码根落盘 <源码根>/{DEFAULT_DB}）",
+    )
     build.add_argument(
         "--template-dir",
         help="继承根模板目录（含 bos_billtpl/bos_basetpl）；默认 samples/bos_temp",
@@ -613,7 +650,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument(
         "--follow-symlinks", action="store_true", help="扫源码时跟随符号链接（默认不跟随）"
     )
-    build.set_defaults(func=_cmd_build)
+    build.set_defaults(func=_cmd_build, creating=True)
 
     report = sub.add_parser(
         "report", help="阶段4：项目地图 / 接手者理解报告（读 KB）",
@@ -623,7 +660,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     def _add_report_common(p: argparse.ArgumentParser) -> None:
         """report 子命令共用参数：--db 读 KB；可选 --source-root/--meta 用于 KB 缺失时临时重建。"""
-        p.add_argument("--db", default=DEFAULT_DB, help=f"KB 文件路径（默认 {DEFAULT_DB}）")
+        p.add_argument(
+            "--db", default=None,
+            help=f"KB 文件路径（默认从当前目录向上就近发现 {DEFAULT_DB}）",
+        )
         p.add_argument("--json", action="store_true", help="输出机器可读 JSON 而非文本报告")
         p.add_argument(
             "--max-list", type=int, default=20,
@@ -696,7 +736,10 @@ def build_parser() -> argparse.ArgumentParser:
     web = sub.add_parser(
         "web", help="阶段4.5：本地 Web 展示项目地图/理解报告（仅本机 localhost，读 KB）",
     )
-    web.add_argument("--db", default=DEFAULT_DB, help=f"KB 文件路径（默认 {DEFAULT_DB}）")
+    web.add_argument(
+        "--db", default=None,
+        help=f"KB 文件路径（默认从当前目录向上就近发现 {DEFAULT_DB}）",
+    )
     web.add_argument("--host", default="127.0.0.1", help="绑定地址（默认 127.0.0.1，仅本机可达）")
     web.add_argument("--port", type=int, default=8765, help="端口（默认 8765）")
     web.add_argument("--open", action="store_true", help="启动后自动用默认浏览器打开")
@@ -715,7 +758,10 @@ def build_parser() -> argparse.ArgumentParser:
     mcp = sub.add_parser(
         "mcp", help="段二接入：起 MCP 服务器，让 LLM 宿主挂 Skill 后调 ask/trace/bill 等取证工具",
     )
-    mcp.add_argument("--db", default=DEFAULT_DB, help=f"KB 文件路径（默认 {DEFAULT_DB}）")
+    mcp.add_argument(
+        "--db", default=None,
+        help=f"KB 文件路径（默认从当前目录向上就近发现 {DEFAULT_DB}）",
+    )
     mcp.set_defaults(func=_cmd_mcp)
 
     return parser
@@ -727,6 +773,9 @@ def main(argv: list[str] | None = None) -> int:
     if not getattr(args, "command", None):
         parser.print_help()
         return 0
+    # 多项目支持：把 --db 缺省解析为「随源码根/就近发现」的具体路径（无 db 属性的命令跳过）。
+    if "db" in vars(args):
+        args.db = _resolve_db(args)
     return args.func(args)
 
 
