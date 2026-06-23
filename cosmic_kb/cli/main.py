@@ -36,21 +36,19 @@ if os.name == "nt":
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:
     print(f"# cosmic_kb {__version__}")
-    print(f"# project root: {_assets.PROJECT_ROOT}")
     print("")
 
     statuses = _assets.check_assets()
     for status in statuses:
-        print(f"{status.label:<8}{status.name:<18}{status.path}")
+        print(f"{status.label:<10}{status.name:<20}{status.detail}")
 
-    missing = [s for s in statuses if not s.present]
+    # 只有**非可选**资产缺失才算体检失败（ok-cosmic-docs.db 运行期暂未消费，缺它不阻断）。
+    missing = [s for s in statuses if not s.present and not s.optional]
     print("")
     if missing:
-        print(f"缺失资产 {len(missing)} 项。")
-        if any(s.name == "ok-cosmic-docs.db" for s in missing):
-            print("提示：把 ok-cosmic-docs.db 放到 skill_assets/ 下以启用 SDK 文档查询。")
+        print(f"缺失关键资产 {len(missing)} 项（随包数据应已就位，缺失多为安装损坏）。")
         return 1
-    print("所有关键资产就位。")
+    print("关键资产就位。")
     return 0
 
 
@@ -487,6 +485,30 @@ def _cmd_bill(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_calls(args: argparse.Namespace) -> int:
+    """方法出向调用导航：类全限定名 + 方法名 → 该方法调用的项目内方法（目标类/文件/行）。"""
+    from ..graph import store
+    from ..report import method_calls
+
+    db, rc = _ensure_kb(args)
+    if rc:
+        return rc
+    conn = store.open_kb(db)
+    try:
+        rd = method_calls.method_calls(
+            conn, args.class_fqn, args.method, source_root=getattr(args, "source_root", None))
+        if args.json:
+            print(json.dumps(rd, ensure_ascii=False, indent=2))
+        else:
+            print(method_calls.render_method_calls(rd, max_list=args.max_list))
+        if not rd.get("found"):
+            # 类/方法歧义有候选 → 退出码 3（同 ask，提示"再问一轮"）；纯未命中 → 2。
+            return 3 if rd.get("candidates") else 2
+    finally:
+        conn.close()
+    return 0
+
+
 def _cmd_ask(args: argparse.Namespace) -> int:
     """阶段9：自然语言提问 → 确定性证据包（NL→意图→查 KB→Context Builder）。"""
     from ..graph import store
@@ -720,6 +742,15 @@ def build_parser() -> argparse.ArgumentParser:
     bill.add_argument("bill", help="单据标识，如 cqkd_assetcard")
     _add_report_common(bill)
     bill.set_defaults(func=_cmd_bill)
+
+    # ── 方法出向调用导航：该方法调了项目内哪些方法、各在哪个文件（供大模型接着读源码下钻）──
+    calls = sub.add_parser(
+        "calls", help="调用导航：类全限定名+方法名→该方法调用的项目内方法(目标类/文件/行)，供继续读源码下钻",
+    )
+    calls.add_argument("class_fqn", help="类全限定名（也可只给末段类名，歧义会列候选）")
+    calls.add_argument("method", help="方法名（重载多个会全部列出）")
+    _add_report_common(calls)
+    calls.set_defaults(func=_cmd_calls)
 
     # ── 阶段9：自然语言提问 → 确定性证据包（查 KB 取证，不调 LLM）─────────────
     ask = sub.add_parser(

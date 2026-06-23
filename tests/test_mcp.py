@@ -99,9 +99,34 @@ def test_open_raises_when_kb_missing(tmp_path: Path, monkeypatch):
 
 def test_tools_registry_matches():
     """TOOLS 注册表与公开 tool_* 函数一一对应（防漏注册）。"""
-    assert set(mcp_server.TOOLS) == {"ask", "trace", "bill", "coverage", "scan_compare"}
+    assert set(mcp_server.TOOLS) == {
+        "ask", "trace", "bill", "method_calls", "coverage", "scan_compare",
+        "cosmic_semantics"}
     for fn in mcp_server.TOOLS.values():
         assert callable(fn)
+
+
+def test_tool_cosmic_semantics_lists_topics():
+    """空 topic → 返回按组分桶的可选主题清单（不依赖 KB / mcp 包）。"""
+    got = mcp_server.tool_cosmic_semantics("")
+    assert got.get("status") == "need_topic"
+    assert got["available_topics"], "应能枚举随包语义主题"
+    assert isinstance(got["grouped"], dict)
+
+
+def test_tool_cosmic_semantics_reads_topic():
+    """命中 topic（文件名 stem）→ 返回单篇 markdown 全文。"""
+    got = mcp_server.tool_cosmic_semantics("anti-patterns")
+    assert "content" in got and got["content"].strip()
+    # 模糊到插件文档也应命中
+    assert "content" in mcp_server.tool_cosmic_semantics("plugin-base")
+
+
+def test_build_server_carries_instructions():
+    """语义下沉：装了 [mcp] 时 server 带非空 instructions（跨 agent 注入苍穹纪律）。"""
+    pytest.importorskip("mcp")
+    srv = mcp_server.build_server()
+    assert srv.instructions and "苍穹" in srv.instructions
 
 
 def test_cli_mcp_kb_missing(tmp_path: Path):

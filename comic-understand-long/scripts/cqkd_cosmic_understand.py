@@ -29,6 +29,24 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = SKILL_ROOT / ".cosmic-understand" / "config.json"
 DEFAULT_CONFIG_EXAMPLE = SKILL_ROOT / ".cosmic-understand" / "config.example.json"
 
+
+def _refs_root() -> Path:
+    """references/rules 已下沉进 cosmic_kb 包（docs/分发与多agent接入方案.md §2，单一源）。
+
+    优先从已安装的 `cosmic_kb.semantics` 取（含 references/ 与 rules/ 两子目录）；取不到
+    （未装包）才回退 skill 同级目录（老布局）。注意：本路由表里的 rel 形如 `references/...`、
+    `rules/...`，正好以这两目录的**父目录**为根拼接。
+    """
+    try:
+        from importlib.resources import files
+
+        return Path(str(files("cosmic_kb.semantics")))
+    except Exception:
+        return SKILL_ROOT
+
+
+REFS_ROOT = _refs_root()
+
 REFERENCE_TOPICS = {
     "attachment-api": "references/adv/attachment-api.md",
     "botp-convert": "references/adv/botp-convert.md",
@@ -200,8 +218,11 @@ def refs_read(root: Path, topic: str) -> int:
 def doctor() -> int:
     missing = []
     print(f"# Skill root: {SKILL_ROOT}")
+    print(f"# Refs root:  {REFS_ROOT}")
     for rel in REQUIRED_LOCAL_ASSETS:
-        path = SKILL_ROOT / rel
+        # references/ 与 rules/ 已下沉进包，按 REFS_ROOT 解析；scripts/.cosmic-understand 仍在 skill 下。
+        base = REFS_ROOT if rel.startswith(("references/", "rules/")) else SKILL_ROOT
+        path = base / rel
         status = "OK" if path.exists() else "MISSING"
         print(f"{status}\t{rel}")
         if not path.exists():
@@ -251,7 +272,7 @@ def main() -> int:
     if args.command == "refs":
         if args.refs_command == "list":
             return refs_list()
-        return refs_read(SKILL_ROOT, args.topic)
+        return refs_read(REFS_ROOT, args.topic)
     if args.command == "doctor":
         return doctor()
     if args.command == "scan-field":

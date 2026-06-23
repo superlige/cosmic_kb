@@ -21,7 +21,8 @@ BILL = SAMPLES / "bill" / "cqkd_assetcard.dym"
 BASEDATA = SAMPLES / "basedata" / "cqkd_bill_calculation.dym"
 FORM = SAMPLES / "form" / "cqkd_adjusttolcontract.dym"
 PACKAGE = SAMPLES / "appzip" / "cqkd_flasset-cqkd_assets-20260610221847.zip"
-TEMPLATE_DIR = SAMPLES / "bos_temp"
+# 继承根模板已随包分发（cosmic_kb/metadata/templates/），经 importlib.resources 定位。
+TEMPLATE_DIR = _assets.templates_root()
 
 needs_bill = pytest.mark.skipif(not BILL.exists(), reason="缺单据样例")
 needs_basedata = pytest.mark.skipif(not BASEDATA.exists(), reason="缺基础资料样例")

@@ -44,7 +44,7 @@ python -m venv .venv
 pip install -e ".[parse,encoding,fuzzy,mcp]"   # 见下表按需取舍
 
 cosmic_kb --version                            # 验证
-cosmic_kb doctor                               # 资产体检，应全 OK（含离线 SDK 文档库）
+cosmic_kb doctor                               # 资产体检：semantics/templates 应 OK（随包）；ok-cosmic-docs.db 为 OPTIONAL
 ```
 
 | 可选组 | 作用 | 建议 |
@@ -129,35 +129,89 @@ cosmic_kb web
 
 ---
 
-## 接 AI 大模型（可选）
+## 接入任意 AI agent（MCP）
 
-工具本身**不调 LLM**——确定性建库、确定性取证。要让大模型帮你做语义解释/排查建议时，走 **MCP**：
+工具本身**不调 LLM**——确定性建库、确定性取证。要让大模型帮你做语义解释/排查建议时，走 **MCP**——
+一次注册，**任意支持 MCP 的 agent 通用**（Claude Code / Claude Desktop / Cursor / Cline / Windsurf / Codex …）。
 
-```powershell
-cosmic_kb mcp        # 起 MCP 服务器（stdio）；项目根 .mcp.json 可被 Claude Code/Desktop 自动识别
-```
+它把 `ask / trace / bill / method_calls / coverage / scan_compare` 包成 MCP 工具（返回值与 CLI `--json`
+**同口径**，每次只回最小证据包，源码全文由大模型直接读本机文件），并额外暴露 `cosmic_semantics(topic)`
+回传苍穹领域知识（插件类型 / 事件时机 / SDK 用法 / 入库判断 / 反模式黑名单）。**苍穹纪律（三态置信度、
+不臆造、入库判断）随 MCP `instructions` 注入宿主系统提示**，故非 Claude agent 也能"带语义"作答，无需单独装 Skill。
 
-它把 `ask / trace / bill / coverage / scan_compare` 包成 MCP 工具交给 LLM 宿主调用，**返回值与 CLI `--json`
-同口径**。整库源码不出本机，每次只传最小证据包。语义规则见 [`comic-understand-long/SKILL.md`](comic-understand-long/SKILL.md)。
+### 使用者：把 agent 接到本工具的 MCP
+
+前提：已 `pip install` 本工具（拿到 `cosmic_kb-mcp` 命令），并已在你的苍穹项目目录 `cosmic_kb build` 出 KB。
+
+**启动命令**：`cosmic_kb-mcp`（stdio）。KB 路径优先级：环境变量 `COSMIC_KB_DB` > 启动目录就近向上发现
+`cosmic_kb.db` > 当前目录。多项目时**给每个项目一份配置、用 `COSMIC_KB_DB` 指到该项目的 KB** 最稳。
+
+- **Claude Code**：项目根已带 [`.mcp.json`](.mcp.json)，在该项目里启动 `claude` 自动识别、批准即用；
+  或 `claude mcp add cosmic_kb -- cosmic_kb-mcp`。
+- **Claude Desktop / Cursor / Cline / Windsurf / Continue**（通用 `mcpServers` JSON，填进各自的 MCP 配置文件）：
+
+  ```json
+  {
+    "mcpServers": {
+      "cosmic_kb": {
+        "command": "cosmic_kb-mcp",
+        "env": { "COSMIC_KB_DB": "D:\\你的项目源码根\\cosmic_kb.db" }
+      }
+    }
+  }
+  ```
+  > 各家配置文件位置：Claude Desktop=`claude_desktop_config.json`；Cursor=`.cursor/mcp.json`；
+  > Cline/Windsurf/Continue 见各自「MCP Servers」设置。若 `cosmic_kb-mcp` 不在 PATH，把 `command` 换成
+  > venv 里的绝对路径，或用 `"command": "python", "args": ["-m","cosmic_kb.cli.main","mcp","--db","<KB路径>"]`。
+
+- **Codex**（`~/.codex/config.toml`）：
+
+  ```toml
+  [mcp_servers.cosmic_kb]
+  command = "cosmic_kb-mcp"
+  env = { COSMIC_KB_DB = "D:\\你的项目源码根\\cosmic_kb.db" }
+  ```
+
+接好后直接问 agent「cqkd_amount 这个金额是谁改的」「这张单有哪些插件」「这个方法调了什么」，
+它会自动调 MCP 工具取证、带类·方法·行号·三态置信度作答。
 
 ---
 
-## 分发给同事
+## 分发给同事 / 用户（工具开发者视角）
 
-本工具靠目录布局定位资产（`skill_assets/`、`comic-understand-long/` 须为 `cosmic_kb/` 同级目录），
-不能当普通 wheel 装。用打包脚本一键出整包 zip（自带「安装说明.md」）：
+本工具已重构为**自包含包**（语义文档、模板等随包，见 [`docs/分发与多agent接入方案.md`](docs/分发与多agent接入方案.md)），
+可当普通 wheel 分发：
+
+**① 出 wheel（推荐，最干净）**
+
+```powershell
+pip install build
+python -m build --wheel                         # 产出 dist\cosmic_kb-<版本>-py3-none-any.whl（资产已随包）
+```
+
+把这个 `.whl` 发给对方，对方：
+
+```powershell
+python -m venv .venv; .venv\Scripts\Activate.ps1
+pip install "cosmic_kb-<版本>-py3-none-any.whl[parse,encoding,fuzzy,mcp]"
+cosmic_kb doctor                                # semantics/templates OK 即装好
+```
+
+**② 整包 zip 兜底（离线内网、对方要看/改源码时）**
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1
 ```
+产出 `dist\cosmic_kb_dist_v<版本>_<日期>.zip`（自带「安装说明.md」），解压后 `pip install -e .` 即可。
 
-产出 `dist\cosmic_kb_dist_v<版本>_<日期>.zip`，发给对方解压后按包内「安装说明.md」走即可。详见 [`scripts/`](scripts/)。
+> 9MB 离线 SDK 文档库 `ok-cosmic-docs.db` **不进 wheel**（运行期暂未消费）；需要时用环境变量
+> `COSMIC_KB_DOCS_DB` 指向。后续上 PyPI / `uvx` / `.mcpb` / Smithery 一键分发另见分发方案文档。
 
 ---
 
 ## 设计红线（贯穿全程）
 
-1. **本地优先**：纯本地建库取证；接大模型仅走 MCP 传最小证据，整库源码不出本机。
+1. **本地优先**：纯本地建库取证；接大模型走 MCP 传最小证据，并允许其直接读本机源码全文做完整理解。底线是 KB / 报告不上公网、Web 仅绑 `127.0.0.1`。
 2. **代码是野生的**：解析器**绝不依赖编译或依赖解析**，硬扛混合编码与多前缀。
 3. **规模大**：要性能、进度、缓存、增量。
 4. **信任优先**：覆盖率/可信度是一等功能。
@@ -174,8 +228,9 @@ powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1
 段一  本地确定性扫描器  cosmic_kb/（Python 包）
       摄取 → 元数据解析 → Java 静态分析 → 桥接 → SQLite KB（图谱+FTS5）+ 覆盖率/排障报告
                           ↓  KB 是两段之间的契约
-段二  AI 理解层  comic-understand-long/（苍穹理解 Skill，经 MCP 接入）
-      查 KB 取证 → 挂苍穹语义(references/rules) → 输出带证据的解释 / 排查建议
+段二  AI 理解层  任意 MCP agent（苍穹语义已下沉进包，经 MCP `instructions` + `cosmic_semantics` 注入）
+      查 KB 取证 → 取苍穹语义(cosmic_kb/semantics) → 输出带证据的解释 / 排查建议
+      （comic-understand-long/ 为 Claude Code 的 skill 增强入口，非必要）
 ```
 
 ---
@@ -192,12 +247,14 @@ cqkd_ai/
 │   ├── bridge/ graph/        #   元数据↔代码桥接 / SQLite 图谱
 │   ├── semantic/ context/    #   NL→意图 / Context Builder
 │   ├── report/               #   字段排障 / 单据钻取 / 覆盖率 / 扫描对比
-│   ├── web/ mcp/             #   本地 Web / MCP 服务器
-│   └── _assets.py            #   skill_assets 资产定位
-├── comic-understand-long/    # 段二：苍穹理解 Skill（SKILL.md / references / rules）
-├── skill_assets/             # 离线 SDK 文档库 ok-cosmic-docs.db
-├── scripts/                  # 分发打包脚本（make_dist.ps1 + 安装说明.md）
-├── tests/                    # pytest（169 passed）
+│   ├── web/ mcp/             #   本地 Web / MCP 服务器（含 cosmic_semantics + instructions）
+│   ├── semantics/            #   随包语义文档（references / rules，cosmic_semantics 取数源）
+│   ├── metadata/templates/   #   随包继承根模板（bos_billtpl / bos_basetpl，操作 oid 回填）
+│   └── _assets.py            #   资产定位（importlib.resources，随 wheel 走）
+├── comic-understand-long/    # Claude Code skill 增强入口（SKILL.md + scripts，语义已下沉进包）
+├── skill_assets/             # 离线 SDK 文档库 ok-cosmic-docs.db（可选，不进 wheel）
+├── scripts/                  # 整包兜底脚本（make_dist.ps1 + 安装说明.md）
+├── tests/                    # pytest（187 passed）
 ├── docs/                     # 项目企划 / 开发计划 / 阶段验收
 ├── samples/                  # 示例元数据
 └── vendor/                   # 上游 ok-cosmic 原件（参考）

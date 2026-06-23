@@ -334,7 +334,10 @@ function renderField(ft) {
       cls: !hasFilter(ft.filter) ? "active" : "",
     }];
     ft.occurrences.forEach((o) => {
-      const f = { form: o.form_key, entry: o.entity_key || null, level: o.level };
+      // entry 仅对分录/子分录有意义；表头/基础资料字段的 entity_key 存的是表头实体 key，
+      // 但 field_access 里表头 entry_key 恒为 None，传进去会匹配落空（与后端归一对齐）。
+      const isEntry = o.level === "entry" || o.level === "subentry";
+      const f = { form: o.form_key, entry: (isEntry && o.entity_key) || null, level: o.level };
       rows.push({
         cells: [
           esc(o.form_key) + (o.form_name ? `「${esc(o.form_name)}」` : ""),

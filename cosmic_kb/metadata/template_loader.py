@@ -29,8 +29,10 @@ _TEMPLATE_BY_MODEL: dict[str, str] = {
     # DynamicFormModel 的继承根 6fb46130… 暂未提供，dynamic 操作以 unknown 兜底。
 }
 
-# 模板默认搜索目录（验收用 samples/bos_temp；真实使用可由调用方覆盖）。
-DEFAULT_TEMPLATE_DIR = _assets.PROJECT_ROOT / "samples" / "bos_temp"
+# 模板默认搜索目录：随包分发的 cosmic_kb/metadata/templates/（经 importlib.resources 定位，
+# 装进 site-packages 也能读到）。调用方仍可传 template_dir 覆盖。本地文件系统安装下
+# files() 返回的就是 Path，支持下游 .is_dir()/.glob()。
+DEFAULT_TEMPLATE_DIR = _assets.templates_root()
 
 
 @dataclass

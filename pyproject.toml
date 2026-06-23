@@ -35,11 +35,16 @@ cosmic_kb-mcp = "cosmic_kb.mcp.server:main"
 [tool.setuptools.packages.find]
 include = ["cosmic_kb*"]
 
-# 阶段4：graph/schema.sql 是 KB 建表脚本，需随包一起分发（非编辑安装也能读到）。
-# 阶段4.5：web/static/* 是本地 Web 前端，同理需随包分发。
+# 随包数据（非 -e 编辑安装也能读到，是"自包含 MCP 包/uvx/.mcpb"的前提）：
+# - graph/schema.sql：KB 建表脚本（阶段4）
+# - web/static/*：本地 Web 前端（阶段4.5）
+# - semantics/references|rules：苍穹语义文档（cosmic_semantics 工具回传源，分发改造下沉进包）
+# - metadata/templates/*.dym：继承根模板（操作 oid 回填运行期依赖）
 [tool.setuptools.package-data]
 "cosmic_kb.graph" = ["*.sql"]
 "cosmic_kb.web" = ["static/*"]
+"cosmic_kb.semantics" = ["references/**/*.md", "rules/**/*.md"]
+"cosmic_kb.metadata" = ["templates/*.dym"]
 
 [tool.setuptools.dynamic]
 version = { attr = "cosmic_kb.__version__" }

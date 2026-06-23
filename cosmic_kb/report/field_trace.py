@@ -30,6 +30,13 @@ def field_trace(
     form_key: str | None = None, entry_key: str | None = None, level: str | None = None,
 ) -> dict[str, Any]:
     """追踪一个字段的全部插件读写 + 落库判定，按实体坐标分组。"""
+    # entry_key 仅对分录/子分录有意义：field_access 里表头/基础资料的 entry_key 恒为 None
+    # （见 schema「表头为 None」）。但 Web 的「字段定义坐标」菜单用 field 表的 entity_key 当
+    # entry 传进来——而 field 表对表头字段存的是表头实体 key（非 None，见 dym_parser）。若不
+    # 归一，表头钻取会用「表头实体 key」去匹配 entry_key=None 的记录而落空，精确桶为空却落到
+    # 「可能命中」，于是报「该精确坐标无确定命中」，与外层「全部坐标」的分组结果自相矛盾。
+    if level is not None and level not in ("entry", "subentry"):
+        entry_key = None
     java = json.loads(store.get_meta(conn, "java_analysis") or "{}")
 
     form_names = {r["key"]: r["name"] for r in conn.execute("SELECT key,name FROM form")}
@@ -324,6 +331,8 @@ def _fmt_access(r: dict[str, Any]) -> list[str]:
         f"  {persist}{cross}"
     )
     lines.append(f"        {r['via']}  {r['source_relpath']}:{r['line']}{res_flag}")
+    if r.get("plugin_fqn") and r.get("event_method"):
+        lines.append(f"        方法全文直接读源文件；项目内调用导航: calls {r['plugin_fqn']} {r['event_method']}")
     if len(r["path"]) > 1:
         lines.append(f"        调用链: {' → '.join(r['path'])}")
     if r["persist_reason"]:

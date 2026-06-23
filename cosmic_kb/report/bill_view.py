@@ -114,7 +114,7 @@ def render_bill(bv: dict[str, Any], *, max_list: int = 30) -> str:
 
     if bv["plugins"]:
         lines.append("")
-        lines.append("【插件清单】")
+        lines.append("【插件清单】（某事件方法调了项目内哪些方法：calls <类全限定名> <方法名>）")
         for p in bv["plugins"]:
             op = f" ←{p['operation_key']}" if p["operation_key"] else ""
             lines.append(f"  [{p['plugin_type']}] {p['class_name']} ({p['source']}){op}")

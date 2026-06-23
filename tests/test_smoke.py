@@ -43,10 +43,12 @@ def test_subpackages_importable():
         importlib.import_module(f"cosmic_kb.{name}")
 
 
-def test_assets_resolve_project_root():
-    """资产定位指向真实存在的 references 目录（已迁移）。"""
-    assert _assets.PROJECT_ROOT.is_dir()
-    assert _assets.REFERENCES_DIR.is_dir(), "references 应已迁移到 comic-understand-long/"
+def test_assets_resolve_via_resources():
+    """运行期资产经 importlib.resources 定位（不依赖 parents[1] 同级目录布局）。"""
+    topics = list(_assets.iter_reference_topics())
+    assert topics, "references/rules 应作为随包数据可枚举"
+    assert _assets.read_topic("anti-patterns"), "反模式黑名单应可读"
+    assert _assets.templates_root().joinpath("bos_billtpl.dym")
 
 
 def test_doctor_runs():
