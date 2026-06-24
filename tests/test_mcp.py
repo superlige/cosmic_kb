@@ -101,7 +101,7 @@ def test_tools_registry_matches():
     """TOOLS 注册表与公开 tool_* 函数一一对应（防漏注册）。"""
     assert set(mcp_server.TOOLS) == {
         "ask", "trace", "bill", "method_calls", "coverage", "scan_compare",
-        "cosmic_semantics"}
+        "dynamic_writes", "cosmic_semantics"}
     for fn in mcp_server.TOOLS.values():
         assert callable(fn)
 

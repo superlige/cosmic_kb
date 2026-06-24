@@ -27,9 +27,63 @@ INSTRUCTIONS = (
     "结论纪律：每条都要带 类·方法·行号 等证据，并标注 confirmed / likely / unknown 三态；"
     "缺保存链路一律判 unknown，**绝不臆造字段名/方法名/插件名**。源码全文请直接读本机源文件，"
     "取证工具只回最小证据包。\n"
-    "需要苍穹 SDK 语义、插件类型与事件时机、DynamicObject 路径、入库判断、幻觉名黑名单等领域"
-    "知识时，调 cosmic_semantics(topic)（空参先列可选主题）。"
+    "【动态写入】部分代码对运行时/配置决定的动态字段集做泛化读写（循环/拼接/外部常量），静态钉不出"
+    "具体字段。trace 结果里的 `dynamic_writers` 是**按方法去重的「该读方法」清单**（带 calls 导航 + "
+    "写入位置）：要把『谁改了 X』答全，就对清单里的方法逐个 calls/读本机源码，判定它是否真碰了 X（"
+    "不臆造）。要做全项目盲点审计或缩范围，调 dynamic_writes 并用 form_key/cause/class_fqn 过滤拉切片，"
+    "**别要全量逐行**（会撑爆上下文）。\n"
+    "【强制】凡需要解释『某插件/事件/操作在做什么』、判断『是否入库』、确认『插件类型或事件触发"
+    "时机』、或读到不认识的 kd.bos.* 等平台符号时，**必须先调 cosmic_semantics(topic) 取苍穹语义"
+    "再下结论**，不得仅凭读源码臆断时机与入库——这类领域语义模型易记错，是幻觉高发区。"
+    "（纯定位字段坐标 trace、纯调用链导航 method_calls 等不涉及语义解释的取证，无需先调"
+    " cosmic_semantics，避免空耗。）不确定该取哪一篇时，先 cosmic_semantics(\"\") 列清单——"
+    "每条都带『何时用』说明，按它挑主题名再取全文。"
 )
+
+
+# 主题 stem → 一行「何时用」。把原 SKILL.md「苍穹语义路由」表内化进 MCP，让任意 agent
+# 空参列清单时就知道「该翻哪本」，不再依赖未加载的 SKILL.md。
+# 这是相对随包文档的**第二份事实源**（已接受其轻微漂移代价）；新增/改名文档时同步这里。
+# 未列入的主题（如部分 sdk-*，名字自描述）走「只给名」回退，不强求每条都写。
+WHEN_TO_USE = {
+    # —— 插件类型（判断插件能力边界 / 事件触发时机时查）——
+    "plugin-form":        "表单界面：字段联动 propertyChanged、控件可见可用、页面赋值",
+    "plugin-bill":        "单据界面插件（非操作事务）",
+    "plugin-list":        "列表 / 批量操作",
+    "plugin-tree-list":   "树形列表",
+    "plugin-operation":   "操作/审核/保存/校验/删除等事务事件（beforeDoOperation、afterExecuteOperationTransaction…）",
+    "plugin-botp":        "下推 / 选单 / 转换（BOTP）",
+    "plugin-writeback":   "反写 / 回写源单",
+    "plugin-task":        "后台任务 / 定时调度",
+    "plugin-workflow":    "工作流审批节点",
+    "plugin-import":      "引入 / 导入",
+    "plugin-print":       "打印",
+    "plugin-openapi":     "WebApi / OpenApi 外部接口入口",
+    "plugin-report-data": "报表取数",
+    "plugin-report-form": "报表界面",
+    "plugin-base":        "封装层插件基类（优先于下方原生 plugin-* 兜底）",
+    # —— 进阶语义（理解代码意图 / DynamicObject 路径 / 入库判断时查）——
+    "operate-chain":      "保存/提交/审核链路语义、是否入库判断",
+    "botp-convert":       "下推来源追踪封装",
+    "query-dataset":      "查询 / 聚合 / 数据集",
+    "dynamic-object":     "DynamicObject 取值/路径/集合（同名字段串实体消歧）",
+    "entity-metadata":    "实体元数据 / 字段路径 / DBRoute",
+    "form-utils":         "表单控件 / 元数据读取",
+    "flex-prop":          "弹性域字段",
+    "attachment-api":     "附件",
+    "request-context":    "跨线程上下文传递",
+    "view-handler":       "视图 / 界面操作封装",
+    # —— 原生 SDK 兜底（看不懂某 kd.bos.* 符号时）——
+    "sdk-orm-access":     "ORM / QFilter / KSQL 查询",
+    "sdk-dynamic-object": "原生 DynamicObject API",
+    "sdk-entity-model":   "实体模型 / 数据结构",
+    "sdk-tx":             "事务 TX",
+    "sdk-id":             "主键 / ID 生成",
+    "sdk-lock":           "分布式锁",
+    "sdk-cache":          "缓存",
+    # rules
+    "anti-patterns":      "苍穹幻觉方法名/类名黑名单——不确定某 API 是否存在时必查",
+}
 
 
 def _open():
@@ -143,6 +197,30 @@ def tool_scan_compare() -> dict[str, Any]:
         conn.close()
 
 
+def tool_dynamic_writes(
+    form_key: str | None = None,
+    cause: str | None = None,
+    class_fqn: str | None = None,
+) -> dict[str, Any]:
+    """信任优先·全局「动态/未定位写入」审计：字段 key 钉不出（动态循环/拼接/外部常量/歧义常量）→
+    `trace` 按字段查不到的那些读写。**默认不回逐行**，按成因桶给计数 + **去重后的「该读方法」清单**
+    （每条：入口类全限定名 + 方法 + 多少处动态写 + 成因 + 物理写入位置 + `calls` 导航）——防上下文爆炸。
+
+    用法：通常先看 `trace` 结果里的「动态写入候选」方法清单；要全项目审计或缩范围时调本工具，
+    用 `form_key`（限某单据）/`cause`（dynamic-loop|concat|external-const|unknown|ambiguous|dynamic）/
+    `class_fqn`（限某类）过滤拉一个切片，再顺 `calls`/锚点**直接读本机源码**定性是否含目标字段。
+    确定性层不展开、不臆造（红线 #6）——具体碰哪些字段由你读源码判定。
+    """
+    from ..report import dynamic_writes
+
+    conn = _open()
+    try:
+        return dynamic_writes.summarize(
+            conn, form_key=form_key, cause=cause, class_fqn=class_fqn)
+    finally:
+        conn.close()
+
+
 def tool_cosmic_semantics(topic: str = "") -> dict[str, Any]:
     """苍穹领域语义文档查询：插件类型/事件时机/SDK 用法/DynamicObject 路径/入库判断/反模式黑名单。
 
@@ -163,8 +241,16 @@ def tool_cosmic_semantics(topic: str = "") -> dict[str, Any]:
     topics = [rel for rel, _ in _assets.iter_reference_topics()]
     grouped: dict[str, list[str]] = {}
     for rel in topics:
-        grouped.setdefault(rel.split("/", 1)[0], []).append(rel)
-    return {"status": "need_topic", "available_topics": topics, "grouped": grouped}
+        stem = rel.rsplit("/", 1)[-1]
+        hint = WHEN_TO_USE.get(stem, "")
+        line = f"{stem} — {hint}" if hint else stem  # 缺说明就只给名
+        grouped.setdefault(rel.split("/", 1)[0], []).append(line)
+    return {
+        "status": "need_topic",
+        "hint": "按『何时用』挑一个主题名（— 左边那个词），再 cosmic_semantics(topic) 取全文。",
+        "available_topics": topics,  # 扁平 rel 路径清单（精确取用 / 兼容旧调用方）
+        "grouped": grouped,
+    }
 
 
 # 工具名 → 纯逻辑函数（build_server 注册用，测试也按此遍历核对）。
@@ -175,6 +261,7 @@ TOOLS = {
     "method_calls": tool_method_calls,
     "coverage": tool_coverage,
     "scan_compare": tool_scan_compare,
+    "dynamic_writes": tool_dynamic_writes,
     "cosmic_semantics": tool_cosmic_semantics,
 }
 

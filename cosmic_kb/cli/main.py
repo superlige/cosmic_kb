@@ -436,6 +436,28 @@ def _cmd_scan_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_dynwrites(args: argparse.Namespace) -> int:
+    """信任优先：全局「动态/未定位写入」审计（字段 key 钉不出 → trace 按字段查不到）。"""
+    from ..graph import store
+    from ..report import dynamic_writes
+
+    db, rc = _ensure_kb(args)
+    if rc:
+        return rc
+    conn = store.open_kb(db)
+    try:
+        d = dynamic_writes.summarize(
+            conn, form_key=getattr(args, "form", None), cause=getattr(args, "cause", None),
+            class_fqn=getattr(args, "cls", None))
+        if args.json:
+            print(json.dumps(d, ensure_ascii=False, indent=2))
+        else:
+            print(dynamic_writes.render_dynamic_writes(d, max_list=args.max_list))
+    finally:
+        conn.close()
+    return 0
+
+
 def _cmd_trace(args: argparse.Namespace) -> int:
     """阶段5+6+7 旗舰：字段排障追踪（谁改了它·哪个事件函数·是否落库）。"""
     from ..graph import store
@@ -735,6 +757,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_report_common(scan_compare)
     scan_compare.set_defaults(func=_cmd_scan_compare)
+
+    dynwrites = sub.add_parser(
+        "dynwrites",
+        help="信任优先：全局动态/未定位写入审计（字段 key 钉不出→trace 按字段查不到，交段二大模型读源码定性）",
+    )
+    dynwrites.add_argument("--form", help="限定某单据 form_key")
+    dynwrites.add_argument(
+        "--cause", choices=["dynamic-loop", "concat", "external-const", "unknown",
+                            "ambiguous", "dynamic"],
+        help="限定成因桶")
+    dynwrites.add_argument("--cls", help="限定某类全限定名（入口插件类 或 实际所在类）")
+    _add_report_common(dynwrites)
+    dynwrites.set_defaults(func=_cmd_dynwrites)
 
     bill = sub.add_parser(
         "bill", help="单据钻取：操作集/插件/字段触达/桥接风险",

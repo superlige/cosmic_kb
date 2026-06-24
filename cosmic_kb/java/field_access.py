@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from . import ast_index as ax
+from .constants import KeyResolution
 
 if TYPE_CHECKING:
     from tree_sitter import Node
@@ -100,6 +101,11 @@ class _Env:
     # （`bill = this.writeBillToEntry(...)` 返回模型某分录行）由 analyze 按被调方法的「返回上下文」
     # 预解析后注入——否则 helper 造好行/集合再 return 给调用方的写入会整片判不出来源单据。
     local_seed: dict[str, tuple] = field(default_factory=dict)
+    # 方法内**迭代变量名**集合（for-each 行变量 / lambda 形参，含 map.forEach((k,v)->) 的 k）：
+    # 当字段 key 实参是其中之一，说明是「对运行时/配置决定的动态字段集做泛化写入」（钉不出唯一字段）。
+    iter_vars: frozenset[str] = frozenset()
+    # 局部变量名→其初始化表达式节点：用于判「拼接键」（`String setKey = CON.X + "_" + type`）。
+    local_inits: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -137,6 +143,9 @@ def analyze_method(
     if method_body is None:
         return [], {}
     model_vars, doc_ctx, coll_ctx = _build_contexts(method_body, env)
+    # 每方法注入：迭代变量集 + 局部变量初值表（供 null-key 写入按成因细分：动态循环/拼接键）。
+    env.iter_vars = frozenset(_iter_var_names(method_body))
+    env.local_inits = {lv.name: lv.init for lv in ax.iter_local_vars(method_body) if lv.init is not None}
     out: list[FieldAccess] = []
     for inv in ax.iter_invocations(method_body):
         rec = _classify_access(inv, model_vars, doc_ctx, coll_ctx, env)
@@ -534,6 +543,85 @@ def _foreach_pairs(body: "Node") -> list[tuple[str, str]]:
     return out
 
 
+def _iter_var_names(body: "Node") -> set[str]:
+    """方法内**迭代变量名**集合：for-each 行变量 + 所有 lambda 形参（含 `map.forEach((k,v)->)` 的 k）。
+
+    当字段 key 实参恰是其中之一，说明这是「循环遍历一个运行时/配置决定的字段集合做泛化读写」——
+    每轮 key 不同，静态钉不出唯一字段（如 `for(String f:coll) set(f,..)`、`map.forEach((k,v)->set(k,..))`）。
+    """
+    names = {row for row, _ in _foreach_pairs(body)}
+    stack = [body]
+    while stack:
+        n = stack.pop()
+        if n.type == "lambda_expression":
+            names.update(_lambda_param_names(n))
+        stack.extend(n.children)
+    return names
+
+
+def _concat_known_parts(node: "Node", env: "_Env") -> list[str]:
+    """从一个二元拼接表达式里收集**静态可知的段**：字符串字面量 + 能解析回字面值的常量引用。
+
+    供「拼接键」给出已知前缀（`CON.HANGUP_LATEST + "_" + type` → 已知段 [hangup_latest, _]），
+    帮段二大模型缩小阅读范围；运行时变量段（type）静态留空，不臆造。
+    """
+    parts: list[str] = []
+    has_string = [False]
+
+    def _walk(n: "Node") -> None:
+        if n.type == "string_literal":
+            has_string[0] = True
+            parts.append(ax.string_value(n) or "")
+            return                                  # 叶子，不再下钻
+        if n.type in ("identifier", "field_access", "scoped_identifier"):
+            kr = env.const.resolve(ax._text(n))     # 整体解析；命中即收，不下钻避免内层重复计
+            if kr.value:
+                parts.append(kr.value)
+            return
+        for c in n.children:                        # 按源码顺序遍历（不用 stack 反序）
+            _walk(c)
+
+    _walk(node)
+    return parts if has_string[0] else []
+
+
+def _refine_null_key(inv: ax.Invocation, kr: "KeyResolution | None", env: "_Env") -> "KeyResolution | None":
+    """把「解不出字段 key」的访问按成因细分 key_resolution（field_key 仍为 None，诚实不臆造）。
+
+    成因四态（处处置信度·红线 #4）：
+      · concat        —— 字段 key 由字符串拼接而成（`CON.X + "_" + v` 或局部变量持拼接结果）。
+      · dynamic-loop  —— key 是方法内迭代变量，循环写一个运行时/配置决定的字段集（泛化写入）。
+      · external-const—— key 是未命中常量表的 `UPPER_CONST`/`类.常量`（跨模块/外部常量）。
+      · unknown       —— 其余（多为小写局部变量），保持现状不强分。
+    已解析的（literal/constant/ambiguous）与无法归因的非拼接表达式原样返回（后者 DO 路径仍跳过）。
+    """
+    # 实参是表达式（既非字面量也非标识符）：只认「字符串拼接」，其余原样返回 None（DO 路径据此跳过）。
+    if kr is None:
+        arg = inv.args[0] if inv.args else None
+        if arg is not None and arg.type == "binary_expression":
+            known = _concat_known_parts(arg, env)
+            note = "拼接键，运行时拼接" + (f"（已知段 {'+'.join(known)}）" if known else "")
+            return KeyResolution(None, "concat", 0.3, note=note)
+        return None
+    if kr.kind != "unknown":          # literal / constant / ambiguous 不动
+        return kr
+    ident = ax.arg_identifier(inv, 0) or ""
+    last = ident.rsplit(".", 1)[-1]
+    if ident in env.iter_vars:
+        return KeyResolution(None, "dynamic-loop", 0.3,
+                             note=f"动态循环写入：迭代变量 {ident}，字段集由运行时/配置/元数据决定")
+    init = env.local_inits.get(ident)
+    if init is not None and init.type == "binary_expression":
+        known = _concat_known_parts(init, env)
+        if known:                     # 局部变量持拼接结果（`String setKey = CON.X + "_" + v`）
+            return KeyResolution(None, "concat", 0.3,
+                                 note=f"拼接键 {ident}（已知段 {'+'.join(known)}）")
+    if re.fullmatch(r"[A-Z][A-Z0-9_]+", last):
+        return KeyResolution(None, "external-const", 0.3,
+                             note=f"外部/跨模块常量 {ident}（不在扫描范围，未命中常量表）")
+    return kr                         # 小写局部变量等 → 保持 unknown
+
+
 def _is_model_receiver(object_text: str, model_vars: set[str]) -> bool:
     t = object_text.strip()
     return t.endswith("getModel()") or t in model_vars
@@ -550,7 +638,7 @@ def _classify_access(
     if name in _MODEL_WRITE or name in _MODEL_READ:
         if not _is_model_receiver(obj, model_vars):
             return None
-        kr = env.const.resolve_arg(inv, 0)
+        kr = _refine_null_key(inv, env.const.resolve_arg(inv, 0), env)
         is_write = name in _MODEL_WRITE
         if is_write:
             level = {2: "header", 3: "entry", 4: "subentry"}.get(inv.arg_count, "unknown")
@@ -564,8 +652,8 @@ def _classify_access(
         ctx = _resolve_do_ctx(obj, doc_ctx, coll_ctx, env)
         if ctx is None:
             return None
-        kr = env.const.resolve_arg(inv, 0)
-        if kr is None or kr.value is None and name == "getDynamicObjectCollection":
+        kr = _refine_null_key(inv, env.const.resolve_arg(inv, 0), env)
+        if kr is None:   # 既非字段 key、又非可归因的拼接/动态表达式 → 不记录（保持原行为）
             return None
         is_write = name in _DO_WRITE
         return _make(kr, ctx.level, ctx.entry_key, ctx.entity,

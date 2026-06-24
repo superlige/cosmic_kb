@@ -17,12 +17,40 @@ import json
 from typing import Any
 
 from ..graph import store
+from . import dynamic_writes
 
 # 排序权重：写优先于读；落库优先；置信度高优先。
 _PERSIST_RANK = {"yes": 0, "unknown": 1, "no": 2, "na": 3}
 _ACCESS_RANK = {"write": 0, "read": 1}
 _LEVEL_LABEL = {"header": "表头", "entry": "分录", "subentry": "子分录",
                 "basedata": "基础资料", "unknown": "未知层级"}
+# field_access 取数列（all_rows 与动态写入候选共用，避免列名漂移）。
+_FA_COLS = (
+    "form_key,field_key,level,entry_key,plugin_fqn,plugin_type,access_class,"
+    "event_method,event_phase,access,persists,persist_reason,via,line,path,"
+    "key_resolution,confidence,source_relpath,evidence"
+)
+# 动态写入候选的成因标签（key_resolution → 人读）。
+_CAUSE_LABEL = {
+    "dynamic-loop": "动态循环（遍历运行时/配置字段集）",
+    "concat": "拼接键（运行时拼接字段标识）",
+    "external-const": "外部/跨模块常量（不在扫描范围）",
+}
+
+
+def _enrich_rows(rows: list[dict[str, Any]], plugin_home: dict[str, list]) -> None:
+    """给 field_access 行补派生字段（插件简名/跨类/所属单据/跨单据），供 _fmt_access 复用。"""
+    for r in rows:
+        r["path"] = json.loads(r["path"]) if r["path"] else []
+        r["plugin_simple"] = (r["plugin_fqn"] or "").rsplit(".", 1)[-1]
+        r["access_simple"] = (r["access_class"] or "").rsplit(".", 1)[-1]
+        r["cross_class"] = bool(r["access_class"]) and r["access_class"] != r["plugin_fqn"]
+        homes = plugin_home.get(r["plugin_fqn"], [])
+        r["plugin_forms"] = homes
+        r["plugin_form_label"] = _home_label(homes)
+        # 跨单据修改：插件所属单据里有任意一个不等于本记录的来源单据（form_key）。
+        r["plugin_cross_form"] = bool(homes) and r["form_key"] is not None and \
+            all(h["form_key"] != r["form_key"] for h in homes)
 
 
 def field_trace(
@@ -63,24 +91,27 @@ def field_trace(
     # 取该字段的全部读写记录（不在 SQL 里按 level/entry 过滤——精确模式要在 Python 里分桶，
     # 把"层级/分录判不准"的写入归到「可能命中」而非直接丢弃，满足"不能遗漏"）。
     all_rows = [dict(r) for r in conn.execute(
-        "SELECT form_key,field_key,level,entry_key,plugin_fqn,plugin_type,access_class,"
-        "event_method,event_phase,access,persists,persist_reason,via,line,path,"
-        "key_resolution,confidence,source_relpath,evidence FROM field_access WHERE field_key=?",
-        (field_key,)).fetchall()]
+        f"SELECT {_FA_COLS} FROM field_access WHERE field_key=?", (field_key,)).fetchall()]
+
+    # ── 动态写入候选：字段 key 钉不出（动态循环/拼接/外部常量），但来源单据落在本字段所在单据上 ──
+    # 这些行 field_key 为空、按 key 查不到，却可能正改本字段——静态无法确认，留给段二大模型读源码定性。
+    # 范围按「与本字段同单据(form_key)」收窄，使大模型要读的方法有界且相关（红线 #6 两段式分工）。
+    scope_forms = {o["form_key"] for o in occurrences if o["form_key"]} | {
+        r["form_key"] for r in all_rows if r["form_key"]}
+    dyn_rows: list[dict[str, Any]] = []
+    if scope_forms:
+        ph = ",".join("?" * len(scope_forms))
+        dyn_rows = [dict(r) for r in conn.execute(
+            f"SELECT {_FA_COLS} FROM field_access WHERE field_key IS NULL AND access='write' "
+            f"AND key_resolution IN ('dynamic-loop','concat','external-const') "
+            f"AND form_key IN ({ph})", sorted(scope_forms)).fetchall()]
+
     # 插件所属单据：plugin_fqn 注册在哪张/哪些单据上（plugin 表为主，binding 表回落）。
     # 这就是「被另外的哪个元数据的什么插件改了」——字段在单据 A，却可能被注册在单据 B 的插件改。
-    plugin_home = _plugin_home_map(conn, {r["plugin_fqn"] for r in all_rows}, form_names)
-    for r in all_rows:
-        r["path"] = json.loads(r["path"]) if r["path"] else []
-        r["plugin_simple"] = (r["plugin_fqn"] or "").rsplit(".", 1)[-1]
-        r["access_simple"] = (r["access_class"] or "").rsplit(".", 1)[-1]
-        r["cross_class"] = bool(r["access_class"]) and r["access_class"] != r["plugin_fqn"]
-        homes = plugin_home.get(r["plugin_fqn"], [])
-        r["plugin_forms"] = homes
-        r["plugin_form_label"] = _home_label(homes)
-        # 跨单据修改：插件所属单据里有任意一个不等于本记录的来源单据（form_key）。
-        r["plugin_cross_form"] = bool(homes) and r["form_key"] is not None and \
-            all(h["form_key"] != r["form_key"] for h in homes)
+    plugin_home = _plugin_home_map(
+        conn, {r["plugin_fqn"] for r in all_rows} | {r["plugin_fqn"] for r in dyn_rows}, form_names)
+    _enrich_rows(all_rows, plugin_home)
+    _enrich_rows(dyn_rows, plugin_home)
     all_rows.sort(key=_row_sort_key)
 
     # ── 分桶：精确命中 / 可能命中(存疑) / 未定位单据 ──────────────────────
@@ -178,6 +209,25 @@ def field_trace(
         "locations": shown,
     }
 
+    # ── 动态写入候选：按用户查询坐标收窄（单据/层级）+ 按成因分桶 ──────────
+    dyn_scoped = dyn_rows
+    if form_key:
+        dyn_scoped = [r for r in dyn_scoped if r["form_key"] == form_key]
+    if level:   # 层级可对齐则对齐；层级判不出(unknown/None)的保留，不漏
+        dyn_scoped = [r for r in dyn_scoped if r["level"] in (level, "unknown", None)]
+    dyn_scoped.sort(key=lambda r: (r["key_resolution"], r["plugin_fqn"] or "", r["line"]))
+    # 折叠成「该读方法」清单（cap 10）——防大模型上下文爆炸：同方法写 N 个钉不出 key 的字段只读一次。
+    wl = dynamic_writes.build_method_worklist(dyn_scoped, cap=10)
+    dynamic_writers = {
+        "total": len(dyn_scoped),
+        "by_cause": {c: sum(1 for r in dyn_scoped if r["key_resolution"] == c)
+                     for c in ("dynamic-loop", "concat", "external-const")},
+        "total_methods": wl["total_methods"],
+        "methods": wl["methods"],
+        "capped": wl["capped"],
+    }
+    summary["dynamic_writers"] = len(dyn_scoped)
+
     note = None
     if not java.get("available", True):
         note = "⚠ tree-sitter 未启用（pip install -e .[parse]），字段级分析为空。"
@@ -204,6 +254,7 @@ def field_trace(
         "readers": readers,
         "summary": summary,
         "coarse": coarse,              # 粗精度扫描命中 + 逐处互证（与高精度并列）
+        "dynamic_writers": dynamic_writers,  # 同单据动态写入候选（钉不出字段，交段二大模型读源码定性）
         "java_available": java.get("available", True),
         "note": note,
     }
@@ -436,4 +487,31 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
         if extra > 0:
             lines.append(f"    …另有 {extra} 处未列出")
         lines.append("    注：盲点是候选非确诊，纯文本比对有误报，请跳源码核对。")
+
+    # 动态写入候选：同单据内字段 key 钉不出的写入（动态循环/拼接/外部常量）——可能正改本字段，
+    # 静态无法确认，交段二大模型顺锚点读源码定性是否含本字段。
+    dyn = ft.get("dynamic_writers") or {}
+    if dyn.get("total"):
+        bc = dyn.get("by_cause") or {}
+        lines.append("")
+        lines.append("─" * 72)
+        lines.append(
+            f"▼ 动态写入候选（本单据内字段 key 钉不出，可能正改本字段，需大模型读源码定性）："
+            f"{dyn['total']} 处 → {dyn.get('total_methods', 0)} 个方法"
+        )
+        lines.append(
+            "  成因: " + "、".join(
+                f"{_CAUSE_LABEL.get(c, c)} {bc.get(c, 0)}"
+                for c in ("dynamic-loop", "concat", "external-const") if bc.get(c)))
+        lines.append("  去这几个方法读源码，判定是否含本字段（按写入数降序）：")
+        for m in dyn.get("methods", [])[:max_list]:
+            cls = (m["class_fqn"] or "?").rsplit(".", 1)[-1]
+            lines.append(
+                f"  · {cls}.{m['method']}  ({m['count']} 处/{m['cause_label']})"
+                + (f"  {m['calls']}" if m.get("calls") else ""))
+            for w in m["writes_in"]:
+                lines.append(f"        写入位于 {w['class']}  {w['anchor']}")
+        if dyn.get("capped"):
+            lines.append(f"    …另有 {dyn['capped']} 个方法未列出（用 dynwrites --form 过滤、或 trace --json）")
+        lines.append("    注：这些写入静态钉不出具体字段，是否含本字段请让大模型按上面 calls/源码锚点读源码判定。")
     return "\n".join(lines)

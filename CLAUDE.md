@@ -85,6 +85,13 @@
   模型自己读）、**不列平台/外部/落库 sink 调用**（噪声）、**不做字段落库取证**（那是 `trace` 的
   本职）。接收者类型解不出 → 不收录（宁缺毋滥）。schema 不变 v9。四入口：CLI `calls` + MCP 工具
   `method_calls` + `ask` 意图 `method_calls` + `trace`/`bill` 跳转提示。**当前 180 passed。**
+- ✅ **阶段 10 增补·unknown 字段诚实分类 + 动态写入交段二读源码**（2026-06-24 拍板）：字段 key 钉不出的
+  写入（`field_access.field_key=None`，对 `trace` 隐形）按成因细分 `key_resolution`（`dynamic-loop`/`concat`
+  /`external-const`/`unknown`）——绝大多数是代码对运行时/配置/元数据决定的**动态字段集泛化写入**，静态钉
+  不出唯一字段，故确定性层**不解释/不展开/不调大模型**，只分类+收集导航证据，"碰哪些字段、是否含 X"交
+  段二大模型直接读源码（红线 #1/#4/#6）。`trace X` 折进「动态写入候选」段（按同单据限定范围）、全局
+  `dynwrites`（CLI + MCP `dynamic_writes`，form/cause/class 过滤）；二者一律**按 (入口类,事件方法) 去重成
+  「该读方法」清单**（cap 10 + calls 锚点）防上下文爆炸。schema 不变 v9。**当前 191 passed。**
 - 详细进度与每阶段"背景/目标/验收结论/命令"见 `docs/阶段验收.md`。
 
 ## 常用命令（Windows / PowerShell）
@@ -104,6 +111,7 @@ cosmic_kb calls "<类全限定名>" "<方法名>"        # 方法出向调用导
 cosmic_kb ask "<自然语言问题>"           # 阶段9：NL→意图→查 KB 取证（字段谁改的/单据钻取/插件解释/方法做了什么；消歧退出码3，--json 喂 Skill）
 cosmic_kb coverage                       # 信任优先·手段一：字段覆盖率（元数据为分母）+ 扫描质量分解
 cosmic_kb scan-compare                   # 信任优先·手段二：粗精度(源码字面量) vs 高精度(field_access)对比→疑似盲点/精度增量
+cosmic_kb dynwrites [--form/--cause/--cls] # 信任优先：字段 key 钉不出的读写（动态循环/拼接/外部常量/歧义/未识别）按「该读方法」去重列出，交段二大模型读源码定性（防爆上下文）
 cosmic_kb web                            # 本地浏览器排障（输字段→表格→跳源码；含「扫描可信度」页签：手段一+手段二）
 cosmic_kb mcp                            # 阶段10：起 MCP 服务器，把取证命令暴露成 MCP 工具供 LLM 宿主调用（项目根 .mcp.json 自动识别）
 ```
