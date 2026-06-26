@@ -63,6 +63,7 @@ class FieldEntry:
     entity_key: str | None
     level: str | None
     kind: str | None
+    field_type: str | None = None   # XML 标签名（MulBasedataField/BasedataField/...），判 getDynamicObjectCollection 取值语义的精确信号
 
 
 @dataclass(frozen=True)
@@ -156,9 +157,9 @@ class Lexicon:
         ]
         self.fields = [
             FieldEntry(r["key"], r["name"], r["form_key"], form_names.get(r["form_key"]),
-                       r["entity_key"], r["level"], r["kind"])
+                       r["entity_key"], r["level"], r["kind"], r["field_type"])
             for r in conn.execute(
-                "SELECT key,name,form_key,entity_key,level,kind FROM field")
+                "SELECT key,name,form_key,entity_key,level,kind,field_type FROM field")
             if r["key"]
         ]
         self.entities = [

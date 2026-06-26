@@ -54,6 +54,8 @@ INSTRUCTIONS = (
     "`field_names[key].tier`：unique/resolved 的 `names` 可直接照抄；**tier=ambiguous 表示多张单据有"
     "同名字段、本文件未解析到具体实体——别默认当前单据，按 note 顺调用链消歧**。"
     "未列出的 `<isv>_` 标识 resolve_fields 核对，绝不按命名惯例/拼音猜。"
+    "**`getDynamicObjectCollection(key)` 取分录行还是多选基础资料集合，取决于 key 是什么——"
+    "看坐标的 `field_type`/`access`（基础资料字段≠分录），别凭 API 名断定是分录。**"
 )
 
 
@@ -231,9 +233,11 @@ def tool_resolve_fields(keys: list[str]) -> dict[str, Any]:
     专治『读源码顺手核字段名』：批量传 key，回 `{"resolved": {key: [{...}] | null}}`。比 trace
     便宜得多（O(1) 打词典，只回名字+坐标，不查谁改了它），读一段代码碰到不认识的 `<isv>_xxx`
     就顺手批量核一次——命名惯例（`zjjnqk` 是租金还是资金？）不算证据，必须比对。
-    - 字段命中：`{kind:"field", name, form_key, entity_key, level, field_kind}`。
+    - 字段命中：`{kind:"field", name, form_key, entity_key, level, field_kind, field_type, access}`。
+      `access` 是派生取值语义：**多选基础资料字段（MulBasedataField）也用 `getDynamicObjectCollection()`
+      取选中的基础资料集合，不是分录行**——取分录还是基础资料取决于 key，别凭 API 名当分录。
     - 分录容器命中（读到 `getDynamicObjectCollection("cqkd_zdfl")` 这类**分录 key**）：
-      `{kind:"entry"/"subentry"/"header", name, form_key, level, parent_key}`。
+      `{kind:"entry"/"subentry"/"header", name, form_key, level, parent_key, access}`（access 标"分录容器"）。
     同一 key 跨多坐标（多分录各有定义、名字可能不同）→ 回 list 全摆出，**不替你选**，
     消歧靠你读代码时的实体上下文。**钉不出回 `null`——标 unknown，绝不臆造。**
     """
@@ -256,7 +260,8 @@ def tool_read_source(
     （含 `KEY_X = "cqkd_x"` 的字面值，它就在源码里），打元数据词典回真实中文名+坐标，并按本文件数据包
     来源做**归属消歧**（三档：unique/resolved 可照抄 `names`；**ambiguous=多单据同名、本文件未解析到实体，
     别默认当前单据，按 note 顺调用链消歧**）。引用字段中文名**照抄 `field_names`**，未列出的 `<isv>_` 标识
-    用 resolve_fields 核对，**绝不按命名惯例/拼音猜**。
+    用 resolve_fields 核对，**绝不按命名惯例/拼音猜**。坐标带 `field_type`/`access`：`getDynamicObjectCollection(key)`
+    取分录行还是多选基础资料集合取决于 key——基础资料字段（MulBasedataField）≠分录，**别凭 API 名断定是分录**。
     `start_line/end_line`（1 基含端点）可只读一段（大文件按区间读）；越界路径（../ 逃逸出源码根）会被拒。
     本工具只做"正确解码 + 字段名标注"，代码逻辑理解由你直接读返回的 `content`。
     """

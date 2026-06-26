@@ -22,6 +22,12 @@
 不替模型"理解代码/复述逻辑"（那是它直接读的本职），只做"正确解码 + 字段名标注 + 归属消歧"。**仍是引导
 非强制**：模型若坚持用原生 reader、连本工具都不调，host-agnostic 拦不住——见 docs/阶段验收.md 天花板记录。
 
+**防 host 截断（2026-06-27）**：MCP host 对序列化后的 tool result 整体砍尾部。早期 dict 把 `content`
+排在 `field_names` 之前、尾部正好是不可替代的标注——被砍的恰是该留的，模型退回猜名。现在两手：
+① **标注在前、源码垫底**——`content` 排到 dict 最末，被截断时牺牲可重读的源码而非标注；命中 key 超
+`max_keys` 的省略数提到顶层 `keys_omitted`（截断也能从头部看到）。② **坐标瘦身**——每条坐标只留标名/
+消歧必需字段、每个 key 的候选数封顶（`max_coords`），消化 ambiguous 档几十条同名候选平铺的体积大头。
+
 延续 report 包约定：dict 在前（供 --json/MCP），`render_*` 文本在后。
 """
 
@@ -74,19 +80,51 @@ def _distinct(values) -> list[str]:
     return out
 
 
+# 每个 key 最多内联多少条坐标（封顶防爆——ambiguous 档常几十条同名候选平铺，是 field_names 体积大头）。
+_MAX_COORDS = 8
+
+
+def _trim_coord(c: dict[str, Any]) -> dict[str, Any]:
+    """坐标瘦身：只留标名/消歧/取值语义必需字段，丢 entity_key/field_kind/parent_key 等纯体积字段。
+
+    保留 `field_type`+`access`（判 getDynamicObjectCollection 取值语义的载荷信号，短、必留）与
+    `resolved_lines`（resolved 档注入的本文件命中行号，消歧依据）。完整坐标见 resolve_fields。
+    """
+    out = {"kind": c.get("kind"), "name": c.get("name"),
+           "form_key": c.get("form_key"), "level": c.get("level")}
+    for opt in ("field_type", "access", "resolved_lines"):
+        if c.get(opt):
+            out[opt] = c[opt]
+    return out
+
+
+def _cap_coords(coords: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """裁剪每条坐标 + 候选数封顶。返回 (裁剪后列表, 被截断的剩余数)。"""
+    trimmed = [_trim_coord(c) for c in coords]
+    return trimmed[:_MAX_COORDS], max(0, len(trimmed) - _MAX_COORDS)
+
+
 def _classify_key(
     key: str, candidates: list[dict[str, Any]] | None,
     form_ctx: dict[str, dict[str, list[int]]],
 ) -> dict[str, Any] | None:
-    """把一个 key 的元数据候选 + 本文件解析结果，归为 unique / resolved / ambiguous 三档。"""
+    """把一个 key 的元数据候选 + 本文件解析结果，归为 unique / resolved / ambiguous 三档。
+
+    坐标统一走 `_cap_coords` 瘦身+封顶（防 field_names 体积爆掉被 host 截断）；超出封顶时
+    带 `coordinates_capped` 计数，note 提示全部坐标见 resolve_fields。
+    """
     if not candidates:
         return None   # 非元数据字段（token 命中但词典查不到）/ 钉不出 → 留空，不臆造
 
     forms = {c.get("form_key") for c in candidates if c.get("form_key")}
     # 同一单据内（含「字段 + 同名分录容器」双命中）：无跨单据歧义，照抄即可。
     if len(forms) <= 1:
-        return {"tier": "unique", "names": _distinct(c.get("name") for c in candidates),
-                "coordinates": candidates, "note": None}
+        coords, capped = _cap_coords(candidates)
+        out = {"tier": "unique", "names": _distinct(c.get("name") for c in candidates),
+               "coordinates": coords, "note": None}
+        if capped:
+            out["coordinates_capped"] = capped
+        return out
 
     # 跨多张单据有同名字段 → 用本文件 field_access 解析到的实体收敛。
     resolved_forms = form_ctx.get(key, {})
@@ -96,24 +134,33 @@ def _classify_key(
             c["resolved_lines"] = resolved_forms.get(c.get("form_key"), [])
         also = sorted({c.get("form_key") for c in candidates
                        if c.get("form_key") and c.get("form_key") not in resolved_forms})
-        return {
+        coords, capped = _cap_coords(matched)
+        out = {
             "tier": "resolved",
             "names": _distinct(c.get("name") for c in matched),
-            "coordinates": matched,
+            "coordinates": coords,
             "also_in_forms": also,
             "note": ("本文件 field_access 按数据包来源把此标识解析到上述单据；其余同名字段"
                      "未在本文件命中。" + (f"另有同名字段在：{', '.join(also)}。" if also else "")),
         }
+        if capped:
+            out["coordinates_capped"] = capped
+        return out
 
     # 多单据同名、本文件又没解析到具体实体 → 显式歧义，给消歧方向，绝不替选。
-    return {
+    coords, capped = _cap_coords(candidates)
+    out = {
         "tier": "ambiguous",
         "names": [],
-        "coordinates": candidates,
+        "coordinates": coords,
         "note": ("歧义：元数据有多个同名字段，本文件静态分析未把此标识解析到具体实体。归属取决于"
                  "接收变量来源（当前 dataEntity / loadSingle 加载的别的实体 / getAllSonList 等），"
                  "请顺调用链消歧，勿默认当前单据。"),
     }
+    if capped:
+        out["coordinates_capped"] = capped
+        out["note"] += f" 另有 {capped} 条同名坐标未列出，全部见 resolve_fields。"
+    return out
 
 
 def read_source(
@@ -162,10 +209,16 @@ def read_source(
     field_names = {k: _classify_key(k, raw.get(k), form_ctx) for k in keys}
 
     note = ("字段名按三档置信标注：✅ 直接照抄；⚠️ ambiguous 表示本文件未解析到具体实体、有多张单据同名，"
-            "需顺调用链消歧，勿默认当前单据。未列出的 `<isv>_` 标识用 resolve_fields 核对，勿按命名惯例猜。")
+            "需顺调用链消歧，勿默认当前单据。未列出的 `<isv>_` 标识用 resolve_fields 核对，勿按命名惯例猜。"
+            " getDynamicObjectCollection(key) 取分录行还是多选基础资料集合，取决于 key——看坐标 "
+            "field_type/access，勿凭 API 名断定是分录。"
+            " 注：`content`（源码正文）排在返回末尾——若 host 截断了它，重读更窄的 --lines 区间即可；"
+            "`field_names` 在前不会丢。")
     if capped:
-        note += f" 另有 {capped} 个命中 key 未标注（超 max_keys），按需 resolve_fields 补。"
+        note += f" 另有 {capped} 个命中 key 未标注（超 max_keys），见顶层 keys_omitted，按需 resolve_fields 补。"
 
+    # 字段顺序刻意安排：标注（field_names）+ keys_omitted 在前，content 垫底。
+    # host 砍尾部时牺牲的是可重读的源码，不可替代的字段标注存活（见模块 docstring「防 host 截断」）。
     return {
         "found": True,
         "relpath": relpath,
@@ -173,9 +226,10 @@ def read_source(
         "encoding": enc,
         "total_lines": total,
         "lines": sliced,
-        "content": body,
-        "field_names": field_names,   # {key: {tier, names, coordinates, note} | None}
+        "keys_omitted": capped,
+        "field_names": field_names,   # {key: {tier, names, coordinates, note, [coordinates_capped]} | None}
         "note": note,
+        "content": body,
     }
 
 
@@ -184,7 +238,9 @@ def _coord_line(key: str, c: dict[str, Any], *, mark: str, suffix: str = "") -> 
     form = c.get("form_key") or "?"
     lvl = _LEVEL_CN.get(c.get("level") or "", c.get("level") or "?")
     kind = "字段" if c.get("kind") == "field" else "容器"
-    return f"  {mark} {kind} {key}「{name}」 — {form} · {lvl}{suffix}"
+    ft = f" · {c['field_type']}" if c.get("field_type") else ""
+    access = f"  〔{c['access']}〕" if c.get("access") else ""
+    return f"  {mark} {kind} {key}「{name}」 — {form} · {lvl}{ft}{suffix}{access}"
 
 
 def render_read_source(data: dict[str, Any], *, max_list: int = 60) -> str:
@@ -205,6 +261,7 @@ def render_read_source(data: dict[str, Any], *, max_list: int = 60) -> str:
                 lines.append(f"  · {key}: null（非 KB 字段/钉不出，勿臆造）")
                 continue
             tier = info["tier"]
+            capped = info.get("coordinates_capped")
             if tier in ("unique", "resolved"):
                 for c in info["coordinates"][:max_list]:
                     rl = c.get("resolved_lines")
@@ -215,10 +272,12 @@ def render_read_source(data: dict[str, Any], *, max_list: int = 60) -> str:
             else:  # ambiguous
                 forms = ", ".join(sorted({c.get("form_key") for c in info["coordinates"]
                                           if c.get("form_key")}))
-                lines.append(f"  ⚠️ {key}: 歧义 — 元数据有 {len(info['coordinates'])} 个同名字段"
+                lines.append(f"  ⚠️ {key}: 歧义 — 元数据有多个同名字段"
                              f"（{forms}），本文件未解析到具体实体，需顺调用链消歧、勿默认当前单据：")
                 for c in info["coordinates"][:max_list]:
                     lines.append(_coord_line(key, c, mark="·"))
+            if capped:
+                lines.append(f"      （另 {capped} 条坐标未列出，全部见 resolve_fields）")
     else:
         lines.append("（本文件未出现 KB 已知字段标识）")
     if data.get("note"):

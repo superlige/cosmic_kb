@@ -31,6 +31,25 @@ from ..semantic.dictionary import build_lexicon
 # 层级 → 中文（与 semantic/dictionary.py:Candidate.label 同一套映射，保持文案一致）。
 _LEVEL_CN = {"header": "表头", "entry": "分录", "subentry": "子分录", "basedata": "基础资料"}
 
+# 分录容器取值语义（与字段侧 _access_hint 形成对照，强化"容器 vs 多选基础资料"二选一判别）。
+_ENTRY_ACCESS = "分录容器——getDynamicObjectCollection() 取的是分录行集合（逐行 get(i)）"
+
+
+def _access_hint(field_type: str | None) -> str | None:
+    """字段 XML 标签名 → getDynamicObject(Collection) 的取值语义（中文）。判不出回 None（不臆造）。
+
+    起因：模型见 `getDynamicObjectCollection(key)` 默认当"分录"，但多选基础资料字段
+    （MulBasedataField）也用它取选中的基础资料集合——取分录还是基础资料，取决于 key 是什么。
+    `field_type` 是精确信号：含 Basedata 即基础资料类，Mul 前缀即多选（取集合）。标量字段
+    （Text/Amount/Combo…）本就不走 getDynamicObject*，不强加语义。
+    """
+    ft = field_type or ""
+    if "Basedata" not in ft and "BaseData" not in ft:
+        return None
+    if ft.startswith("Mul"):
+        return "多选基础资料字段——getDynamicObjectCollection() 取的是选中的基础资料对象集合，不是分录行"
+    return "基础资料字段——getDynamicObject() 取关联的基础资料对象，不是分录"
+
 
 def resolve_fields(conn, keys: list[str]) -> dict[str, Any]:
     """字段/分录容器标识 → 真实元数据中文名+实体坐标。钉不出回 None（不臆造）。"""
@@ -46,6 +65,8 @@ def resolve_fields(conn, keys: list[str]) -> dict[str, Any]:
                 "entity_key": f.entity_key,
                 "level": f.level,
                 "field_kind": f.kind,
+                "field_type": f.field_type,     # XML 标签名：判 getDynamicObjectCollection 取值语义的精确信号
+                "access": _access_hint(f.field_type),  # 派生取值语义（基础资料 vs None），堵"凭 API 名当分录"
             })
         for e in lex.entities_by_key(key):
             items.append({
@@ -54,6 +75,7 @@ def resolve_fields(conn, keys: list[str]) -> dict[str, Any]:
                 "form_key": e.form_key,
                 "level": e.level,
                 "parent_key": e.parent_key,
+                "access": _ENTRY_ACCESS,
             })
         resolved[key] = items or None
     return {"resolved": resolved}
@@ -74,13 +96,15 @@ def render_resolve_fields(data: dict[str, Any], *, max_list: int = 20) -> str:
             name = it.get("name") or ""
             form = it.get("form_key") or "?"
             lvl_cn = _LEVEL_CN.get(it.get("level") or "", it.get("level") or "?")
+            access = f"  〔{it['access']}〕" if it.get("access") else ""
             if it.get("kind") == "field":
-                extra = f" · {it['field_kind']}" if it.get("field_kind") else ""
-                lines.append(f"  · 字段 {key}「{name}」 — {form} · {lvl_cn}{extra}")
+                ft = f" · {it['field_type']}" if it.get("field_type") else (
+                    f" · {it['field_kind']}" if it.get("field_kind") else "")
+                lines.append(f"  · 字段 {key}「{name}」 — {form} · {lvl_cn}{ft}{access}")
             else:
                 parent = it.get("parent_key")
                 phint = f" ← {parent}" if parent else ""
-                lines.append(f"  · 容器 {key}「{name}」 — {form} · {lvl_cn}{phint}")
+                lines.append(f"  · 容器 {key}「{name}」 — {form} · {lvl_cn}{phint}{access}")
         if len(items) > max_list:
             lines.append(f"  …（共 {len(items)} 条坐标，全部见 --json）")
     return "\n".join(lines)

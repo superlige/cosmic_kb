@@ -30,6 +30,7 @@ public class CollateralOp {
     String fee = ht.getString("cqkd_fee");
     bill.set(KEY_ST, "B");
     bill.getDynamicObjectCollection("cqkd_entry");
+    DynamicObjectCollection httz = bill.getDynamicObjectCollection("cqkd_httz");
     String rate = readSomehow("cqkd_rate");
   }
 }
@@ -60,6 +61,9 @@ def _kb_with_source(tmp_path: Path) -> tuple[Path, Path]:
                  "frate", "DecimalField", "entity", "header"),
                 ("f_rate2", "cqkd_contract", "cqkd_contract", "cqkd_rate", "利率",
                  "frate", "DecimalField", "entity", "header"),
+                # 多选基础资料字段：getDynamicObjectCollection 取的是选中基础资料集合，不是分录（本 bug 核心）。
+                ("f_httz", "cqkd_assetcard", "cqkd_assetcard", "cqkd_httz", "退租合同",
+                 "fhttz", "MulBasedataField", "entity", "header"),
             ],
         )
         # 本文件 field_access 把 cqkd_fee 解析到 cqkd_contract（loadSingle 取到的合同实体）→ 应收敛。
@@ -97,6 +101,58 @@ def test_read_source_annotates_known_fields(tmp_path: Path):
         # 非字段标识不被臆造进标注。
         assert "notAFieldKey" not in fn
         assert d["note"]
+        # 防 host 截断：标注在前、content 垫底；省略计数提到顶层。
+        ks = list(d)
+        assert ks.index("field_names") < ks.index("content")
+        assert d["keys_omitted"] == 0
+        # 坐标已瘦身：unique 坐标丢 entity_key/field_kind/parent_key，保留取值语义信号。
+        coord = st["coordinates"][0]
+        assert "entity_key" not in coord and "parent_key" not in coord
+        assert set(coord) <= {"kind", "name", "form_key", "level",
+                              "field_type", "access", "resolved_lines"}
+    finally:
+        conn.close()
+
+
+def test_read_source_basedata_access_hint(tmp_path: Path):
+    """多选基础资料字段 cqkd_httz：坐标带 field_type + access 取值语义，
+    显式提示 getDynamicObjectCollection 取的是基础资料集合而非分录（堵本 bug）。"""
+    db, _src = _kb_with_source(tmp_path)
+    conn = store.open_kb(db)
+    try:
+        d = read_source.read_source(conn, REL)
+        httz = d["field_names"]["cqkd_httz"]
+        assert httz["tier"] == "unique"
+        assert httz["names"] == ["退租合同"]
+        coord = httz["coordinates"][0]
+        assert coord["field_type"] == "MulBasedataField"
+        assert "不是分录" in coord["access"]
+        # 顶层 note 与 render 文本都点出 getDynamicObjectCollection 判别。
+        assert "getDynamicObjectCollection" in d["note"]
+        text = read_source.render_read_source(d)
+        assert "不是分录" in text and "MulBasedataField" in text
+    finally:
+        conn.close()
+
+
+def test_ambiguous_coords_capped(tmp_path: Path):
+    """跨 >8 单据同名的 ambiguous key：候选数封顶（防 field_names 体积爆掉被 host 截断），带剩余计数。"""
+    db, _src = _kb_with_source(tmp_path)
+    conn = store.open_kb(db)
+    try:
+        # 在源码出现的 cqkd_rate 上再造 10 张单据的同名字段（共 12 张），且本文件无 field_access 解析→歧义。
+        conn.executemany(
+            "INSERT INTO field(uid,form_key,entity_key,key,name,db_column,field_type,kind,level) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            [(f"f_rate_x{i}", f"cqkd_form{i}", f"cqkd_form{i}", "cqkd_rate", f"利率{i}",
+              "frate", "DecimalField", "entity", "header") for i in range(10)],
+        )
+        conn.commit()
+        rate = read_source.read_source(conn, REL)["field_names"]["cqkd_rate"]
+        assert rate["tier"] == "ambiguous"
+        assert len(rate["coordinates"]) == 8          # 封顶
+        assert rate["coordinates_capped"] > 0         # 剩余计数
+        assert "resolve_fields" in rate["note"]
     finally:
         conn.close()
 

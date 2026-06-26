@@ -53,6 +53,33 @@ def test_resolve_entry_container_key(conn):
     assert it["form_key"] == "cqkd_assetcard" and it["parent_key"] == "cqkd_assetcard"
 
 
+def test_resolve_access_hint_by_field_type(conn):
+    """字段坐标带 field_type + 派生 access 取值语义（堵"getDynamicObjectCollection 当分录"）：
+    - 多选基础资料(MulBasedataField) → access 含"多选基础资料"/"不是分录行"。
+    - 单选基础资料(BasedataField) → access 含"基础资料字段"。
+    - 标量字段(ComboField，如 cqkd_collateralstatus) → access 为 None（不强加语义）。
+    - 分录容器(entity 表) → access 含"分录容器"。"""
+    conn.executemany(
+        "INSERT INTO field(uid,form_key,entity_key,key,name,db_column,field_type,kind,level) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        [
+            ("u_mul", "cqkd_assetcard", "cqkd_assetcard", "cqkd_httz", "退租合同",
+             "fhttz", "MulBasedataField", "entity", "header"),
+            ("u_one", "cqkd_assetcard", "cqkd_assetcard", "cqkd_org", "核算组织",
+             "forg", "BasedataField", "entity", "header"),
+        ],
+    )
+    conn.commit()
+    r = resolve_fields.resolve_fields(
+        conn, ["cqkd_httz", "cqkd_org", "cqkd_collateralstatus", "cqkd_entry"])["resolved"]
+    mul = r["cqkd_httz"][0]
+    assert mul["field_type"] == "MulBasedataField"
+    assert "多选基础资料" in mul["access"] and "不是分录行" in mul["access"]
+    assert "基础资料字段" in r["cqkd_org"][0]["access"]
+    assert r["cqkd_collateralstatus"][0]["access"] is None     # 标量字段不强加语义
+    assert "分录容器" in r["cqkd_entry"][0]["access"]            # 容器侧镜像提示
+
+
 def test_resolve_unknown_returns_none(conn):
     """④ 钉不出回 None（诚实留白，不臆造）。"""
     r = resolve_fields.resolve_fields(conn, ["cqkd_nope"])["resolved"]
