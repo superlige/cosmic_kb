@@ -92,6 +92,9 @@ class _Env:
     do_params: frozenset[str] = frozenset()  # 其中的 DynamicObject 形参名（无 init，先于循环播种）
     do_array_params: frozenset[str] = frozenset()  # DynamicObject[] 数组/变长形参（一组表头行，按集合处理）
     coll_params: frozenset[str] = frozenset()  # DynamicObjectCollection 形参名（其元素行继承传播坐标）
+    # List/Set/Collection<DynamicObject> 形参 + 局部变量名：泛型集合，元素=单据表头行。
+    # 局部集合若由「空集合 + 循环 .add(已知实体包)」建起，按 add 的实体包推断元素来源实体。
+    do_coll_vars: frozenset[str] = frozenset()
     # 模型/视图形参名→其绑定单据：跨类把 getModel()/getView()/this 携带的绑定单据传进来，
     # 使 service 里的 `model.getDataEntity()` 能定位来源单据（否则 default_entity 跨类为 None）。
     model_entities: dict[str, str] = field(default_factory=dict)
@@ -346,6 +349,45 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
             return env.default_entity
         return None
 
+    # 泛型集合 `.add(x)`/`.addAll(x)` 累积：预扫每个 List/Set<DynamicObject> 变量被 add 进来的
+    # 实参基变量（含内联 ORM `add(loadSingle(id,"实体"))`），供定点迭代里按元素来源实体收敛。
+    add_args: dict[str, list[tuple[str, str | None]]] = {}
+    if env.do_coll_vars:
+        for inv in ax.iter_invocations(body):
+            if inv.name not in ("add", "addAll") or not inv.args:
+                continue
+            recv = re.sub(r"\[.*?\]$", "", inv.object_text.split(".", 1)[0].split("(", 1)[0].strip())
+            if recv not in env.do_coll_vars:
+                continue
+            argtxt = ax._text(inv.args[0]).strip()
+            argbase = re.sub(r"\[.*?\]$", "", argtxt.split(".", 1)[0].split("(", 1)[0].strip())
+            inline_ent: str | None = None
+            if _LOAD_SINGLE_RE.search(argtxt) or _LOAD_COLL_RE.search(argtxt):
+                inline_ent, _ = _resolve_entity_arg(argtxt, env)   # 内联 add(loadSingle(...,"实体"))
+            add_args.setdefault(recv, []).append((argbase, inline_ent))
+
+    def _accum_coll_entity(bases: list[tuple[str, str | None]]) -> tuple[str | None, bool]:
+        """由 add 进来的实参集合推断元素来源实体。返回 (实体, pending)。
+
+        所有 add 的实参一致解析到**同一个**已知实体才采纳（红线 #4：来源混杂/解不出留 None 不臆造）；
+        仍有实参待定（其声明在本方法、尚未解析）则 pending=True，下一轮再判。
+        """
+        ents: set[str | None] = set()
+        for base, inline_ent in bases:
+            if inline_ent is not None:
+                ents.add(inline_ent)
+            elif base in doc_ctx:
+                ents.add(doc_ctx[base].entity)
+            elif base in coll_ctx:
+                ents.add(coll_ctx[base].entity)
+            elif base in pend_names:
+                return None, True
+            else:
+                ents.add(None)
+        if len(ents) == 1 and None not in ents:
+            return next(iter(ents)), False
+        return None, False
+
     for _ in range(len(locals_) + len(foreach) + 2):
         changed = False
         for lv in locals_:
@@ -445,6 +487,16 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
                     doc_ctx[lv.name] = _Ctx(c.level, c.entry_key, c.entity, note=c.note)
                     changed = True
                     continue
+
+        for cv, bases in add_args.items():  # 泛型集合：由 .add(已知实体包) 推断元素来源实体
+            if cv in coll_ctx or cv in doc_ctx:
+                continue
+            ent, pend = _accum_coll_entity(bases)
+            if pend or ent is None:
+                continue
+            coll_ctx[cv] = _Ctx("header", None, ent, is_collection=True,
+                                note="泛型集合，元素来源由 add(已知实体包) 推断")
+            changed = True
 
         for row_var, coll_var in foreach:  # for-each 行继承集合元素上下文（含 load 数组）
             if row_var not in doc_ctx and coll_var in coll_ctx:

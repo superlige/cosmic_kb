@@ -133,13 +133,21 @@
   解析到实体 → 显式标歧义、列候选、指出消歧方向「看接收变量来源 dataEntity/loadSingle/getAllSonList」，绝不
   替选、不默认当前单据）。`field_names` 形状改为 `{key:{tier,names,coordinates,note}|None}`；MCP `INSTRUCTIONS`
   /工具说明加「ambiguous 别默认当前单据」。零 schema 改动（v9）。**当前 222 passed。**
+- ✅ **信任优先·form_key 解析率提升（绑定回落 + 泛型集合建模）**（2026-06-27）：`read_source` 同名跨单据消歧靠
+  `field_access.form_key` 收敛，None 时只能平铺候选诱导脑补。真实库 60.3% 写入 form_key=None，按 evidence 分桶挖到
+  两个**可救**根因并补断链（红线 #4 不臆造）：① **绑定回落**——已绑定插件里未被事件 BFS 覆盖的 helper（第②轮孤立
+  补全）用本类**唯一绑定单据**作来源（绑多张留 None）；② **泛型集合建模**——`List/Set/Collection<DynamicObject>`
+  （项目里传查询结果最常用、原本三种 DO 形参都不认、整链来源 None）建模成集合：形参走「实参↔形参」坐标传播、
+  局部走「空集合 + `.add(已知实体包)` 累积推断元素来源」轻量数据流。`ast_index` 加 `dynamicobject_collection_*`、
+  `field_access._Env` 加 `do_coll_vars` + `.add` 累积、`analyze._coll_params` 并入 List<DO> 形参。零 schema 改动（v9）。
+  真实库 form_key NULL **60.3%→56.1%**（救回 764 行，0 改写、99%+ 落确认实体）。**当前 227 passed。**
 - 详细进度与每阶段"背景/目标/验收结论/命令"见 `docs/阶段验收.md`。
 
 ## 常用命令（Windows / PowerShell）
 
 ```powershell
 pip install -e ".[parse,encoding,dev,fuzzy,mcp]"  # 解析+编码+测试+模糊匹配+MCP（fuzzy/mcp 可选）
-pytest -q                                # 跑测试（当前 222 passed）
+pytest -q                                # 跑测试（当前 227 passed）
 cosmic_kb --version                      # 版本
 cosmic_kb doctor                         # 资产体检（需 skill_assets/ok-cosmic-docs.db）
 cosmic_kb ingest "<项目源码根>"          # 阶段1：摄取 + 覆盖率/可信度报告（--json 可留档）

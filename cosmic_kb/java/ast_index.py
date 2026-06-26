@@ -262,6 +262,62 @@ def dynamicobject_vars(method_node: "Node") -> set[str]:
     return out
 
 
+# 泛型集合「装 DynamicObject」的判定：`List<DynamicObject>` / `Set<DynamicObject>` /
+# `Collection<DynamicObject>` 等。`<\s*DynamicObject\s*>` 精确匹配元素恰为 DynamicObject
+# （故 `List<DynamicObjectCollection>` 因元素名带 Collection 不会误命中；`Map<String,DynamicObject>`
+# 因 `<` 后非紧跟 DynamicObject 也不命中——保守，只认最常见的「一串单据表头行」语义）。
+_DO_COLL_RE = re.compile(r"<\s*DynamicObject\s*>")
+
+
+def _is_do_collection_type(type_text: str) -> bool:
+    return bool(_DO_COLL_RE.search(type_text or ""))
+
+
+def dynamicobject_collection_params(method_node: "Node") -> set[str]:
+    """`List/Set/Collection<DynamicObject>` 形参名集合（泛型集合，语义=一组单据表头行）。
+
+    现有 `DynamicObjectCollection`/`DynamicObject[]` 形参已分别处理；而真实项目里传查询结果
+    最常用的是 `List<DynamicObject>`，三种都不是、整片漏掉来源——补这一档，使其与
+    DynamicObjectCollection 同样走「实参↔形参」坐标传播。
+    """
+    out: set[str] = set()
+    params = method_node.child_by_field_name("parameters")
+    if params is None:
+        return out
+    for p in params.named_children:
+        if p.type not in ("formal_parameter", "spread_parameter"):
+            continue
+        name_node = p.child_by_field_name("name")
+        type_node = p.child_by_field_name("type")
+        if name_node is not None and type_node is not None and _is_do_collection_type(_text(type_node)):
+            out.add(_text(name_node))
+    return out
+
+
+def dynamicobject_collection_vars(method_node: "Node") -> set[str]:
+    """`List/Set/Collection<DynamicObject>` 形参 + 局部变量名集合（泛型集合）。
+
+    供 field_access 对「空集合 + 循环 `.add(已知实体包)` 累积」的局部集合推断元素来源实体
+    （`List<DynamicObject> l=new ArrayList<>(); l.add(loadSingle(id,\"cqkd_ht\"))` → l 装 cqkd_ht）。
+    """
+    out: set[str] = set(dynamicobject_collection_params(method_node))
+    body = method_node.child_by_field_name("body")
+    if body is not None:
+        stack = [body]
+        while stack:
+            n = stack.pop()
+            if n.type == "local_variable_declaration":
+                type_node = n.child_by_field_name("type")
+                if type_node is not None and _is_do_collection_type(_text(type_node)):
+                    for vd in n.children:
+                        if vd.type == "variable_declarator":
+                            name_node = vd.child_by_field_name("name")
+                            if name_node is not None:
+                                out.add(_text(name_node))
+            stack.extend(n.children)
+    return out
+
+
 def iter_member_field_types(type_decl: TypeDecl) -> Iterator[tuple[str, str]]:
     """类体内字段声明 (字段名, 类型简单名)。供跨类调用解析成员变量（如注入的 service）的类型。"""
     body = type_decl.body

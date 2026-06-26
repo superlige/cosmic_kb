@@ -218,6 +218,39 @@ public class AmKeyParamPlugin extends AbstractBillPlugIn {
 }
 """
 
+# 已绑定表单插件，但某 helper 不被任何事件调用 → 落入第②轮全量补全。修复前 default_entity=None
+# 致其 getModel() 写入来源判不出（form_key=None）；修复后应沿用本类**唯一绑定单据**作来源。
+HELPER_PLUGIN = """package cqspb.am;
+import kd.bos.form.plugin.AbstractBillPlugIn;
+public class AmHelperPlugin extends AbstractBillPlugIn {
+  public void propertyChanged(PropertyChangedArgs e) {
+    getModel().setValue("cqkd_head", 1);
+  }
+  public void recalcUnreached() {
+    getModel().setValue("cqkd_status", 2);
+  }
+}
+"""
+
+# 泛型集合 List<DynamicObject> 来源传播：事件里用 .add(loadSingle(...,"实体")) 累积一个 List，
+# 传给 helper（List<DynamicObject> 形参），helper for-each 读字段——读的来源应是 add 进来的实体。
+LISTPARAM_PLUGIN = """package cqspb.am;
+import kd.bos.form.plugin.AbstractBillPlugIn;
+public class AmListParamPlugin extends AbstractBillPlugIn {
+  public void afterCreateNewData(EventObject e) {
+    java.util.List<DynamicObject> list = new java.util.ArrayList<>();
+    DynamicObject originbill = BusinessDataServiceHelper.loadSingle(123L, "cqkd_assetcollateral");
+    list.add(originbill);
+    this.fillFromList(list);
+  }
+  public void fillFromList(java.util.List<DynamicObject> list) {
+    for (DynamicObject dynamicObject : list) {
+      String v = dynamicObject.getString("cqkd_othh");
+    }
+  }
+}
+"""
+
 # 转换插件 afterConvert：目标单数据包写字段，应归到目标单。
 CONVERT_PLUGIN = """package cqspb.am;
 import kd.bos.entity.plugin.AbstractConvertPlugIn;
@@ -317,6 +350,8 @@ def _build(tmp_path: Path):
     _w(src / "AmKeyParamPlugin.java", KEYPARAM_PLUGIN)
     _w(src / "AmGenRowPlugin.java", GENROW_PLUGIN)
     _w(src / "AmArrayOp.java", ARRAY_PARAM_OP)
+    _w(src / "AmHelperPlugin.java", HELPER_PLUGIN)
+    _w(src / "AmListParamPlugin.java", LISTPARAM_PLUGIN)
     scan = scanner.scan(src)
 
     ents = [MetaEntity("BillEntity", "cqkd_bill", "单据头", "1", "header", None, "t"),
@@ -338,6 +373,8 @@ def _build(tmp_path: Path):
         MetaPlugin("cqspb.am.AmKeyParamPlugin", "form", "project"),
         MetaPlugin("cqspb.am.AmGenRowPlugin", "form", "project"),
         MetaPlugin("cqspb.am.AmArrayOp", "op", "project", operation_key="submit"),
+        MetaPlugin("cqspb.am.AmHelperPlugin", "form", "project"),
+        MetaPlugin("cqspb.am.AmListParamPlugin", "form", "project"),
     ]
     m1 = MetaModel(key="cqkd_bill", name="资产单", model_type="BillFormModel",
                    form_type="bill", isv="cqkd", app_key="cqkd_am",
@@ -791,6 +828,38 @@ def test_array_param_source_propagation(tmp_path: Path):
         assert r["form_key"] == "cqkd_bill", "数组入参来源单据应沿 for-each/stream/addNew 传播"
         assert r["level"] == "subentry"
         assert r["entry_key"] == "cqkd_sub"
+    finally:
+        conn.close()
+
+
+def test_bound_plugin_helper_uses_binding_entity(tmp_path: Path):
+    """已绑定插件里未被事件覆盖的 helper（落第②轮补全）→ 沿用本类唯一绑定单据作来源（不再 None）。"""
+    db, _ = _build(tmp_path)
+    conn = store.open_kb(db)
+    try:
+        r = conn.execute(
+            "SELECT form_key,plugin_type,event_method FROM field_access "
+            "WHERE plugin_fqn='cqspb.am.AmHelperPlugin' AND field_key='cqkd_status'").fetchone()
+        assert r is not None, "未被事件覆盖的 helper 写入仍应被全量补全抓到"
+        assert r["form_key"] == "cqkd_bill", "应沿用该类唯一绑定单据作来源（修复前为 None）"
+        assert r["event_method"] == "recalcUnreached"
+    finally:
+        conn.close()
+
+
+def test_list_dynamicobject_param_source_propagation(tmp_path: Path):
+    """泛型集合 List<DynamicObject>：.add(loadSingle(...,\"实体\")) 累积 → 经 List 形参传播给
+    helper，helper for-each 读字段的来源应是 add 进来的实体（修复前整条链 form_key=None）。"""
+    db, _ = _build(tmp_path)
+    conn = store.open_kb(db)
+    try:
+        r = conn.execute(
+            "SELECT form_key,via FROM field_access "
+            "WHERE access_class='cqspb.am.AmListParamPlugin' "
+            "AND field_key='cqkd_othh' AND via='do.getString'").fetchone()
+        assert r is not None, "List<DynamicObject> 形参里的 for-each 读应被抓到"
+        assert r["form_key"] == "cqkd_assetcollateral", \
+            "来源应由 add(loadSingle(...,'cqkd_assetcollateral')) 经 List 形参传播得出（修复前为 None）"
     finally:
         conn.close()
 

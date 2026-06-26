@@ -121,6 +121,10 @@ def analyze(
 
     covered: set[tuple[str, str]] = set()
     bound_fqns: set[str] = set()
+    # 类 FQN → 其绑定的（去重）来源单据集：供第②轮全量补全时，给「已绑定插件但未被事件 BFS
+    # 覆盖到」的方法回落本类的绑定单据（插件实例就绑这张单据，getModel()/根包写入即作用其模型；
+    # 绑多张单据则歧义、留 None 不臆造）。只收 linked/linked_by_name 的绑定。
+    bound_entity: dict[str, set[str]] = {}
 
     # ── 第①轮：绑定插件归因（跨类回溯 + 来源实体传播）─────────────────────
     for m in models:
@@ -139,6 +143,8 @@ def analyze(
                 convert_source = m.convert.source_entity
             else:
                 entry_form, convert_source = m.key, None
+            if entry_form:
+                bound_entity.setdefault(node.fqn, set()).add(entry_form)
             op_type = op_type_by.get((m.key, p.operation_key)) if p.plugin_type == "op" else None
             _analyze_bound_plugin(
                 pg, node, p.plugin_type, entry_form, convert_source, op_type,
@@ -156,7 +162,8 @@ def analyze(
 
     # ── 第②轮：全量孤立补全（其余普通 service/util 类，扁平）────────────────────
     for fqn, node in pg.classes.items():
-        if _analyze_standalone(pg, node, const, known_entities, plugin_base, covered, result):
+        if _analyze_standalone(pg, node, const, known_entities, plugin_base,
+                               bound_entity, covered, result):
             result.standalone_class_count += 1
 
     result.field_accesses = _dedup(result.field_accesses)
@@ -213,7 +220,9 @@ def _do_array_params(method_node) -> frozenset[str]:
 
 
 def _coll_params(method_node) -> frozenset[str]:
-    return frozenset(n for n, t in ax.iter_param_vars(method_node) if t == "DynamicObjectCollection")
+    """集合形参：DynamicObjectCollection ∪ List/Set/Collection<DynamicObject>（统一走坐标传播）。"""
+    base = {n for n, t in ax.iter_param_vars(method_node) if t == "DynamicObjectCollection"}
+    return frozenset(base | ax.dynamicobject_collection_params(method_node))
 
 
 # 携带「绑定单据」的模型/视图/插件形参类型：调用方传 getModel()/getView()/this 时，被调形参即绑该单据。
@@ -360,7 +369,9 @@ class _RetResolver:
             const=self.const, default_entity=de, convert_source=cs, known_entities=self.known,
             do_vars=ax.dynamicobject_vars(md.node), do_params=_do_params(md.node),
             do_array_params=_do_array_params(md.node),
-            coll_params=_coll_params(md.node), local_seed=seed,
+            coll_params=_coll_params(md.node),
+            do_coll_vars=frozenset(ax.dynamicobject_collection_vars(md.node)),
+            local_seed=seed,
         )
         rc = fa.method_return_ctx(md.body, env)
         self.memo[key] = rc
@@ -399,6 +410,7 @@ def _walk_event(
             param_ctx=prop.param_ctx, known_entities=known,
             do_vars=ax.dynamicobject_vars(md.node), do_params=_do_params(md.node),
             do_array_params=_do_array_params(md.node), coll_params=_coll_params(md.node),
+            do_coll_vars=frozenset(ax.dynamicobject_collection_vars(md.node)),
             model_entities=prop.model_entities, str_params=prop.str_params,
             local_seed=resolver.local_seed(node, method),
         )
@@ -500,23 +512,33 @@ def _analyze_unbound_plugin(
 
 def _analyze_standalone(
     pg: "ProjectGraph", node: "ClassNode", const, known: frozenset[str],
-    plugin_base: dict[str, str], covered: set[tuple[str, str]], result: AnalysisResult,
+    plugin_base: dict[str, str], bound_entity: dict[str, set[str]],
+    covered: set[tuple[str, str]], result: AnalysisResult,
 ) -> bool:
-    """补全未被插件覆盖的项目类方法的字段读写（来源实体能由 ORM 判出就用，否则 None）。"""
+    """补全未被插件覆盖的项目类方法的字段读写（来源实体能由 ORM 判出就用，否则 None）。
+
+    该类若是**已绑定插件**（仅某些方法未被事件 BFS 覆盖到），用其**唯一绑定单据**作
+    default_entity——插件实例绑这张单据，方法内 getModel()/根包写入即作用其模型，归因到该单据
+    是绑定契约而非臆造。绑多张单据则歧义、回落 None（红线 #4：宁标未定位不臆造）。
+    """
     base = plugin_base.get(node.simple)
     kind, _c, _e = classifier.plugin_kind(None, base)
     is_plugin = kind != "unknown"
     plugin_type = kind if is_plugin else "service"
+    ents = bound_entity.get(node.fqn)
+    base_entity = next(iter(ents)) if ents and len(ents) == 1 else None
     emitted = False
-    resolver = _RetResolver(pg, const, known, node.fqn, None, None)
+    resolver = _RetResolver(pg, const, known, node.fqn, base_entity, None)
     for name, md in node.cg.methods.items():
         if (node.fqn, name) in covered:
             continue
         env = fa._Env(
-            const=const, default_entity=None, known_entities=known,
+            const=const, default_entity=base_entity, known_entities=known,
             do_vars=ax.dynamicobject_vars(md.node), do_params=_do_params(md.node),
             do_array_params=_do_array_params(md.node),
-            coll_params=_coll_params(md.node), local_seed=resolver.local_seed(node, name),
+            coll_params=_coll_params(md.node),
+            do_coll_vars=frozenset(ax.dynamicobject_collection_vars(md.node)),
+            local_seed=resolver.local_seed(node, name),
         )
         accesses, _ = fa.analyze_method(md.body, env)
         if not accesses:
