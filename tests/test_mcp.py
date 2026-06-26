@@ -101,7 +101,7 @@ def test_tools_registry_matches():
     """TOOLS 注册表与公开 tool_* 函数一一对应（防漏注册）。"""
     assert set(mcp_server.TOOLS) == {
         "ask", "trace", "bill", "method_calls", "coverage", "scan_compare",
-        "dynamic_writes", "cosmic_semantics"}
+        "dynamic_writes", "resolve_fields", "read_source", "cosmic_semantics"}
     for fn in mcp_server.TOOLS.values():
         assert callable(fn)
 
@@ -119,7 +119,7 @@ def test_tool_cosmic_semantics_reads_topic():
     got = mcp_server.tool_cosmic_semantics("anti-patterns")
     assert "content" in got and got["content"].strip()
     # 模糊到插件文档也应命中
-    assert "content" in mcp_server.tool_cosmic_semantics("plugin-base")
+    assert "content" in mcp_server.tool_cosmic_semantics("plugin-form")
 
 
 def test_build_server_carries_instructions():

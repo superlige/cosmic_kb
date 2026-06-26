@@ -37,7 +37,23 @@ INSTRUCTIONS = (
     "再下结论**，不得仅凭读源码臆断时机与入库——这类领域语义模型易记错，是幻觉高发区。"
     "（纯定位字段坐标 trace、纯调用链导航 method_calls 等不涉及语义解释的取证，无需先调"
     " cosmic_semantics，避免空耗。）不确定该取哪一篇时，先 cosmic_semantics(\"\") 列清单——"
-    "每条都带『何时用』说明，按它挑主题名再取全文。"
+    "每条都带『何时用』说明，按它挑主题名再取全文。\n"
+    "【字段名纪律】凡在源码中引用 `<isv>_前缀` 字段标识并要陈述其中文名/业务含义，**必须先 "
+    "resolve_fields 批量比对元数据**——命名惯例（`zjjnqk` 是租金还是资金？）不算证据，是幻觉高发区。"
+    "resolve_fields 比 trace 便宜得多（O(1) 打词典，只回名字+坐标），读一段代码就顺手批量核一次；"
+    "回 null 的字段标 unknown，不猜。\n"
+    "【返回值已带证据，直接采用】trace/bill/ask/method_calls 的返回里已**内联**两样东西，请直接用、"
+    "勿覆写：① 字段旁的 `field_name`/中文名是已核对的真名，引用时照抄，不得按命名惯例改写；"
+    "② 事件方法旁的 `semantics_topic`（如 plugin-form/plugin-operation）指明该去哪篇语义文档——"
+    "凡要解释该事件「在干嘛/何时触发/是否入库」，先 cosmic_semantics(该 topic) 再下结论。"
+    "字段无 `field_name`（null）或事件无 `semantics_topic` 时，标 unknown，不臆造。"
+    "method_calls 还回该方法的 `fields`（本方法读写字段+已核对名+是否落库），引用其字段名照抄。\n"
+    "【读源码优先用 read_source】要读项目源文件，**优先调 read_source（不要用宿主原生 reader）**："
+    "野生码（GBK/GB2312/UTF-8±BOM）原生 reader 易乱码、且不标字段名；read_source 正确解码、行号对齐 KB，"
+    "并自动回 `field_names`（本文件出现的字段标识→真实中文名，已按本文件数据包来源做归属消歧）。"
+    "`field_names[key].tier`：unique/resolved 的 `names` 可直接照抄；**tier=ambiguous 表示多张单据有"
+    "同名字段、本文件未解析到具体实体——别默认当前单据，按 note 顺调用链消歧**。"
+    "未列出的 `<isv>_` 标识 resolve_fields 核对，绝不按命名惯例/拼音猜。"
 )
 
 
@@ -61,18 +77,6 @@ WHEN_TO_USE = {
     "plugin-openapi":     "WebApi / OpenApi 外部接口入口",
     "plugin-report-data": "报表取数",
     "plugin-report-form": "报表界面",
-    "plugin-base":        "封装层插件基类（优先于下方原生 plugin-* 兜底）",
-    # —— 进阶语义（理解代码意图 / DynamicObject 路径 / 入库判断时查）——
-    "operate-chain":      "保存/提交/审核链路语义、是否入库判断",
-    "botp-convert":       "下推来源追踪封装",
-    "query-dataset":      "查询 / 聚合 / 数据集",
-    "dynamic-object":     "DynamicObject 取值/路径/集合（同名字段串实体消歧）",
-    "entity-metadata":    "实体元数据 / 字段路径 / DBRoute",
-    "form-utils":         "表单控件 / 元数据读取",
-    "flex-prop":          "弹性域字段",
-    "attachment-api":     "附件",
-    "request-context":    "跨线程上下文传递",
-    "view-handler":       "视图 / 界面操作封装",
     # —— 原生 SDK 兜底（看不懂某 kd.bos.* 符号时）——
     "sdk-orm-access":     "ORM / QFilter / KSQL 查询",
     "sdk-dynamic-object": "原生 DynamicObject API",
@@ -221,6 +225,50 @@ def tool_dynamic_writes(
         conn.close()
 
 
+def tool_resolve_fields(keys: list[str]) -> dict[str, Any]:
+    """字段标识 → 真实元数据中文名+实体坐标（比对元数据、防命名惯例臆断）。
+
+    专治『读源码顺手核字段名』：批量传 key，回 `{"resolved": {key: [{...}] | null}}`。比 trace
+    便宜得多（O(1) 打词典，只回名字+坐标，不查谁改了它），读一段代码碰到不认识的 `<isv>_xxx`
+    就顺手批量核一次——命名惯例（`zjjnqk` 是租金还是资金？）不算证据，必须比对。
+    - 字段命中：`{kind:"field", name, form_key, entity_key, level, field_kind}`。
+    - 分录容器命中（读到 `getDynamicObjectCollection("cqkd_zdfl")` 这类**分录 key**）：
+      `{kind:"entry"/"subentry"/"header", name, form_key, level, parent_key}`。
+    同一 key 跨多坐标（多分录各有定义、名字可能不同）→ 回 list 全摆出，**不替你选**，
+    消歧靠你读代码时的实体上下文。**钉不出回 `null`——标 unknown，绝不臆造。**
+    """
+    from ..report import resolve_fields
+
+    conn = _open()
+    try:
+        return resolve_fields.resolve_fields(conn, keys)
+    finally:
+        conn.close()
+
+
+def tool_read_source(
+    relpath: str, start_line: int | None = None, end_line: int | None = None,
+) -> dict[str, Any]:
+    """读项目源码（野生编码正确解码）+ 自动标注其中字段 key 的真实中文名。**读源码优先用本工具**。
+
+    凭什么用它而非宿主原生 reader：① 野生码（GBK/GB2312/UTF-8±BOM 混杂）原生 reader 易乱码，本工具按
+    建库同款编码探测正确解码、行号还与 KB 对齐；② **自动标注** `field_names`——扫文件里出现的字段标识
+    （含 `KEY_X = "cqkd_x"` 的字面值，它就在源码里），打元数据词典回真实中文名+坐标，并按本文件数据包
+    来源做**归属消歧**（三档：unique/resolved 可照抄 `names`；**ambiguous=多单据同名、本文件未解析到实体，
+    别默认当前单据，按 note 顺调用链消歧**）。引用字段中文名**照抄 `field_names`**，未列出的 `<isv>_` 标识
+    用 resolve_fields 核对，**绝不按命名惯例/拼音猜**。
+    `start_line/end_line`（1 基含端点）可只读一段（大文件按区间读）；越界路径（../ 逃逸出源码根）会被拒。
+    本工具只做"正确解码 + 字段名标注"，代码逻辑理解由你直接读返回的 `content`。
+    """
+    from ..report import read_source
+
+    conn = _open()
+    try:
+        return read_source.read_source(conn, relpath, start=start_line, end=end_line)
+    finally:
+        conn.close()
+
+
 def tool_cosmic_semantics(topic: str = "") -> dict[str, Any]:
     """苍穹领域语义文档查询：插件类型/事件时机/SDK 用法/DynamicObject 路径/入库判断/反模式黑名单。
 
@@ -262,6 +310,8 @@ TOOLS = {
     "coverage": tool_coverage,
     "scan_compare": tool_scan_compare,
     "dynamic_writes": tool_dynamic_writes,
+    "resolve_fields": tool_resolve_fields,
+    "read_source": tool_read_source,
     "cosmic_semantics": tool_cosmic_semantics,
 }
 

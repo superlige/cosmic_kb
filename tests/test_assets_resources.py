@@ -17,10 +17,10 @@ def test_templates_packaged():
 
 
 def test_references_and_rules_packaged():
-    """references（嵌套 adv/ base/）与 rules 都可枚举，且能定位到具体主题。"""
+    """references（嵌套 base/plugin、base/sdk）与 rules 都可枚举，且能定位到具体主题。"""
     topics = {rel for rel, _ in _assets.iter_reference_topics()}
-    assert any(rel.startswith("adv/") for rel in topics)
-    assert any(rel.startswith("base/") for rel in topics)
+    assert any(rel.startswith("base/plugin/") for rel in topics)
+    assert any(rel.startswith("base/sdk/") for rel in topics)
     assert "rules/anti-patterns" in topics
 
 
