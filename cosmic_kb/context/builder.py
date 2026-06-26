@@ -20,6 +20,7 @@ from typing import Any
 
 from ..report import field_trace as ft_mod
 from ..report import bill_view as bv_mod
+from ..semantic import hints
 from ..semantic.resolver import ResolvedQuery
 
 _DISCLAIMER = ("结论均来自 KB 静态扫描（元数据 + Java 静态分析），带 confirmed/likely/unknown 置信度；"
@@ -132,10 +133,17 @@ def _ctx_plugin(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, Any]
         "FROM plugin_method WHERE plugin_fqn=? ORDER BY start_line", (fqn,)).fetchall()]
     # 字段读写：作为入口插件(plugin_fqn) 或 物理所在类(access_class) 触达的字段。
     accesses = [dict(r) for r in conn.execute(
-        "SELECT DISTINCT field_key,form_key,level,entry_key,access,persists,event_method,via,line,"
-        "source_relpath,plugin_fqn,access_class FROM field_access "
+        "SELECT DISTINCT field_key,form_key,level,entry_key,access,persists,event_method,plugin_type,"
+        "via,line,source_relpath,plugin_fqn,access_class FROM field_access "
         "WHERE plugin_fqn=? OR access_class=? ORDER BY access,field_key",
         (fqn, fqn)).fetchall()]
+    # 模式 B：字段名 + 事件语义路由焊进返回值（段二勿按命名惯例臆断字段名 / 勿凭训练知识断时机入库）。
+    names = hints.build_field_names(conn)
+    for a in accesses:
+        a["field_name"] = names.get(a["field_key"], a["form_key"]) if a["field_key"] else None
+        a["semantics_topic"] = hints.event_topic(a.get("event_method"), a.get("plugin_type"))
+    for e in events:
+        e["semantics_topic"] = hints.event_topic(e.get("method_name"))
     writers = [a for a in accesses if a["access"] == "write"]
     readers = [a for a in accesses if a["access"] == "read"]
 
@@ -213,6 +221,9 @@ def _ctx_method(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, Any]
         advice.append(rd["note"])
     if any(m["calls"] for m in rd["methods"]):
         advice.append("逐层下钻：对每条调用的 target_fqn 再 method_calls，可顺着调用链往下读源码。")
+    if any((m.get("fields") or {}).get("writes") or (m.get("fields") or {}).get("reads")
+           for m in rd["methods"]):
+        advice.append("已列该方法读写的字段及已核对中文名（见 fields），引用字段名照抄勿猜。")
     base["advice"] = advice
     return base
 
@@ -231,10 +242,15 @@ def _ctx_operation(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, A
     if fqns:
         ph = ",".join("?" * len(fqns))
         touched = [dict(r) for r in conn.execute(
-            f"SELECT field_key,level,entry_key,access,persists,plugin_fqn,access_class,"
+            f"SELECT field_key,level,entry_key,access,persists,plugin_fqn,plugin_type,access_class,"
             f"event_method,line,source_relpath FROM field_access "
             f"WHERE form_key=? AND plugin_fqn IN ({ph}) ORDER BY access,field_key",
             (form_key, *sorted(fqns))).fetchall()]
+        # 模式 B：字段名 + 事件语义路由焊进返回值。
+        names = hints.build_field_names(conn)
+        for t in touched:
+            t["field_name"] = names.get(t["field_key"], form_key) if t["field_key"] else None
+            t["semantics_topic"] = hints.event_topic(t.get("event_method"), t.get("plugin_type"))
     writers = [t for t in touched if t["access"] == "write"]
     base["status"] = "ok" if op or plugins else "not_found"
     base["evidence"] = {
@@ -316,13 +332,15 @@ def _render_plugin(ev: dict[str, Any], max_list: int) -> list[str]:
     if ev["events"]:
         out.append("【事件方法】")
         for e in ev["events"][:max_list]:
+            topic = f"  ⚑判时机/入库先 cosmic_semantics('{e['semantics_topic']}')" if e.get("semantics_topic") else ""
             out.append(f"  {e['method_name']} [{e['event_kind']}/{e['event_phase']}] "
-                       f"{e['source_relpath']}:{e['start_line']}")
+                       f"{e['source_relpath']}:{e['start_line']}{topic}")
     if ev["writes"]:
         out.append(f"【写入字段】（前 {min(max_list, len(ev['writes']))}）")
         for w in ev["writes"][:max_list]:
             pf = {"yes": "✅落库", "no": "—内存", "unknown": "❓存疑"}.get(w["persists"], "")
-            out.append(f"  {w['field_key']:<26} {pf}  事件 {w['event_method']}  "
+            nm = f"「{w['field_name']}」" if w.get("field_name") else ""
+            out.append(f"  {w['field_key']:<26}{nm} {pf}  事件 {w['event_method']}  "
                        f"{w['source_relpath']}:{w['line']}")
     return out
 
@@ -339,7 +357,8 @@ def _render_operation(ev: dict[str, Any], max_list: int) -> list[str]:
         out.append(f"【字段触达】（前 {min(max_list, len(ev['field_access']))}）")
         for a in ev["field_access"][:max_list]:
             pf = {"yes": "✅落库", "no": "—内存", "unknown": "❓存疑", "na": ""}.get(a["persists"], "")
-            out.append(f"  {a['access']:<5} {a['field_key']:<26} {pf}  "
+            nm = f"「{a['field_name']}」" if a.get("field_name") else ""
+            out.append(f"  {a['access']:<5} {a['field_key']:<26}{nm} {pf}  "
                        f"{a['source_relpath']}:{a['line']}")
     return out
 

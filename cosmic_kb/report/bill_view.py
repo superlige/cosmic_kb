@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..semantic import hints
+
 
 def bill_view(conn, key: str) -> dict[str, Any] | None:
     """单据钻取详情；单据不存在返回 None。"""
@@ -35,15 +37,21 @@ def bill_view(conn, key: str) -> dict[str, Any] | None:
         "SELECT class_name,plugin_type,status,source_relpath,confidence,note FROM binding "
         "WHERE form_key=?", (key,)).fetchall()]
 
+    # 字段/容器标识 → 本单据内真实中文名（模式 B：焊进 field_touch，杜绝段二按命名惯例臆断字段名）。
+    name_by_key = {f["key"]: f["name"] for f in fields if f.get("name")}
+    for e in entities:
+        name_by_key.setdefault(e["key"], e["name"])
+
     # 每个字段被哪些插件事件写/读（来自字段级分析），按字段聚合 + 记层级坐标。
     field_touch: dict[str, dict[str, Any]] = {}
     for r in conn.execute(
-        "SELECT field_key,level,entry_key,access,persists,plugin_fqn,access_class,"
+        "SELECT field_key,level,entry_key,access,persists,plugin_fqn,plugin_type,access_class,"
         "event_method,line,source_relpath FROM field_access "
         "WHERE form_key=? AND field_key IS NOT NULL", (key,),
     ).fetchall():
         d = dict(r)
         slot = field_touch.setdefault(d["field_key"], {
+            "field_name": name_by_key.get(d["field_key"]),   # 已核对中文名（钉不出留 None）
             "writers": 0, "persisting": 0, "readers": 0,
             "level": d["level"], "entry_key": d["entry_key"], "events": []})
         if d["access"] == "write":
@@ -58,6 +66,8 @@ def bill_view(conn, key: str) -> dict[str, Any] | None:
             "access_class": (d["access_class"] or "").rsplit(".", 1)[-1] if cross else None,
             "event": d["event_method"], "access": d["access"], "persists": d["persists"],
             "line": d["line"], "source_relpath": d["source_relpath"],
+            # 模式 B：事件 → 语义文档主题，提示「判触发时机/入库先查语义」。
+            "semantics_topic": hints.event_topic(d["event_method"], d["plugin_type"]),
         })
 
     # 按实体分组的字段触达（前端以实体为单位展示）：实体 key → 该实体下被触达的字段清单。
@@ -124,7 +134,8 @@ def render_bill(bv: dict[str, Any], *, max_list: int = 30) -> str:
         items = sorted(bv["field_touch"].items(), key=lambda kv: -kv[1]["writers"])
         lines.append(f"【字段触达】（被插件读写的字段，前 {min(max_list, len(items))}；详情见 trace <字段>）")
         for fk, info in items[:max_list]:
-            lines.append(f"  {fk:<26} 写{info['writers']}(落库{info['persisting']}) 读{info['readers']}")
+            nm = f"「{info['field_name']}」" if info.get("field_name") else ""
+            lines.append(f"  {fk:<26}{nm} 写{info['writers']}(落库{info['persisting']}) 读{info['readers']}")
 
     if bv["risk_bindings"]:
         lines.append("")

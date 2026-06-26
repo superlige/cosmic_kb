@@ -135,6 +135,40 @@ def test_event_method_project_calls(tmp_path: Path):
         conn.close()
 
 
+# ── 1b) 模式 B 延伸：返回该方法读写字段 + 已核对中文名 + 语义路由（导航到方法就拿真名，不必猜）──
+def test_method_returns_fields_with_names(tmp_path: Path):
+    db, src = _build(tmp_path)
+    conn = store.open_kb(db)
+    try:
+        rd = method_calls.method_calls(
+            conn, "cqspb.am.AmDeepOp", "beforeExecuteOperationTransaction", source_root=src)
+        fields = rd["methods"][0]["fields"]
+        # 本方法体里 bill.set("cqkd_head",1) → 写入，带已核对名 + 事件语义路由（op→plugin-operation）。
+        w = next(w for w in fields["writes"] if w["field_key"] == "cqkd_head")
+        assert w["field_name"] == "cqkd_head"          # 元数据真名（夹具里名=key）
+        assert w["semantics_topic"] == "plugin-operation"
+        assert w["line"]
+        # 跨类的 svc.touch 写 cqkd_status 物理在 AmDeepService，不算本方法体内字段。
+        assert "cqkd_status" not in {w["field_key"] for w in fields["writes"]}
+        # 文本渲染含「本方法读写字段」小节，不崩。
+        text = method_calls.render_method_calls(rd)
+        assert "本方法读写字段" in text and "cqkd_head" in text
+    finally:
+        conn.close()
+
+
+def test_drilled_method_returns_its_own_fields(tmp_path: Path):
+    """对被调 service 方法导航，拿到的是它自己体内的字段（cqkd_status），印证按行范围归属。"""
+    db, src = _build(tmp_path)
+    conn = store.open_kb(db)
+    try:
+        rd = method_calls.method_calls(conn, "cqspb.am.AmDeepService", "touch", source_root=src)
+        wkeys = {w["field_key"] for w in rd["methods"][0]["fields"]["writes"]}
+        assert "cqkd_status" in wkeys
+    finally:
+        conn.close()
+
+
 # ── 2) 跨类下钻：对被调 service 方法再导航（叶子方法、无项目内调用）─────────────────
 def test_drilldown_into_service(tmp_path: Path):
     db, src = _build(tmp_path)

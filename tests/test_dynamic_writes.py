@@ -125,6 +125,33 @@ def test_dynwrites_filter(tmp_path: Path):
         conn.close()
 
 
+def test_trace_dynamic_writers_three_relaxations(tmp_path: Path):
+    """三项放宽（用户 2026-06-24）：form_key 判不出的动态写按 plugin_home 兜底归属、
+    成因含 unknown、不按 level 硬过滤——都要能被 trace 的「动态写入候选」捞回，避免漏掉
+    像 ContractRefundAdjustFormPlugin 那种"注册在本单据、但写入溯不到实体"的真实写入。"""
+    db = _build(tmp_path)
+    conn = store.open_kb(db)
+    try:
+        # 合成一条："注册在 cqkd_bill 上的 AmDynOp"在子分录层级、成因 unknown、form_key 判不出的写入。
+        # 旧逻辑三道筛子（form_key IN scope / 成因白名单不含 unknown / level 对齐）会把它全滤掉。
+        conn.execute(
+            "INSERT INTO field_access(form_key,field_key,level,entry_key,plugin_fqn,plugin_type,"
+            "access_class,event_method,access,persists,via,line,path,key_resolution,confidence,"
+            "source_relpath,evidence) VALUES(NULL,NULL,'subentry',NULL,'cqspb.am.AmDynOp','op',"
+            "'cqspb.am.AmDynOp','beforeExecuteOperationTransaction','write','unknown','do.set',"
+            "999,'[]','unknown',0.3,'AmDynOp.java',NULL)")
+        conn.commit()
+        # 查表头字段，但合成行在 subentry/form_key=None/unknown —— 三项放宽后仍应捞回。
+        ft = field_trace.field_trace(conn, "cqkd_head", form_key="cqkd_bill", level="header")
+        dyn = ft["dynamic_writers"]
+        # 合成行是唯一的 unknown 来源，且 form_key=None + level=subentry：
+        # 它被计入即同时证明①成因含 unknown、②plugin_home 兜底捞回 form_key=None、③不按 level 过滤。
+        assert dyn["by_cause"].get("unknown", 0) >= 1
+        assert any((m["class_fqn"] or "").endswith("AmDynOp") for m in dyn["methods"])
+    finally:
+        conn.close()
+
+
 def test_trace_surfaces_dynamic_writers_scoped(tmp_path: Path):
     """trace 某字段时，同单据内钉不出 key 的写入作为「动态写入候选」亮出（按 form_key 限定范围）。"""
     db = _build(tmp_path)

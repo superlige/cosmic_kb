@@ -155,8 +155,13 @@ def _populate(
             if mod:
                 edges.append(("module", mod, "form", m.key, "module_contains", 1.0, None))
 
+        # parent_id 是父实体的 **oid**（如 1B+5Q7IXAJGI），但 entity.parent_key 列语义是
+        # 「父实体 key」。用本单据自己的实体 oid→key 映射把 oid 翻成 key（解不出留 None，
+        # 不向消费者泄漏无意义的 oid）；表头 parent_id 为 None，照常留 None。
+        id_to_key = {e.id: e.key for e in m.entities if e.id}
         for e in m.entities:
-            entities.append((m.key, e.key, e.name, e.level, e.parent_id, e.table_name))
+            parent_key = id_to_key.get(e.parent_id) if e.parent_id else None
+            entities.append((m.key, e.key, e.name, e.level, parent_key, e.table_name))
             eid = f"{m.key}::{e.key}"
             edges.append(("form", m.key, "entity", eid, "has_entity", 1.0, None))
             search.append(("entity", e.key or "", e.name or "", m.key or ""))

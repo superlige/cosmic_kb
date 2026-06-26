@@ -66,6 +66,21 @@ class FieldEntry:
 
 
 @dataclass(frozen=True)
+class EntityEntry:
+    """一个分录/子分录容器本身（在 `entity` 表，不是 `field` 表）。
+
+    模型读到 `getDynamicObjectCollection("cqkd_zdfl")`——这是**分录 key** 不是字段 key，
+    打 `field` 表会漏；故 resolve 要同时查 entity 表识别容器。表头实体（level=header）也照实收。
+    """
+
+    key: str
+    name: str | None
+    form_key: str | None
+    level: str | None
+    parent_key: str | None
+
+
+@dataclass(frozen=True)
 class FormEntry:
     key: str
     name: str | None
@@ -124,6 +139,7 @@ class Lexicon:
 
     def __init__(self, conn) -> None:
         self.fields: list[FieldEntry] = []
+        self.entities: list[EntityEntry] = []
         self.forms: list[FormEntry] = []
         self.classes: list[ClassEntry] = []
         self.operations: list[OpEntry] = []
@@ -143,6 +159,12 @@ class Lexicon:
                        r["entity_key"], r["level"], r["kind"])
             for r in conn.execute(
                 "SELECT key,name,form_key,entity_key,level,kind FROM field")
+            if r["key"]
+        ]
+        self.entities = [
+            EntityEntry(r["key"], r["name"], r["form_key"], r["level"], r["parent_key"])
+            for r in conn.execute(
+                "SELECT form_key,key,name,level,parent_key FROM entity")
             if r["key"]
         ]
         self.operations = [
@@ -181,6 +203,9 @@ class Lexicon:
         self._fields_by_key: dict[str, list[FieldEntry]] = {}
         for f in self.fields:
             self._fields_by_key.setdefault(f.key, []).append(f)
+        self._entities_by_key: dict[str, list[EntityEntry]] = {}
+        for e in self.entities:
+            self._entities_by_key.setdefault(e.key, []).append(e)
         self._form_by_key: dict[str, FormEntry] = {f.key: f for f in self.forms}
         self._ops_by_key: dict[str, list[OpEntry]] = {}
         for o in self.operations:
@@ -194,6 +219,10 @@ class Lexicon:
     # ── 精确查（标识命中）────────────────────────────────────────────────────
     def fields_by_key(self, key: str) -> list[FieldEntry]:
         return self._fields_by_key.get(key, [])
+
+    def entities_by_key(self, key: str) -> list[EntityEntry]:
+        """分录/子分录容器（在 `entity` 表）按 key 精确命中（与 fields_by_key 对称）。"""
+        return self._entities_by_key.get(key, [])
 
     def form_by_key(self, key: str) -> FormEntry | None:
         return self._form_by_key.get(key)

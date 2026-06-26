@@ -458,6 +458,26 @@ def _cmd_dynwrites(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_resolve(args: argparse.Namespace) -> int:
+    """字段名核对：标识 → 真实元数据中文名+坐标（防命名惯例臆断；钉不出回 null）。"""
+    from ..graph import store
+    from ..report import resolve_fields
+
+    db, rc = _ensure_kb(args)
+    if rc:
+        return rc
+    conn = store.open_kb(db)
+    try:
+        d = resolve_fields.resolve_fields(conn, args.keys)
+        if args.json:
+            print(json.dumps(d, ensure_ascii=False, indent=2))
+        else:
+            print(resolve_fields.render_resolve_fields(d, max_list=args.max_list))
+    finally:
+        conn.close()
+    return 0
+
+
 def _cmd_trace(args: argparse.Namespace) -> int:
     """阶段5+6+7 旗舰：字段排障追踪（谁改了它·哪个事件函数·是否落库）。"""
     from ..graph import store
@@ -526,6 +546,39 @@ def _cmd_calls(args: argparse.Namespace) -> int:
         if not rd.get("found"):
             # 类/方法歧义有候选 → 退出码 3（同 ask，提示"再问一轮"）；纯未命中 → 2。
             return 3 if rd.get("candidates") else 2
+    finally:
+        conn.close()
+    return 0
+
+
+def _cmd_source(args: argparse.Namespace) -> int:
+    """模式 A：读项目源码（野生编码正确解码）+ 自动标注其中字段 key 的真实中文名。"""
+    from ..graph import store
+    from ..report import read_source
+
+    db, rc = _ensure_kb(args)
+    if rc:
+        return rc
+    start = end = None
+    if getattr(args, "lines", None):
+        try:
+            lo, _, hi = args.lines.partition("-")
+            start = int(lo) if lo else None
+            end = int(hi) if hi else None
+        except ValueError:
+            print("错误: --lines 格式应为 A-B（如 30-60）", file=sys.stderr)
+            return 2
+    conn = store.open_kb(db)
+    try:
+        d = read_source.read_source(
+            conn, args.relpath, source_root=getattr(args, "source_root", None),
+            start=start, end=end)
+        if args.json:
+            print(json.dumps(d, ensure_ascii=False, indent=2))
+        else:
+            print(read_source.render_read_source(d, max_list=args.max_list))
+        if not d.get("found"):
+            return 2
     finally:
         conn.close()
     return 0
@@ -746,6 +799,16 @@ def build_parser() -> argparse.ArgumentParser:
     _add_report_common(trace)
     trace.set_defaults(func=_cmd_trace)
 
+    resolve = sub.add_parser(
+        "resolve",
+        help="字段名核对：标识→真实元数据中文名+坐标（比 trace 便宜，防命名惯例臆断，钉不出回 null）",
+    )
+    resolve.add_argument(
+        "keys", nargs="+",
+        help="一个或多个字段/分录容器标识，如 cqkd_zjjnqk cqkd_zdfl（可批量核对）")
+    _add_report_common(resolve)
+    resolve.set_defaults(func=_cmd_resolve)
+
     coverage = sub.add_parser(
         "coverage", help="信任优先：手段一字段覆盖率（元数据为分母）+ 扫描质量分解",
     )
@@ -786,6 +849,15 @@ def build_parser() -> argparse.ArgumentParser:
     calls.add_argument("method", help="方法名（重载多个会全部列出）")
     _add_report_common(calls)
     calls.set_defaults(func=_cmd_calls)
+
+    # ── 模式 A：读源码 + 自动标注字段中文名（让大模型读源码走本工具，原生 reader 易乱码且不标注）──
+    source = sub.add_parser(
+        "source", help="读项目源码（野生编码正确解码）+ 自动标注其中字段 key 的真实中文名",
+    )
+    source.add_argument("relpath", help="相对源码根的源文件路径，如 cqspb/am/AmDeepOp.java")
+    source.add_argument("--lines", help="只读区间 A-B（1 基含端点，如 30-60）")
+    _add_report_common(source)
+    source.set_defaults(func=_cmd_source)
 
     # ── 阶段9：自然语言提问 → 确定性证据包（查 KB 取证，不调 LLM）─────────────
     ask = sub.add_parser(

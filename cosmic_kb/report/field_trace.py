@@ -17,6 +17,7 @@ import json
 from typing import Any
 
 from ..graph import store
+from ..semantic import hints
 from . import dynamic_writes
 
 # 排序权重：写优先于读；落库优先；置信度高优先。
@@ -30,11 +31,14 @@ _FA_COLS = (
     "event_method,event_phase,access,persists,persist_reason,via,line,path,"
     "key_resolution,confidence,source_relpath,evidence"
 )
+# 动态写入候选纳入的成因（用户 2026-06-24 三项全放宽：含 unknown，未识别局部变量持 key 也算候选）。
+_DYN_CAUSES = ("dynamic-loop", "concat", "external-const", "unknown")
 # 动态写入候选的成因标签（key_resolution → 人读）。
 _CAUSE_LABEL = {
     "dynamic-loop": "动态循环（遍历运行时/配置字段集）",
     "concat": "拼接键（运行时拼接字段标识）",
     "external-const": "外部/跨模块常量（不在扫描范围）",
+    "unknown": "未识别（多为局部变量持 key）",
 }
 
 
@@ -51,6 +55,8 @@ def _enrich_rows(rows: list[dict[str, Any]], plugin_home: dict[str, list]) -> No
         # 跨单据修改：插件所属单据里有任意一个不等于本记录的来源单据（form_key）。
         r["plugin_cross_form"] = bool(homes) and r["form_key"] is not None and \
             all(h["form_key"] != r["form_key"] for h in homes)
+        # 模式 B：事件方法 → 苍穹语义文档主题，焊进返回值，提示段二「判触发时机/入库先查语义，勿臆断」。
+        r["semantics_topic"] = hints.event_topic(r.get("event_method"), r.get("plugin_type"))
 
 
 def field_trace(
@@ -93,18 +99,38 @@ def field_trace(
     all_rows = [dict(r) for r in conn.execute(
         f"SELECT {_FA_COLS} FROM field_access WHERE field_key=?", (field_key,)).fetchall()]
 
-    # ── 动态写入候选：字段 key 钉不出（动态循环/拼接/外部常量），但来源单据落在本字段所在单据上 ──
+    # ── 动态写入候选：字段 key 钉不出（动态循环/拼接/外部常量/未识别），可能正改本字段 ──
     # 这些行 field_key 为空、按 key 查不到，却可能正改本字段——静态无法确认，留给段二大模型读源码定性。
-    # 范围按「与本字段同单据(form_key)」收窄，使大模型要读的方法有界且相关（红线 #6 两段式分工）。
+    # 三项放宽（用户 2026-06-24，避免漏掉真实写入如 ContractRefundAdjustFormPlugin）：
+    #   ① 成因含 unknown（_DYN_CAUSES）——未识别局部变量持 key 也是钉不出字段的候选，不该静默丢；
+    #   ② 范围 = 行 form_key ∈ 本字段单据 **∪** 插件注册在本字段单据上（form_key 判不出时兜底）——
+    #      动态写入的 DynamicObject 常溯不到来源实体(form_key=None)，但插件本身注册在某单据上，
+    #      只按行 form_key 收窄会把这批"越动态越漏"的写入滤光，故按 plugin_home 兜底归属；
+    #   ③ 不按 level 硬过滤（在下方 Python 段）——动态写入跨层级，碰哪层未知。
     scope_forms = {o["form_key"] for o in occurrences if o["form_key"]} | {
         r["form_key"] for r in all_rows if r["form_key"]}
+    # 注册在范围单据上的插件 —— 给 form_key 判不出的动态写兜底归属（plugin 表为主，binding 回落）。
+    scope_plugins: set[str] = set()
+    if scope_forms:
+        fph0 = ",".join("?" * len(scope_forms))
+        sf0 = sorted(scope_forms)
+        for tbl in ("plugin", "binding"):
+            scope_plugins |= {r[0] for r in conn.execute(
+                f"SELECT DISTINCT class_name FROM {tbl} WHERE form_key IN ({fph0})", sf0)
+                if r[0]}
     dyn_rows: list[dict[str, Any]] = []
     if scope_forms:
-        ph = ",".join("?" * len(scope_forms))
+        fph = ",".join("?" * len(scope_forms))
+        cph = ",".join("?" * len(_DYN_CAUSES))
+        clause = f"form_key IN ({fph})"
+        params: list[str] = list(_DYN_CAUSES) + sorted(scope_forms)
+        if scope_plugins:
+            pph = ",".join("?" * len(scope_plugins))
+            clause = f"({clause} OR (form_key IS NULL AND plugin_fqn IN ({pph})))"
+            params += sorted(scope_plugins)
         dyn_rows = [dict(r) for r in conn.execute(
             f"SELECT {_FA_COLS} FROM field_access WHERE field_key IS NULL AND access='write' "
-            f"AND key_resolution IN ('dynamic-loop','concat','external-const') "
-            f"AND form_key IN ({ph})", sorted(scope_forms)).fetchall()]
+            f"AND key_resolution IN ({cph}) AND {clause}", params).fetchall()]
 
     # 插件所属单据：plugin_fqn 注册在哪张/哪些单据上（plugin 表为主，binding 表回落）。
     # 这就是「被另外的哪个元数据的什么插件改了」——字段在单据 A，却可能被注册在单据 B 的插件改。
@@ -209,19 +235,22 @@ def field_trace(
         "locations": shown,
     }
 
-    # ── 动态写入候选：按用户查询坐标收窄（单据/层级）+ 按成因分桶 ──────────
+    # ── 动态写入候选：按用户查询单据收窄 + 按成因分桶（三项放宽：不按 level 过滤）──────────
+    # 精确单据时收窄到该单据：行 form_key 命中，或 form_key 判不出但插件注册在该单据（plugin_home 兜底）。
     dyn_scoped = dyn_rows
     if form_key:
-        dyn_scoped = [r for r in dyn_scoped if r["form_key"] == form_key]
-    if level:   # 层级可对齐则对齐；层级判不出(unknown/None)的保留，不漏
-        dyn_scoped = [r for r in dyn_scoped if r["level"] in (level, "unknown", None)]
+        home_on_form = {fqn for fqn, homes in plugin_home.items()
+                        if any(h["form_key"] == form_key for h in homes)}
+        dyn_scoped = [r for r in dyn_scoped
+                      if r["form_key"] == form_key
+                      or (r["form_key"] is None and r["plugin_fqn"] in home_on_form)]
     dyn_scoped.sort(key=lambda r: (r["key_resolution"], r["plugin_fqn"] or "", r["line"]))
     # 折叠成「该读方法」清单（cap 10）——防大模型上下文爆炸：同方法写 N 个钉不出 key 的字段只读一次。
     wl = dynamic_writes.build_method_worklist(dyn_scoped, cap=10)
     dynamic_writers = {
         "total": len(dyn_scoped),
         "by_cause": {c: sum(1 for r in dyn_scoped if r["key_resolution"] == c)
-                     for c in ("dynamic-loop", "concat", "external-const")},
+                     for c in _DYN_CAUSES},
         "total_methods": wl["total_methods"],
         "methods": wl["methods"],
         "capped": wl["capped"],
@@ -242,8 +271,14 @@ def field_trace(
         note = (f"该字段在 {len(occurrences)} 处实体里都有定义。下面已按「单据·层级·分录」分组；"
                 f"用 元数据.[分录.[子分录.]]字段 点号格式 或点定义坐标可精确定位到某层级。")
 
+    # 模式 B：被查字段的已核对中文名（占位坐标的菜单在 occurrences；这里给"单一名"便于直接采用，
+    # 同 key 跨多坐标有不同名时留 None，不替选——消歧看 occurrences）。
+    distinct_names = {o["field_name"] for o in occurrences if o.get("field_name")}
+    field_name = next(iter(distinct_names)) if len(distinct_names) == 1 else None
+
     return {
         "field_key": field_key,
+        "field_name": field_name,
         "filter": {"form_key": form_key, "entry_key": entry_key, "level": level},
         "precise": precise,
         "occurrences": occurrences,
@@ -384,6 +419,8 @@ def _fmt_access(r: dict[str, Any]) -> list[str]:
     lines.append(f"        {r['via']}  {r['source_relpath']}:{r['line']}{res_flag}")
     if r.get("plugin_fqn") and r.get("event_method"):
         lines.append(f"        方法全文直接读源文件；项目内调用导航: calls {r['plugin_fqn']} {r['event_method']}")
+    if r.get("semantics_topic"):
+        lines.append(f"        ⚑ 事件 {r['event_method']} 属 {r['semantics_topic']}：判触发时机/是否入库前先 cosmic_semantics('{r['semantics_topic']}')，勿凭训练知识臆断")
     if len(r["path"]) > 1:
         lines.append(f"        调用链: {' → '.join(r['path'])}")
     if r["persist_reason"]:
@@ -502,7 +539,7 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
         lines.append(
             "  成因: " + "、".join(
                 f"{_CAUSE_LABEL.get(c, c)} {bc.get(c, 0)}"
-                for c in ("dynamic-loop", "concat", "external-const") if bc.get(c)))
+                for c in _DYN_CAUSES if bc.get(c)))
         lines.append("  去这几个方法读源码，判定是否含本字段（按写入数降序）：")
         for m in dyn.get("methods", [])[:max_list]:
             cls = (m["class_fqn"] or "?").rsplit(".", 1)[-1]

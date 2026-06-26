@@ -3,9 +3,6 @@
 ## 概述
 新版本自定义 API 已切换为注解驱动模式，不再使用旧版 `IBillWebApiPlugin` 接口扩展方式。
 
-> **适用边界**
-> ✅ 本文档直接使用：OpenAPI 控制器无封装层，注解模式直接参考本文档。
-
 - 推荐模式：`@ApiController` + `@ApiMapping` + `@ApiGetMapping/@ApiPostMapping`
 - 适用版本：文档基于 Cosmic V8.0.1（更新时间 2026-01）
 - 注解包：`kd.bos.openapi.common.custom.annotation`

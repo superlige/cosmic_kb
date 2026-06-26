@@ -3,10 +3,6 @@
 ## 概述
 左树右表插件在标准列表上增加了“分组树 + 右侧列表”的协同能力，适用于组织树、分类树、业务分组树筛选场景。
 
-> **适用边界**
-> ✅ 本文档是原生兜底：左树右表有两个模板（TreeListPluginTemplate/StandardTreeListPluginTemplate），事件签名参考本文档。
-> ❌ 封装层 Ext 基类的通用部分优先读 `references/adv/plugin-base.md`。
-
 ## 核心基类
 - 基类：`kd.bos.list.plugin.AbstractTreeListPlugin`
 - 继承关系：`AbstractTreeListPlugin extends AbstractListPlugin implements ITreeListPlugin, SearchEnterListener`

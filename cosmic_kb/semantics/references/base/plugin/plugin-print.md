@@ -3,9 +3,6 @@
 ## 概述
 打印插件用于控制打印数据加载、控件输出前后加工以及自定义数据源取数。
 
-> **适用边界**
-> ✅ 本文档直接使用：打印插件无封装层，直接参考本文档。
-
 ## 核心基类
 - 基类：`kd.bos.print.core.plugin.AbstractPrintPlugin`
 - 继承关系：`AbstractPrintPlugin implements IPrintPlugin`

@@ -19,11 +19,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 from ..graph import store
 from ..java import ast_index as ax
+from ..semantic import hints
+from . import source_read
 
 
 # ── 入口 ──────────────────────────────────────────────────────────────────────
@@ -32,6 +33,8 @@ def method_calls(
 ) -> dict[str, Any]:
     """给定 类全限定名 + 方法名，返回该方法调用的项目内方法及位置（供大模型继续读源码下钻）。
 
+    每个方法还附 `fields`（该方法体读写的字段，**已核对中文名** + 是否落库 + 语义路由）——模型导航到
+    方法、还没读源码就拿到真名，杜绝按命名惯例/拼音猜该方法字段名；钉不出具体字段的动态写入只计数。
     找不到类 / 同末段类名歧义 / 找不到方法 → 返回 `found=False` + candidates，不臆造。
     需要 tree-sitter（`[parse]` extra）做调用分析；未装则 found=True 但给空清单 + 提示。
     """
@@ -62,11 +65,50 @@ def method_calls(
     by_simple = _by_simple(conn)
     relpath_by_fqn = _relpath_by_fqn(conn)
     self_methods = {m.name for m in all_methods}
-    methods = [
-        _payload(fqn, type_decl, md, by_simple, relpath_by_fqn, self_methods)
-        for md in matched
-    ]
+    names = hints.build_field_names(conn)
+    methods = []
+    for md in matched:
+        p = _payload(fqn, type_decl, md, by_simple, relpath_by_fqn, self_methods)
+        # 模式 B 延伸：该方法读写的字段（已核对名）焊进返回——导航到方法、还没动手猜，真名已在眼前。
+        p["fields"] = _fields_in_method(conn, relpath, md.start_line, md.end_line, names)
+        methods.append(p)
     return _assemble(cls, root, src_text, method_name, methods, java)
+
+
+def _fields_in_method(conn, relpath, start, end, names) -> dict[str, Any]:
+    """该方法体（按行范围）读写的字段：钉得出 key 的补已核对中文名+语义路由，钉不出的只计数。
+
+    field_access 无"访问方法"列，但有 source_relpath（相对源码根）+ line；方法的字段 =
+    本文件里 line 落在 [start, end] 的访问。复用 hints.FieldNames 贴真名，杜绝段二猜该方法的字段名。
+    """
+    empty = {"writes": [], "reads": [], "dynamic_writes": 0}
+    if not (relpath and start and end):
+        return empty
+    rows = conn.execute(
+        "SELECT field_key,form_key,level,entry_key,access,persists,event_method,plugin_type,line "
+        "FROM field_access WHERE source_relpath=? AND line BETWEEN ? AND ?",
+        (relpath, start, end)).fetchall()
+    writes: dict[tuple, dict[str, Any]] = {}
+    reads: dict[tuple, dict[str, Any]] = {}
+    dynamic = 0
+    for r in rows:
+        if not r["field_key"]:
+            if r["access"] == "write":
+                dynamic += 1          # 钉不出具体字段的动态写入：只诚实计数，交 dynwrites/读源码定性
+            continue
+        bucket = writes if r["access"] == "write" else reads
+        key = (r["field_key"], r["entry_key"])
+        if key in bucket:
+            continue
+        bucket[key] = {
+            "field_key": r["field_key"],
+            "field_name": names.get(r["field_key"], r["form_key"]),
+            "level": r["level"], "entry_key": r["entry_key"],
+            "persists": r["persists"], "line": r["line"],
+            "semantics_topic": hints.event_topic(r["event_method"], r["plugin_type"]),
+        }
+    by_line = lambda d: sorted(d.values(), key=lambda x: x["line"] or 0)
+    return {"writes": by_line(writes), "reads": by_line(reads), "dynamic_writes": dynamic}
 
 
 # ── 定位类 / 源码根 / 读源码 ────────────────────────────────────────────────────
@@ -98,35 +140,14 @@ def _locate_class(conn, class_fqn: str) -> tuple[dict[str, Any] | None, list[dic
 
 
 def _resolve_source_root(conn, source_root: str | None) -> str | None:
-    """源码根：入参优先，否则取建库时记入 kb_meta 的 source_args.source_root。"""
-    if source_root:
-        return source_root
-    raw = store.get_meta(conn, "source_args")
-    if not raw:
-        return None
-    try:
-        return (json.loads(raw) or {}).get("source_root")
-    except (json.JSONDecodeError, TypeError):
-        return None
+    """源码根：入参优先，否则取 kb_meta 的 source_args.source_root（委托 source_read 公共件）。"""
+    return source_read.resolve_source_root(conn, source_root)
 
 
 def _read_source(root: str | None, relpath: str | None) -> str | None:
     """按建库时同款编码探测读源文件（保证行号与 KB 记录一致）。读不到返回 None。"""
-    if not root or not relpath:
-        return None
-    from ..ingest import scanner
-    p = Path(root) / relpath
-    if not p.is_file():
-        return None
-    try:
-        raw = p.read_bytes()
-    except OSError:
-        return None
-    enc, _conf = scanner.detect_encoding(raw)
-    try:
-        return raw.decode(enc, errors="strict")
-    except (UnicodeDecodeError, LookupError):
-        return raw.decode("gb18030", errors="replace")
+    text, _enc = source_read.read_text(root, relpath)
+    return text
 
 
 def _find_type(root_node, fqn: str):
@@ -236,7 +257,8 @@ def _no_analysis(conn, cls, root, src_text, method_name, java) -> dict[str, Any]
         if names:
             return _method_not_found(fqn, relpath, method_name, names, java)
     methods = [{"method_name": method_name, "start_line": None, "end_line": None,
-                "calls": [], "summary": {"project_calls": 0}}]
+                "calls": [], "summary": {"project_calls": 0},
+                "fields": {"writes": [], "reads": [], "dynamic_writes": 0}}]
     return _assemble(cls, root, src_text, method_name, methods, java)
 
 
@@ -261,6 +283,8 @@ def _assemble(cls, root, src_text, method_name, methods, java) -> dict[str, Any]
         "source_root": root,
         "source_available": bool(src_text),
         "method_name": method_name,
+        # 模式 B：被导航方法若是苍穹事件回调，焊上语义文档主题（解释它"在干嘛"前先核对触发时机/入库）。
+        "semantics_topic": hints.event_topic(method_name),
         "overloaded": len(methods) > 1,
         "methods": methods,
         "java_available": java.get("available", True),
@@ -318,6 +342,9 @@ def render_method_calls(rd: dict[str, Any], *, max_list: int = 50) -> str:
     lines.append(f"  类 {rd['class_fqn']}  模块 {rd.get('module') or '?'}")
     lines.append(f"  源码 {rd['relpath']}（请直接读此文件看方法全文）"
                  + ("" if rd["source_available"] else "  ⚠源码未读到"))
+    if rd.get("semantics_topic"):
+        lines.append(f"  ⚑ {rd['method_name']} 是苍穹事件回调（{rd['semantics_topic']}）："
+                     f"解释它在干嘛/判触发时机/是否入库前先 cosmic_semantics('{rd['semantics_topic']}')")
     if rd.get("note"):
         lines.append(f"  {rd['note']}")
 
@@ -327,6 +354,19 @@ def render_method_calls(rd: dict[str, Any], *, max_list: int = 50) -> str:
         lines.append("")
         lines.append("─" * 72)
         lines.append(f"▼ {m['method_name']}()  {loc}  项目内调用 {m['summary']['project_calls']} 处")
+        fl = m.get("fields") or {}
+        if fl.get("writes") or fl.get("reads"):
+            lines.append("  【本方法读写字段（已核对名，引用照抄勿猜）】")
+            _pl = {"yes": "✅落库", "no": "—内存", "unknown": "❓存疑", "na": ""}
+            for w in fl.get("writes", [])[:max_list]:
+                nm = f"「{w['field_name']}」" if w.get("field_name") else "（钉不出名→resolve_fields）"
+                tp = f"  ⚑{w['semantics_topic']}" if w.get("semantics_topic") else ""
+                lines.append(f"    写 {w['field_key']}{nm} {_pl.get(w['persists'], '')}  :{w['line']}{tp}")
+            for r in fl.get("reads", [])[:max_list]:
+                nm = f"「{r['field_name']}」" if r.get("field_name") else "（钉不出名→resolve_fields）"
+                lines.append(f"    读 {r['field_key']}{nm}  :{r['line']}")
+        if fl.get("dynamic_writes"):
+            lines.append(f"  ⚠ 另有 {fl['dynamic_writes']} 处动态写入钉不出具体字段（→ dynwrites / 读源码定性）")
         if m["calls"]:
             lines.append("  【项目内调用】（→ 去对应文件接着读 / 可再对其调用导航）")
             for c in m["calls"][:max_list]:

@@ -73,6 +73,36 @@ def test_build_counts(tmp_path: Path):
     assert db.is_file()
 
 
+def test_entity_parent_key_is_key_not_oid(tmp_path: Path):
+    """entity.parent_key 存父实体的 **key**（非 oid）——回归：曾误存 parent_id（1B+5Q7IXAJGI 这类 oid）。"""
+    scan = scanner.scan(tmp_path)  # 空源码即可，本测只看实体层级
+    models = [
+        _model("cqkd_htrefund", "退租", "cqkd_assets", [],
+               entities=[
+                   MetaEntity("BillEntity", "cqkd_htrefund", "退租主体",
+                              "1B+5Q7IXAJGI", "header", None, "t_head"),
+                   MetaEntity("EntryEntity", "cqkd_zdfl", "退租后账单",
+                              "9Z+2AB", "entry", "1B+5Q7IXAJGI", "t_entry"),
+                   MetaEntity("SubEntryEntity", "cqkd_sub", "子分录",
+                              "7K+1CD", "subentry", "9Z+2AB", "t_sub"),
+               ]),
+    ]
+    index = namespace.build_index(scan)
+    bridge = linker.link(scan, models, index=index)
+    mm = project_map.module_map(scan, models, bridge, index=index)
+    db = tmp_path / "kb.db"
+    store.build_kb(scan, models, bridge, mm, db, index=index)
+    conn = store.open_kb(db)
+    try:
+        rows = {r["key"]: r["parent_key"] for r in conn.execute(
+            "SELECT key,parent_key FROM entity")}
+        assert rows["cqkd_htrefund"] is None          # 表头无父
+        assert rows["cqkd_zdfl"] == "cqkd_htrefund"    # 分录父 = 表头 key，不是 oid
+        assert rows["cqkd_sub"] == "cqkd_zdfl"         # 子分录父 = 分录 key
+    finally:
+        conn.close()
+
+
 def test_idempotent_rebuild(tmp_path: Path):
     """重建两次：计数一致、无残留（DROP→重建是幂等的）。"""
     db, counts1 = _build(tmp_path)
