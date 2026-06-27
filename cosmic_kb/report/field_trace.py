@@ -40,7 +40,7 @@ _FA_COLS = (
 _CAP_WRITERS = 40          # 每坐标写入（核心价值，给得宽）
 _CAP_READER_METHODS = 15   # 每坐标读取折叠成的「该读方法」清单条数
 _CAP_POSSIBLE = 25         # 可能命中（层级/分录存疑）
-_CAP_UNLOCATED = 25        # 来源未定位
+_CAP_UNLOCATED_METHODS = 15  # 来源未定位折叠成的「反推来源方法」清单条数
 _CAP_COARSE = 25           # 粗扫疑似盲点位置
 
 # 单行投影白名单：只留 Web accessTable/possibleTable + CLI _fmt_access 实际渲染的字段。
@@ -101,6 +101,55 @@ def _collapse_reader_methods(rows: list[dict[str, Any]], *, cap: int) -> dict[st
         })
     out.sort(key=lambda d: (-d["count"], d["class_fqn"] or ""))
     return {"total": len(rows), "methods": out[:cap], "capped": max(0, len(out) - cap)}
+
+
+def _collapse_unlocated_methods(rows: list[dict[str, Any]], *, cap: int) -> dict[str, Any]:
+    """把「来源单据未钉出（form_key=None）但确实读写本字段」的行折叠成「反推来源单据」工作单。
+
+    与 `dynamic_writers`（B 类，字段钉不出）对称：那是钉不出"改的哪个字段"，这是钉不出"改的
+    哪张单据"。确定性层数据流/元数据都没追到这个 DynamicObject 的来源实体，**交段二大模型顺
+    `calls` 读源码反推**（红线 #1 可读全文 / #4 不臆造）。按 (入口类, 事件方法) 去重——同方法读写
+    N 个本字段的位置只列一次，给写/读分计 + `calls` 导航 + 物理位置（≤3）+ 该插件注册所属单据
+    `plugin_form_label`（**只读线索**：很可能来自这张单据，去源码确认，绝不自动回填 form_key）+
+    语义路由。写多优先、按访问数降序，超 cap 截断并报剩余。形状同 dynamic_writers（total/methods/capped）。
+    """
+    groups: dict[tuple, dict[str, Any]] = {}
+    for r in rows:
+        key = (r.get("plugin_fqn"), r.get("event_method"))
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = {
+                "class_fqn": r.get("plugin_fqn"), "method": r.get("event_method"),
+                "plugin_simple": r.get("plugin_simple"), "plugin_type": r.get("plugin_type"),
+                "plugin_form_label": r.get("plugin_form_label"),
+                "semantics_topic": r.get("semantics_topic"),
+                "writes": 0, "reads": 0, "locations": {},
+            }
+        if r.get("access") == "write":
+            g["writes"] += 1
+        else:
+            g["reads"] += 1
+        ac = r.get("access_class") or r.get("plugin_fqn")
+        g["locations"].setdefault(ac, f"{r.get('source_relpath')}:{r.get('line')}")
+    out: list[dict[str, Any]] = []
+    for g in groups.values():
+        out.append({
+            "class_fqn": g["class_fqn"], "method": g["method"],
+            "plugin_simple": g["plugin_simple"], "plugin_type": g["plugin_type"],
+            "plugin_form_label": g["plugin_form_label"], "semantics_topic": g["semantics_topic"],
+            "writes": g["writes"], "reads": g["reads"], "count": g["writes"] + g["reads"],
+            "calls": (f"calls {g['class_fqn']} {g['method']}"
+                      if g["class_fqn"] and g["method"] else None),
+            "locations": list(g["locations"].values())[:3],
+        })
+    out.sort(key=lambda d: (-d["writes"], -d["count"], d["class_fqn"] or ""))
+    return {
+        "total": len(rows),
+        "writes": sum(1 for r in rows if r.get("access") == "write"),
+        "reads": sum(1 for r in rows if r.get("access") != "write"),
+        "methods": out[:cap],
+        "capped": max(0, len(out) - cap),
+    }
 # 动态写入候选纳入的成因（用户 2026-06-24 三项全放宽：含 unknown，未识别局部变量持 key 也算候选）。
 _DYN_CAUSES = ("dynamic-loop", "concat", "external-const", "unknown")
 # 动态写入候选的成因标签（key_resolution → 人读）。
@@ -372,7 +421,8 @@ def field_trace(
 ) -> dict[str, Any]:
     """追踪一个字段的全部插件读写 + 落库判定，按实体坐标分组（**富投影**：Web/CLI/builder 用）。
 
-    每坐标的 writers 按行 slim+cap，readers 折叠成「该读方法」清单；possible/unlocated 行级 slim+cap。
+    每坐标的 writers 按行 slim+cap，readers 折叠成「该读方法」清单；possible 行级 slim+cap；
+    unlocated 折叠成「反推来源单据」工作单。
     真实总数恒在 summary（红线 #4）。MCP 防截断用 `trace_compact`（按类合并 + 写读拆分），不走本函数。
     """
     m = _collect_materials(conn, field_key, form_key=form_key, entry_key=entry_key, level=level)
@@ -387,9 +437,9 @@ def field_trace(
         "precise": m["precise"],
         "occurrences": m["occurrences"],
         "groups": m["group_list"],
-        # possible/unlocated 投影+cap（真实总数在 summary.possible / summary.unlocated）。
+        # possible 投影+cap；unlocated 折叠成「反推来源单据」工作单（真实总数在 summary.possible / summary.unlocated）。
         "possible": [_slim_row(r) for r in m["possible"][:_CAP_POSSIBLE]],   # 可能命中（层级/分录存疑）
-        "unlocated": [_slim_row(r) for r in m["unlocated"][:_CAP_UNLOCATED]],  # 来源未定位（form_key 为空）
+        "unlocated": _collapse_unlocated_methods(m["unlocated"], cap=_CAP_UNLOCATED_METHODS),  # 来源未定位（form_key 为空）→ 反推来源工作单
         # 顶层扁平 writers/readers 已删——与 groups[].writers/readers 重复、无消费方（Web/CLI 用 groups+summary）。
         "summary": m["summary"],
         "coarse": m["coarse"],              # 粗精度扫描命中 + 逐处互证（与高精度并列）
@@ -535,6 +585,12 @@ def _build_compact(
         capped_hit = capped_hit or bool(d["capped"]) or any(c["methods_capped"] for c in d["classes"])
         return d
 
+    def _mu(rows):
+        nonlocal capped_hit
+        d = _collapse_unlocated_methods(rows, cap=cap_methods)
+        capped_hit = capped_hit or bool(d["capped"])
+        return d
+
     groups_out: list[dict[str, Any]] = []
     for g in m["group_list"]:
         node: dict[str, Any] = {
@@ -558,13 +614,15 @@ def _build_compact(
         "occurrences": m["occurrences"], "summary": dict(m["summary"]),
         "groups": groups_out,
     }
-    # possible / unlocated：按 access 过滤后同样按类合并（写侧用写合并，读侧用读合并）。
+    # possible：按 access 过滤后按类合并（写侧用写合并，读侧用读合并）。
+    # unlocated：折叠成「反推来源单据」工作单（含 calls + plugin_home 线索），比按类合并更省字节。
     poss, unloc = _access_rows(m["possible"], access), _access_rows(m["unlocated"], access)
     if want_read_detail:
-        res["possible"], res["unlocated"] = _mr(poss), _mr(unloc)
+        res["possible"] = _mr(poss)
         res["coarse"] = m["coarse"]
     else:  # None / write：展示写侧
-        res["possible"], res["unlocated"] = _mw(poss), _mw(unloc)
+        res["possible"] = _mw(poss)
+    res["unlocated"] = _mu(unloc)
     if want_write:
         res["dynamic_writers"] = m["dynamic_writers"]
 
@@ -819,12 +877,31 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
             lines.append(f"  [{loc}]")
             lines.extend(_fmt_access(r))
 
-    unlocated = ft.get("unlocated") or []
-    if unlocated:
+    # 未定位单据：确实读写该字段、但来源单据未钉出 → 折叠成「反推来源单据」工作单（仿动态写候选）。
+    unloc = ft.get("unlocated") or {}
+    if unloc.get("total"):
         lines.append("")
-        lines.append(f"▼ 未定位单据（来源实体判不出，但确实读写该字段，共 {len(unlocated)}）")
-        for r in unlocated[:max_list]:
-            lines.extend(_fmt_access(r))
+        lines.append("─" * 72)
+        lines.append(
+            f"▼ 未定位单据（确实读写该字段，但来源单据判不出，需大模型读源码反推来源）："
+            f"{unloc['total']} 处（写 {unloc.get('writes', 0)} / 读 {unloc.get('reads', 0)}）"
+            f" → {len(unloc.get('methods', []))} 个方法"
+        )
+        lines.append("  去这几个方法读源码，反推这个 DynamicObject 来自哪张单据（按写入数降序）：")
+        for m in unloc.get("methods", [])[:max_list]:
+            cls = m.get("plugin_simple") or (m.get("class_fqn") or "?").rsplit(".", 1)[-1]
+            home = f"  «很可能属 {m['plugin_form_label']}»" if m.get("plugin_form_label") else "  «service/未注册»"
+            lines.append(
+                f"  · {cls}.{m['method']} [{m.get('plugin_type')}]"
+                f"  (写 {m['writes']}/读 {m['reads']}){home}"
+                + (f"  {m['calls']}" if m.get("calls") else ""))
+            if m.get("locations"):
+                lines.append(f"        位于 {' / '.join(m['locations'])}")
+            if m.get("semantics_topic"):
+                lines.append(f"        ⚑ 判触发时机/是否入库前先 cosmic_semantics('{m['semantics_topic']}')")
+        if unloc.get("capped"):
+            lines.append(f"    …另有 {unloc['capped']} 个方法未列出（用 单据.字段 收窄、或 --json）")
+        lines.append("    注：plugin_form_label 是插件注册单据，只是来源线索非确诊；来源单据请读源码确认，勿臆造。")
 
     # 粗精度扫描命中（词法扫描）——只列「仅粗扫见」疑似盲点，已剔除常量类定义。
     coarse = ft.get("coarse") or {}

@@ -32,6 +32,11 @@ INSTRUCTIONS = (
     "具体字段。trace 返回值里的 `dynamic_writers` 是**按方法去重的「该读方法」清单**（带 calls 导航 + "
     "写入位置）：要把『谁改了 X』答全，就对清单里的方法逐个 calls/读本机源码，判定它是否真碰了 X（"
     "不臆造）。\n"
+    "【未定位来源】trace 返回值里的 `unlocated` 是**「反推来源单据」工作单**（与 dynamic_writers 对称："
+    "那是钉不出『改哪个字段』，这是钉不出『改哪张单据』）——这些读写**确实碰了被查字段**，只是来源"
+    "DynamicObject 来自哪张单据没钉出（form_key=None）。每条按方法去重、带 calls 导航与 `plugin_form_label`"
+    "（该插件注册单据，**只是来源线索非确诊**）：要确认它操作的是哪张单据，顺 calls/读本机源码反推，"
+    "**绝不把 plugin_form_label 当成已确定来源**。\n"
     "【trace 写读拆分 + 按类合并】trace 默认回**写入明细（坐标→类→写入点）+ 读取仅按类计数概览**"
     "（`readers_overview`）；要读取明细就再调一次 `trace(field, access='read')`（类→方法，顺 `calls` "
     "去读源码）；只看写入用 `access='write'`。写入/读取都**按类合并**（同一类只出现一次，行号/落库等"
@@ -158,6 +163,10 @@ def tool_trace(
       明细就再调一次 `access='read'`。
     **真实总数恒在 `summary`**，被 cap 截断的数在各节点 `capped`/`sites_capped`/`methods_capped`
     （红线 #4 不丢数）。仍嫌多就用 `form/entry/level` 收窄到单个坐标。
+
+    返回里 `unlocated` 是**「反推来源单据」工作单**：确实读写该字段、但来源单据未钉出（form_key=None）的
+    读写，按方法去重 + `calls` 导航 + `plugin_form_label`（插件注册单据，仅来源线索非确诊）——顺 calls
+    读源码反推它操作哪张单据，勿把 plugin_form_label 当确定来源。与 `dynamic_writers`（字段钉不出）区分。
     """
     from ..report import field_trace
 

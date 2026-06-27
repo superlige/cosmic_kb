@@ -381,23 +381,53 @@ function renderField(ft) {
     box.appendChild(body);
     out.appendChild(box);
   }
-  // 未定位单据（来源实体判不出，但确有插件读写该字段）——直接铺开明细供人工核对。
-  if (ft.unlocated && ft.unlocated.length) {
+  // 未定位单据（来源实体判不出，但确有插件读写该字段）——折叠成「反推来源单据」工作单。
+  const unloc = ft.unlocated || {};
+  if (unloc.total) {
     const box = el("div", "group");
     const head = el("div", "ghead");
-    head.appendChild(el("div", "glabel warn", "未定位单据（数据包来源判不出）"));
+    head.appendChild(el("div", "glabel warn", "未定位单据（数据包来源判不出，需读源码反推来源）"));
     head.appendChild(el("div", "gstat",
-      `${ft.unlocated.length} 条 — 来源实体静态判不出归属单据，但确实读写该字段，供人工核对`));
+      `${unloc.total} 处（写 ${unloc.writes || 0} / 读 ${unloc.reads || 0}）→ ` +
+      `${(unloc.methods || []).length} 个方法 — 确实读写该字段，但来源单据没钉出，去这些方法读源码反推`));
     box.appendChild(head);
     const body = el("div", "gbody");
-    const w = ft.unlocated.filter((r) => r.access === "write");
-    const rd = ft.unlocated.filter((r) => r.access === "read");
-    if (w.length) { body.appendChild(el("h4", null, "写该字段的插件事件")); body.appendChild(accessTable(w)); }
-    if (rd.length) { body.appendChild(el("h4", null, "读该字段的插件事件")); body.appendChild(accessTable(rd)); }
+    body.appendChild(unlocatedMethodsTable(unloc));
     box.appendChild(body);
     out.appendChild(box);
   }
   return out;
+}
+
+// 反推来源工作单表：同插件同事件方法去重一行，给 写/读 处数 + 来源线索(plugin_form_label) + 位置 + calls。
+function unlocatedMethodsTable(ul) {
+  const t = el("table", "tbl acc");
+  t.innerHTML =
+    "<thead><tr><th>插件类</th><th>类型</th><th>事件函数</th><th>写/读</th>" +
+    "<th>来源线索(插件注册单据)</th><th>位置</th><th>导航</th></tr></thead>";
+  const tb = el("tbody");
+  (ul.methods || []).forEach((m) => {
+    const cls = m.plugin_simple || (m.class_fqn || "?").split(".").pop();
+    const tr = el("tr");
+    tr.innerHTML =
+      `<td class="ellip" title="${esc(m.class_fqn || "")}">${esc(cls)}</td>` +
+      `<td>${esc(m.plugin_type || "")}</td>` +
+      `<td>${esc(m.method || "")}</td>` +
+      `<td>写 ${m.writes || 0} / 读 ${m.reads || 0}</td>` +
+      `<td class="ellip" title="${esc(m.plugin_form_label || "")}">${esc(m.plugin_form_label || "service/未注册")}</td>` +
+      `<td class="loc">${esc((m.locations || []).join(" / "))}</td>` +
+      `<td class="mono muted">${esc(m.calls || "")}</td>`;
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb);
+  const wrap = el("div", null);
+  wrap.appendChild(t);
+  if (ul.capped) {
+    wrap.appendChild(el("div", "muted", `…另有 ${ul.capped} 个方法未列出（收窄到 单据.字段 看全部）`));
+  }
+  wrap.appendChild(el("p", "muted",
+    "来源线索是插件注册单据，仅线索非确诊；来源单据请顺 calls 读源码确认，勿臆造。"));
+  return wrap;
 }
 
 // 仅粗扫见块：只列「粗扫见到、高精度没记、且非常量类」的疑似盲点（候选非确诊）。

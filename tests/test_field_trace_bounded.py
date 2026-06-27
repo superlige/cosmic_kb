@@ -84,6 +84,40 @@ def test_collapse_readers_caps_methods():
     assert out["total"] == 20
 
 
+# ── ②b _collapse_unlocated_methods 去重 + 写读分计 + 来源线索 + cap ───────────────
+def _unloc_row(plugin, method, access, *, cls=None, line=1, home="cqkd_ht「合同」", topic="plugin-form"):
+    return {
+        "plugin_fqn": plugin, "event_method": method, "access": access,
+        "access_class": cls or plugin, "plugin_simple": plugin.rsplit(".", 1)[-1],
+        "plugin_type": "form", "plugin_form_label": home, "semantics_topic": topic,
+        "source_relpath": "a/B.java", "line": line,
+    }
+
+
+def test_collapse_unlocated_dedups_and_splits_write_read():
+    """同 (类,方法) 多处去重成一条；写/读分计、total 是去重前真实处数（红线 #4 不丢数）。"""
+    rows = [_unloc_row("p.A", "m1", "write", line=i) for i in range(3)] + \
+           [_unloc_row("p.A", "m1", "read"), _unloc_row("p.B", "m2", "read")]
+    out = field_trace._collapse_unlocated_methods(rows, cap=15)
+    assert out["total"] == 5 and out["writes"] == 3 and out["reads"] == 2
+    assert len(out["methods"]) == 2
+    top = out["methods"][0]                       # 写多者排前
+    assert top["method"] == "m1" and top["writes"] == 3 and top["reads"] == 1
+    assert top["count"] == 4 and top["calls"] == "calls p.A m1"
+    assert len(top["locations"]) <= 3
+    # 来源线索（plugin 注册单据）透传，作只读提示——不写进 form_key。
+    assert top["plugin_form_label"] == "cqkd_ht「合同」"
+    assert top["semantics_topic"] == "plugin-form"
+
+
+def test_collapse_unlocated_caps_methods():
+    """方法数超 cap → methods 截断、capped 记剩余、total/writes/reads 仍为全部。"""
+    rows = [_unloc_row(f"p.C{i}", "m", "write") for i in range(20)]
+    out = field_trace._collapse_unlocated_methods(rows, cap=15)
+    assert len(out["methods"]) == 15 and out["capped"] == 5
+    assert out["total"] == 20 and out["writes"] == 20 and out["reads"] == 0
+
+
 # ── ③ 集成形状（真实 synth KB）──────────────────────────────────────────────
 def test_trace_dict_is_bounded(tmp_path: Path):
     conn = store.open_kb(make_kb(tmp_path))
@@ -104,7 +138,10 @@ def test_trace_dict_is_bounded(tmp_path: Path):
         assert len(rd["methods"]) <= field_trace._CAP_READER_METHODS
     # 其余数组也设界。
     assert len(ft["possible"]) <= field_trace._CAP_POSSIBLE
-    assert len(ft["unlocated"]) <= field_trace._CAP_UNLOCATED
+    # unlocated 现为「反推来源单据」工作单 dict（非平铺行）。
+    ul = ft["unlocated"]
+    assert set(ul) == {"total", "writes", "reads", "methods", "capped"}
+    assert len(ul["methods"]) <= field_trace._CAP_UNLOCATED_METHODS
     assert len(ft["coarse"]["locations"]) <= field_trace._CAP_COARSE
     # 真实总数仍在 summary（不丢数）。
     assert "writers" in ft["summary"] and "readers" in ft["summary"]

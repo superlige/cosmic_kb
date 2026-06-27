@@ -145,6 +145,59 @@ def test_compact_access_read_only_readers(tmp_path: Path):
     assert r1["total"] == 2  # 同类两处读取合并、count 累加
 
 
+def test_compact_unlocated_is_worklist(tmp_path: Path):
+    """未定位单据（form_key=None 但确实读写本字段）在 compact 下折叠成「反推来源单据」工作单：
+    按 (类,方法) 去重、写读分计、带 calls + plugin_form_label 来源线索（非自动回填）。"""
+    db = make_kb(tmp_path)
+    # 同字段、来源单据判不出（form_key=None），但插件注册在 cqkd_assetcard 上（→ plugin_form_label 线索）。
+    _seed(db, [
+        _row("cqkd_collateralstatus", plugin_fqn="cqspb.assets.CollateralOp",
+             access_class="cqspb.assets.Helper", access="write", method="fill", line=10,
+             form_key=None, via="do.set"),
+        _row("cqkd_collateralstatus", plugin_fqn="cqspb.assets.CollateralOp",
+             access_class="cqspb.assets.Helper", access="write", method="fill", line=11,
+             form_key=None, via="do.set"),
+    ])
+    conn = store.open_kb(db)
+    try:
+        # 精确单据模式才会分出 unlocated 桶（裸字段查询全归坐标组）。
+        ft = field_trace.trace_compact(conn, "cqkd_collateralstatus", form_key="cqkd_assetcard")
+    finally:
+        conn.close()
+    ul = ft["unlocated"]
+    assert set(ul) == {"total", "writes", "reads", "methods", "capped"}
+    assert ul["total"] == 2 and ul["writes"] == 2          # 两处写入去重前真实数
+    m = ul["methods"][0]
+    assert m["method"] == "fill" and m["writes"] == 2 and m["calls"] == "calls cqspb.assets.CollateralOp fill"
+    # 来源线索 = 插件注册单据（只读提示，不写进 form_key）。
+    assert "cqkd_assetcard" in (m["plugin_form_label"] or "")
+
+
+def test_compact_unlocated_never_exceeds_budget(tmp_path: Path):
+    """防膨胀硬保证：海量 form_key=None 读写时，compact 折叠后仍 ≤ budget（折叠 site→count 必然更省）。"""
+    db = make_kb(tmp_path)
+    rows = []
+    for i in range(400):
+        rows.append(_row(
+            "cqkd_collateralstatus", plugin_fqn=f"cqspb.pkg.VeryLongUnlocatedPlugin{i}",
+            access="write", method="beforeExecuteOperationTransaction", line=i,
+            form_key=None, via="do.set"))
+    _seed(db, rows)
+    conn = store.open_kb(db)
+    try:
+        for access in (None, "write", "read"):
+            ft = field_trace.trace_compact(conn, "cqkd_collateralstatus",
+                                           form_key="cqkd_assetcard", access=access)
+            size = len(json.dumps(ft, ensure_ascii=False))
+            assert size <= field_trace._COMPACT_BUDGET, f"access={access} 超预算: {size}"
+            assert set(ft["unlocated"]) == {"total", "writes", "reads", "methods", "capped"}
+        # 真实总数不丢（summary.unlocated 记全部）。
+        ft = field_trace.trace_compact(conn, "cqkd_collateralstatus", form_key="cqkd_assetcard")
+        assert ft["summary"]["unlocated"] == 400
+    finally:
+        conn.close()
+
+
 def test_compact_access_write_only_writers(tmp_path: Path):
     """access='write'：只回写入 + dynamic_writers，无读取任何形态。"""
     db = make_kb(tmp_path)
