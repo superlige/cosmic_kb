@@ -21,16 +21,25 @@ if TYPE_CHECKING:
 
 @dataclass
 class CallGraph:
-    methods: dict[str, "MethodDecl"]              # 方法名 → 声明（同名重载取首个，类内足够）
+    methods: dict[str, "MethodDecl"]              # 方法名 → 声明（同名重载取首个；类内调用边按名匹配够用）
+    method_decls: list["MethodDecl"]              # **全部**方法声明（含同名重载，按源码顺序）
     calls: dict[str, set[str]]                    # 方法名 → 它调用的本类方法名集合
     external_calls: dict[str, int]                # 方法名 → 出本类（unresolved）的调用计数
 
 
 def build_call_graph(type_decl: "TypeDecl") -> CallGraph:
-    """建一个类的类内调用图。"""
+    """建一个类的类内调用图。
+
+    `methods` 按名取首个重载（调用边匹配、接收者解析按名保守处理即可）；但**字段扫描/standalone
+    补扫**必须逐个覆盖全部重载（同名不同签名是两个方法体，丢掉就整片漏字段——用户 2026-06-27 反馈
+    `floorInit(IDataModel)` 重载被 `floorInit(DynamicObject)` 顶掉、`model.getValue("cqkd_ssfq")` 扫不出）。
+    故另存 `method_decls` 保留全部声明，供 analyze 逐个分析。
+    """
     methods: dict[str, "MethodDecl"] = {}
+    method_decls: list["MethodDecl"] = []
     for m in ax.iter_methods(type_decl):
-        methods.setdefault(m.name, m)   # 重载同名：类内路径分析取首个即可
+        method_decls.append(m)
+        methods.setdefault(m.name, m)   # 调用边/接收者解析按名匹配，取首个重载即可
 
     calls: dict[str, set[str]] = {}
     external: dict[str, int] = {}
@@ -47,7 +56,7 @@ def build_call_graph(type_decl: "TypeDecl") -> CallGraph:
                 ext += 1                      # 出本类调用：unresolved（跨类工具函数）
         calls[name] = own
         external[name] = ext
-    return CallGraph(methods=methods, calls=calls, external_calls=external)
+    return CallGraph(methods=methods, method_decls=method_decls, calls=calls, external_calls=external)
 
 
 @dataclass

@@ -163,13 +163,26 @@
   （堵 ask 截断，复用 rq 不动 builder/CLI）；CLI 文本/本地 Web（HTTP 无限制）不动。真实库 `cqkd_ht.cqkd_zdgl.cqkd_qs`
   富 dict 51456B→compact 默认 22761/write 20217/read 23182B（全 < 32KB）。零 schema 改动（v10）。注：MCP server 常驻，
   改源码需**重连/重启 MCP** 才生效。**当前 253 passed。**
+- ✅ **信任优先·提高字段扫描率（模型形参识别 + 内联集合链，1+2+3）**（2026-06-27）：比 form_key=None 更糟的一类是
+  **写入根本没被扫出**（access 记录都不产生、查询时彻底隐形）。三条边界清晰、高收益、低误报的确定性缺口，全落在
+  `field_access.py` 轻量数据流：① **IDataModel/IBillModel/IFormView 形参识别为模型上下文**——helper
+  `void calc(IDataModel model){ model.setValue(...) }` 的写入原被整条丢弃（`_is_model_receiver` 只认 getModel() 结尾/已知
+  model_vars，形参永不入集）。`analyze._model_params` 按 `_MODEL_TYPES` 抽形参名注入 `_Env.model_params`，`_build_contexts`
+  播种 `model_vars`；模型 API 来源改走 `_model_entity`（跨类 service 收 getModel()/getView() 定到绑定单据，插件自身回落
+  default_entity 不变；仅类型白名单入集、不靠变量名猜=低误报）。② **内联 `X.getDynamicObjectCollection("k").addNew()`
+  赋给 DynamicObject 局部**——原 `_GET_COLL_ARG_RE` 先命中把新行误当集合 → 后续 `row.set` 整片判不出；新增内联守卫
+  （仿 stream 前置）+ 共享闭包 `_inline_coll_elem` 解析元素行坐标。③ **内联 `…getDynamicObjectCollection("k").forEach(o->o.set(..))`
+  / `.stream()` lambda**——`_lambda_recv` 回传接收者原文，binding 处复用 `_inline_coll_elem` 兜底（owner 解不出则 entity=None,
+  红线 #4）。零 schema 改动（v10）。真实库 field_access **19399→20104（+705：写 +402/读 +303，此前完全不可见）**，其中 via
+  model.* +429（C1）、内联 do.* +276（C2/C3）；form_key NULL **率不升反降 34.6%→34.4%、写 27.4%→26.7%**（新行多数当场定到来源,
+  不进未知堆）。`addNew`/`new DynamicObject` 的**变量形式**早由上一轮覆盖，本轮专补**内联链**。**当前 264 passed。**
 - 详细进度与每阶段"背景/目标/验收结论/命令"见 `docs/阶段验收.md`。
 
 ## 常用命令（Windows / PowerShell）
 
 ```powershell
 pip install -e ".[parse,encoding,dev,fuzzy,mcp]"  # 解析+编码+测试+模糊匹配+MCP（fuzzy/mcp 可选）
-pytest -q                                # 跑测试（当前 253 passed）
+pytest -q                                # 跑测试（当前 264 passed）
 cosmic_kb --version                      # 版本
 cosmic_kb doctor                         # 资产体检（需 skill_assets/ok-cosmic-docs.db）
 cosmic_kb ingest "<项目源码根>"          # 阶段1：摄取 + 覆盖率/可信度报告（--json 可留档）

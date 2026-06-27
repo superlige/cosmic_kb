@@ -324,6 +324,13 @@ _MODEL_TYPES = frozenset({
 _STR_LIT = re.compile(r'^"([^"]*)"$')
 
 
+def _model_params(method_node) -> frozenset[str]:
+    """模型/视图类型形参名（IDataModel/IBillModel/IFormView…）：其上的 setValue/getValue 即对绑定
+    单据的字段读写。供 field_access 把这些形参直接当模型接收者——否则 helper(IDataModel model) 里
+    `model.setValue(...)` 的写入整片漏（用户反馈：收益高、样本多、误报低）。"""
+    return frozenset(n for n, t in ax.iter_param_vars(method_node) if t in _MODEL_TYPES)
+
+
 @dataclass
 class _Prop:
     """跨方法/跨类按「实参↔形参」传给被调方法的上下文（只传有信息的项）。"""
@@ -424,9 +431,15 @@ class _RetResolver:
             return self.entry_form, self.convert_source
         return None, None
 
-    def local_seed(self, node: "ClassNode", method: str, stack: tuple = ()) -> dict[str, tuple]:
-        """本方法内由「项目方法返回值」赋值的局部变量 → 其返回坐标。"""
-        md = node.cg.methods.get(method)
+    def local_seed(self, node: "ClassNode", method: str, stack: tuple = (),
+                   md: "ax.MethodDecl | None" = None) -> dict[str, tuple]:
+        """本方法内由「项目方法返回值」赋值的局部变量 → 其返回坐标。
+
+        传 `md` 时按该具体重载的方法体取局部变量（standalone 补扫逐个重载用；不传则按名取首个，
+        保留事件 BFS 既有口径）。
+        """
+        if md is None:
+            md = node.cg.methods.get(method)
         if md is None or md.body is None:
             return {}
         seed: dict[str, tuple] = {}
@@ -502,6 +515,7 @@ def _walk_event(
             do_vars=ax.dynamicobject_vars(md.node), do_params=_do_params(md.node),
             do_array_params=_do_array_params(md.node), coll_params=_coll_params(md.node),
             do_coll_vars=frozenset(ax.dynamicobject_collection_vars(md.node)),
+            model_params=_model_params(md.node),
             model_entities=prop.model_entities, str_params=prop.str_params,
             local_seed=resolver.local_seed(node, method),
         )
@@ -622,8 +636,12 @@ def _analyze_standalone(
     base_entity = next(iter(ents)) if ents and len(ents) == 1 else None
     emitted = False
     resolver = _RetResolver(pg, const, known, node.fqn, base_entity, None)
-    for name, md in node.cg.methods.items():
-        if (node.fqn, name) in covered:
+    # 逐个**重载**补扫：covered 按方法名记录，而事件 BFS 只够得着 `cg.methods[name]`（首个重载），
+    # 故只跳过「那个被分析过的重载」，其余同名重载（BFS 永远碰不到）必须在此覆盖——否则
+    # `floorInit(IDataModel)` 这类重载里的 `model.getValue("cqkd_ssfq")` 整片漏（用户 2026-06-27）。
+    for md in node.cg.method_decls:
+        name = md.name
+        if node.cg.methods.get(name) is md and (node.fqn, name) in covered:
             continue
         env = fa._Env(
             const=const, default_entity=base_entity, known_entities=known,
@@ -631,7 +649,8 @@ def _analyze_standalone(
             do_array_params=_do_array_params(md.node),
             coll_params=_coll_params(md.node),
             do_coll_vars=frozenset(ax.dynamicobject_collection_vars(md.node)),
-            local_seed=resolver.local_seed(node, name),
+            model_params=_model_params(md.node),
+            local_seed=resolver.local_seed(node, name, md=md),
         )
         accesses, _ = fa.analyze_method(md.body, env)
         if not accesses:

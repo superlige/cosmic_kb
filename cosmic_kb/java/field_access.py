@@ -58,6 +58,10 @@ _GET_DO_ARG_RE = re.compile(r'getDynamicObject\(\s*([^,()]+?)\s*\)')
 _NEW_DO_OF_COLL_RE = re.compile(
     r'new\s+DynamicObject\s*\(\s*(\w+)\s*\.\s*getDynamicObjectType\s*\(\s*\)\s*\)')
 _GET_ENTRY_ARG_RE = re.compile(r'getEntryEntity\(\s*([^,()]+?)\s*\)')   # model.getEntryEntity(分录)
+# 内联取新行尾：…getDynamicObjectCollection("k")….addNew() / ….iterator().next()（赋给 DynamicObject
+# 局部，不经中间集合变量）。`.get(i)` 不收（与 DynamicObject.get("字段") 读取歧义，留给变量形式）。
+_INLINE_NEWROW_RE = re.compile(
+    r'\.\s*(?:addNew\s*\(\s*\)|iterator\s*\(\s*\)\s*\.\s*next\s*\(\s*\))\s*$')
 _STR_LIT_RE = re.compile(r'^"([^"]*)"$')
 # ORM 集合（返回某实体的表头行集合/数组）：load/loadFromCache/query。
 _LOAD_COLL_RE = re.compile(
@@ -98,6 +102,9 @@ class _Env:
     # List/Set/Collection<DynamicObject> 形参 + 局部变量名：泛型集合，元素=单据表头行。
     # 局部集合若由「空集合 + 循环 .add(已知实体包)」建起，按 add 的实体包推断元素来源实体。
     do_coll_vars: frozenset[str] = frozenset()
+    # 模型/视图类型形参名（IDataModel/IBillModel/IFormView…）：其上的 setValue/getValue 即对其绑定
+    # 单据的字段读写——直接当模型接收者，否则 helper(IDataModel model){ model.setValue(...) } 整片漏。
+    model_params: frozenset[str] = frozenset()
     # 模型/视图形参名→其绑定单据：跨类把 getModel()/getView()/this 携带的绑定单据传进来，
     # 使 service 里的 `model.getDataEntity()` 能定位来源单据（否则 default_entity 跨类为 None）。
     model_entities: dict[str, str] = field(default_factory=dict)
@@ -291,7 +298,7 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
 
     定点迭代到稳定（上下文有依赖链：集合→行→子集合→子行；load 数组→行）。
     """
-    model_vars: set[str] = set()
+    model_vars: set[str] = set(env.model_params)   # 模型/视图类型形参直接作模型接收者
     coll_ctx: dict[str, _Ctx] = {}   # 集合变量 → 其元素行的上下文
     doc_ctx: dict[str, _Ctx] = {}    # 行/根/基础资料数据包变量 → 上下文
 
@@ -392,6 +399,24 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
             return next(iter(ents)), False
         return None, False
 
+    def _inline_coll_elem(object_text: str) -> _Ctx | None:
+        """内联 `OWNER.getDynamicObjectCollection("KEY")`（或 getEntryEntity）链 → 其**元素行**上下文。
+
+        供 `coll.addNew()/.iterator().next()` 内联赋值与内联 lambda 接收者复用（不经中间集合变量）。
+        OWNER 自身来源解不出 → entity=None（红线 #4，不臆造）。非该形态返回 None。
+        """
+        m = _GET_COLL_ARG_RE.search(object_text)
+        me = _GET_ENTRY_ARG_RE.search(object_text)
+        if not (m or me):
+            return None
+        owner = object_text.split(".", 1)[0].strip()
+        key, knote = _resolve_key_token((m or me).group(1), env)
+        if me:                                            # model.getEntryEntity(分录)
+            return _Ctx("entry", key, _model_entity(owner, env), note=knote)
+        base_is_entry_row = owner in doc_ctx and doc_ctx[owner].level in ("entry", "subentry")
+        lvl = "subentry" if base_is_entry_row else "entry"
+        return _Ctx(lvl, key, _base_entity(owner), note=knote)
+
     for _ in range(len(locals_) + len(foreach) + 2):
         changed = False
         for lv in locals_:
@@ -416,6 +441,20 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
                                              is_collection=True, note=c.note)
                     changed = True
                 continue          # stream 结果整体消费，绝不落到下面的取分录/取行误判
+
+            # 内联取新行：`X.getDynamicObjectCollection("k").addNew()` / `.iterator().next()` 直接是
+            # **元素行**（非集合）——必须先于下面的 m_coll（getDynamicObjectCollection）判定，否则
+            # 会把新行误当成分录集合、后续 row.set(...) 整片判不出（用户反馈的 addNew 链缺口）。
+            stripped = init_text.rstrip()
+            if (_GET_COLL_ARG_RE.search(init_text) or _GET_ENTRY_ARG_RE.search(init_text)) \
+                    and _INLINE_NEWROW_RE.search(stripped):
+                if _pending(stripped.split(".", 1)[0].strip()):
+                    continue                              # owner 未解析完，下一轮再来
+                ec = _inline_coll_elem(stripped)
+                if ec is not None:
+                    doc_ctx[lv.name] = ec
+                    changed = True
+                continue
 
             # 分录/子分录集合：getDynamicObjectCollection(k) / model.getEntryEntity(k)
             # （k 可为字面量/常量/传播来的 String 形参）。
@@ -526,9 +565,11 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
     # Lambda 行变量：coll.forEach(o -> o.set(...)) / Arrays.stream(coll).forEach(o -> …)
     # —— o 是 lambda 形参，既非局部声明也非 for-each 变量，不识别会整片漏（用户 2026-06-17
     # 反馈的 CollateralService.exStartCollateral 即此类）。绑定到来源集合的元素上下文。
-    for params, coll_var in _lambda_pairs(body):
-        if coll_var in coll_ctx:
-            c = coll_ctx[coll_var]
+    for params, coll_var, recv in _lambda_pairs(body):
+        c = coll_ctx.get(coll_var) if coll_var else None
+        if c is None and recv:        # 内联 X.getDynamicObjectCollection("k").forEach(o->o.set(..))
+            c = _inline_coll_elem(recv)
+        if c is not None:
             for pn in params:
                 doc_ctx.setdefault(pn, _Ctx(c.level, c.entry_key, c.entity, note=c.note))
 
@@ -541,21 +582,23 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
     return model_vars, doc_ctx, coll_ctx
 
 
-def _lambda_pairs(body: "Node") -> list[tuple[list[str], str]]:
-    """收集 lambda 行变量：返回 [(形参名列表, 来源集合变量)]。
+def _lambda_pairs(body: "Node") -> list[tuple[list[str], str | None, str | None]]:
+    """收集 lambda 行变量：返回 [(形参名列表, 来源集合变量, 接收者原文)]。
 
     只认作为 forEach/map/peek/filter 等流/集合方法实参的 lambda（其形参=集合元素）；来源集合
     取该方法调用的接收者里的基集合变量（Arrays.stream(X) → X；X.stream()…/ X.forEach → X）。
+    接收者原文额外回传，供「内联 `bill.getDynamicObjectCollection("k").forEach(o->…)`」兜底解析。
     """
-    out: list[tuple[list[str], str]] = []
+    out: list[tuple[list[str], str | None, str | None]] = []
     stack = [body]
     while stack:
         n = stack.pop()
         if n.type == "lambda_expression":
             params = _lambda_param_names(n)
             coll = _lambda_collection_var(n)
-            if params and coll:
-                out.append((params, coll))
+            recv = _lambda_recv(n)
+            if params and (coll or recv):
+                out.append((params, coll, recv))
         stack.extend(n.children)
     return out
 
@@ -577,8 +620,8 @@ def _lambda_param_names(node: "Node") -> list[str]:
     return names
 
 
-def _lambda_collection_var(node: "Node") -> str | None:
-    """从 lambda 所在的方法调用接收者里提取来源集合变量。"""
+def _lambda_recv(node: "Node") -> str | None:
+    """lambda 所在的流/集合方法调用（forEach/map/…）的接收者表达式原文（无则 None）。"""
     p = node.parent
     while p is not None and p.type != "method_invocation":
         if p.type in ("block", "method_declaration", "lambda_expression"):
@@ -586,7 +629,14 @@ def _lambda_collection_var(node: "Node") -> str | None:
         p = p.parent
     if p is None:
         return None
-    recv = ax._text(p.child_by_field_name("object"))
+    return ax._text(p.child_by_field_name("object"))
+
+
+def _lambda_collection_var(node: "Node") -> str | None:
+    """从 lambda 所在的方法调用接收者里提取来源集合**变量名**（Arrays.stream(X)→X；X.stream()/X.forEach→X）。"""
+    recv = _lambda_recv(node)
+    if recv is None:
+        return None
     m = re.search(r'Arrays\s*\.\s*stream\(\s*(\w+)', recv)
     if m:
         return m.group(1)
@@ -713,7 +763,11 @@ def _classify_access(
             level = {2: "header", 3: "entry", 4: "subentry"}.get(inv.arg_count, "unknown")
         else:
             level = {1: "header", 2: "entry", 3: "subentry"}.get(inv.arg_count, "unknown")
-        return _make(kr, level, None, env.default_entity,
+        # 来源单据：模型接收者的首段（model 形参 / view.getModel() 的 view）走 _model_entity——
+        # 跨类 service 收到 getModel()/getView() 时由 model_entities 定到绑定单据，插件自身
+        # getModel()/this 回落 default_entity（行为不变）。
+        entity = _model_entity(obj.split(".", 1)[0].strip(), env)
+        return _make(kr, level, None, entity,
                      "write" if is_write else "read", f"model.{name}", inv.line)
 
     # ── 习语 B：DynamicObject 数据包 set/get ──────────────────────────────
