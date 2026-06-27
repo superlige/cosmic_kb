@@ -72,7 +72,8 @@ def test_field_trace_carries_name_and_topic(tmp_path: Path):
     try:
         ft = field_trace.field_trace(conn, "cqkd_collateralstatus")
         assert ft["field_name"] == "抵押状态"
-        w = ft["writers"][0]
+        # 顶层扁平 writers 已删（与 groups 重复）；改从分组里取首个写入行核对语义路由。
+        w = next(w for g in ft["groups"] for w in g["writers"])
         assert w["semantics_topic"] == "plugin-operation"
         text = field_trace.render_field_trace(ft)
         assert "cosmic_semantics('plugin-operation')" in text

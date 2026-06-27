@@ -521,8 +521,9 @@ def test_field_trace_report(tmp_path: Path):
     conn = store.open_kb(db)
     try:
         ft = field_trace.field_trace(conn, "cqkd_head", form_key="cqkd_bill")
-        # 写该字段：op(落库) + form(内存)。落库的排前面。
-        assert ft["writers"][0]["persists"] == "yes"
+        # 写该字段：op(落库) + form(内存)。落库的排前面（顶层扁平 writers 已删，改从分组取）。
+        grp = next(g for g in ft["groups"] if g["writers"])
+        assert grp["writers"][0]["persists"] == "yes"
         assert ft["summary"]["persisting_writers"] >= 1
         text = field_trace.render_field_trace(ft)
         assert "cqkd_head" in text and "落库" in text
@@ -805,7 +806,9 @@ def test_return_value_and_addnew_source(tmp_path: Path):
         assert r["entry_key"] == "cqkd_sub"
         # 按单据钻取也能看到该写入（用户排障入口：从元数据单据找到改字段的插件）。
         ft = field_trace.field_trace(conn, "cqkd_subf", form_key="cqkd_bill")
-        assert any(w["plugin_fqn"] == "cqspb.am.AmGenRowPlugin" for w in ft["writers"]), \
+        # 顶层扁平 writers 已删——从分组里找该插件写入。
+        assert any(w["plugin_fqn"] == "cqspb.am.AmGenRowPlugin"
+                   for g in ft["groups"] for w in g["writers"]), \
             "查 cqkd_bill 应能看到 AmGenRowPlugin 写入 cqkd_subf"
     finally:
         conn.close()

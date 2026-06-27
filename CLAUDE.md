@@ -151,13 +151,25 @@
   诚实区分元数据反推与数据流证明；`read_source` 对 metadata_* 来源注明「依据是字段归属、非数据流行号」。真实库 form_key
   NULL **56.1%→34.6%**（write 52.1%→27.4%；回填 4153 行=唯一2167+绑定1234+共现752，0 改写）。**当前 240 passed。**
   详见 `docs/form_key解析待办.md`（②反向调用图、③④诚实未知留作后续）。
+- ✅ **信任优先·trace 防 MCP 截断（写/读拆分 + 按类合并 + 字节 governor）**（2026-06-27）：段二经 MCP 调 `trace`
+  返回被宿主在 **32KB 硬上限**处从中间截断（真实样本 67879→32768）。先一轮"删 evidence 死重列 + 白名单投影 + readers
+  折叠成「该读方法」+ 各数组 cap"仍 67KB——根因是**数组条数本身无界**（坐标组 + unlocated/possible/coarse/dynamic 都
+  无界），行级 cap 管不住。MCP 改走紧凑投影 `field_trace.trace_compact`：① **写/读拆分**（`access` 参数 write/read/默认，
+  每次只返一半）；② **按类合并**（散落行/方法按 `access_class or plugin_fqn` 塌成有界类节点，`_merge_writers_by_class`
+  类→sites、`_merge_readers_by_class` 类→方法、`_readers_overview` 仅类+计数；每行重复的插件常量提到类节点只存一份）；
+  ③ **cap + 字节 governor**（cap 类节点 + 按 `json.dumps` 字节预算 28000 逐级收紧重建直至 ≤ budget，真实总数恒在
+  `summary`、截掉量在 `capped`/`sites_capped`/`methods_capped`，红线 #4 不丢数）。复用红线 #6 抽 `_collect_materials`
+  共享取数，富 `field_trace()` 输出**逐字节不变**（现有测试不改即过）；`tool_ask` 字段意图 evidence 同样换 compact
+  （堵 ask 截断，复用 rq 不动 builder/CLI）；CLI 文本/本地 Web（HTTP 无限制）不动。真实库 `cqkd_ht.cqkd_zdgl.cqkd_qs`
+  富 dict 51456B→compact 默认 22761/write 20217/read 23182B（全 < 32KB）。零 schema 改动（v10）。注：MCP server 常驻，
+  改源码需**重连/重启 MCP** 才生效。**当前 253 passed。**
 - 详细进度与每阶段"背景/目标/验收结论/命令"见 `docs/阶段验收.md`。
 
 ## 常用命令（Windows / PowerShell）
 
 ```powershell
 pip install -e ".[parse,encoding,dev,fuzzy,mcp]"  # 解析+编码+测试+模糊匹配+MCP（fuzzy/mcp 可选）
-pytest -q                                # 跑测试（当前 240 passed）
+pytest -q                                # 跑测试（当前 253 passed）
 cosmic_kb --version                      # 版本
 cosmic_kb doctor                         # 资产体检（需 skill_assets/ok-cosmic-docs.db）
 cosmic_kb ingest "<项目源码根>"          # 阶段1：摄取 + 覆盖率/可信度报告（--json 可留档）

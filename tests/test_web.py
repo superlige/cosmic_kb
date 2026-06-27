@@ -147,8 +147,9 @@ def test_api_field_and_whois(tmp_path: Path):
     try:
         status, ft = server.handle_api(conn, "/api/field", {"key": ["cqkd_name"]})
         assert status == 200
-        assert {"field_key", "writers", "readers", "summary", "occurrences", "groups",
-                "coarse"} <= set(ft)
+        # 顶层扁平 writers/readers 已删（防 MCP 截断，与 groups 重复）；读写明细在 groups + summary。
+        assert {"field_key", "summary", "occurrences", "groups", "coarse"} <= set(ft)
+        assert "writers" not in ft and "readers" not in ft
         # 缺 key → 400。
         status, err = server.handle_api(conn, "/api/field", {})
         assert status == 400 and "error" in err

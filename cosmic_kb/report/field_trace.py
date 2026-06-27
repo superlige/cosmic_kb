@@ -26,11 +26,81 @@ _ACCESS_RANK = {"write": 0, "read": 1}
 _LEVEL_LABEL = {"header": "表头", "entry": "分录", "subentry": "子分录",
                 "basedata": "基础资料", "unknown": "未知层级"}
 # field_access 取数列（all_rows 与动态写入候选共用，避免列名漂移）。
+# 注：刻意不取 `evidence`（原始源码片段）——本模块/worklist/_enrich_rows/_fmt_access/Web 全不渲染它，
+# 是最大单行死重，取了只会撑大返回 dict 被 MCP 截断。
 _FA_COLS = (
     "form_key,field_key,level,entry_key,plugin_fqn,plugin_type,access_class,"
     "event_method,event_phase,access,persists,persist_reason,via,line,path,"
-    "key_resolution,confidence,source_relpath,evidence"
+    "key_resolution,confidence,source_relpath"
 )
+
+# ── 返回 dict 的数组上界（红线 #4：cap 后仍把真实总数留在 summary，消费方比 len 即知截断量）──
+# 现有 max_list 只管 render_* 文本，MCP 拿的是裸 dict 必须在此设界，否则单字段 trace 可达 271KB 被截。
+# 要看某坐标的全部明细，用 form/entry/level 收窄（精确模式天然只剩一个坐标的行）。
+_CAP_WRITERS = 40          # 每坐标写入（核心价值，给得宽）
+_CAP_READER_METHODS = 15   # 每坐标读取折叠成的「该读方法」清单条数
+_CAP_POSSIBLE = 25         # 可能命中（层级/分录存疑）
+_CAP_UNLOCATED = 25        # 来源未定位
+_CAP_COARSE = 25           # 粗扫疑似盲点位置
+
+# 单行投影白名单：只留 Web accessTable/possibleTable + CLI _fmt_access 实际渲染的字段。
+# 丢弃 confidence/event_phase/field_key/form_key(行级)/plugin_forms(与 label 冗余)/evidence。
+_SLIM_FIELDS = (
+    "access", "level", "entry_key", "event_method", "persists", "persist_reason",
+    "via", "line", "source_relpath", "key_resolution", "plugin_fqn", "plugin_simple",
+    "plugin_type", "access_simple", "cross_class", "plugin_form_label",
+    "plugin_cross_form", "semantics_topic",
+)
+
+
+def _slim_row(r: dict[str, Any]) -> dict[str, Any]:
+    """把一条 enrich 后的 field_access 行投影成「只含渲染所需字段」的精简行。
+
+    `path`（调用链）仅在长度 >1 时保留——Web/CLI 都只在 `len(path)>1` 时才显示调用链，
+    单元素 path 是绝大多数行的常态，留着纯属占字节。
+    """
+    out = {k: r.get(k) for k in _SLIM_FIELDS}
+    path = r.get("path")
+    if path and len(path) > 1:
+        out["path"] = path
+    return out
+
+
+def _collapse_reader_methods(rows: list[dict[str, Any]], *, cap: int) -> dict[str, Any]:
+    """把读取行按 (入口类, 事件方法) 去重成「该读方法」清单（cause 无关版 worklist）。
+
+    读取价值最低、却占膨胀大头——大模型真要弄清"谁读了它"，是去这些方法读源码，而非逐行看记录。
+    故同插件同事件方法只列一处，给 count + `calls` 导航 + 物理位置（≤3）+ 已焊的语义路由/归属，
+    按 count 降序、cap 截断并报剩余数。形状与 dynamic_writers 同款（total/methods/capped）。
+    """
+    groups: dict[tuple, dict[str, Any]] = {}
+    for r in rows:
+        key = (r.get("plugin_fqn"), r.get("event_method"))
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = {
+                "class_fqn": r.get("plugin_fqn"), "method": r.get("event_method"),
+                "plugin_simple": r.get("plugin_simple"), "plugin_type": r.get("plugin_type"),
+                "plugin_form_label": r.get("plugin_form_label"),
+                "semantics_topic": r.get("semantics_topic"),
+                "count": 0, "locations": {},
+            }
+        g["count"] += 1
+        ac = r.get("access_class") or r.get("plugin_fqn")
+        g["locations"].setdefault(ac, f"{r.get('source_relpath')}:{r.get('line')}")
+    out: list[dict[str, Any]] = []
+    for g in groups.values():
+        out.append({
+            "class_fqn": g["class_fqn"], "method": g["method"],
+            "plugin_simple": g["plugin_simple"], "plugin_type": g["plugin_type"],
+            "plugin_form_label": g["plugin_form_label"], "semantics_topic": g["semantics_topic"],
+            "count": g["count"],
+            "calls": (f"calls {g['class_fqn']} {g['method']}"
+                      if g["class_fqn"] and g["method"] else None),
+            "locations": list(g["locations"].values())[:3],
+        })
+    out.sort(key=lambda d: (-d["count"], d["class_fqn"] or ""))
+    return {"total": len(rows), "methods": out[:cap], "capped": max(0, len(out) - cap)}
 # 动态写入候选纳入的成因（用户 2026-06-24 三项全放宽：含 unknown，未识别局部变量持 key 也算候选）。
 _DYN_CAUSES = ("dynamic-loop", "concat", "external-const", "unknown")
 # 动态写入候选的成因标签（key_resolution → 人读）。
@@ -59,11 +129,13 @@ def _enrich_rows(rows: list[dict[str, Any]], plugin_home: dict[str, list]) -> No
         r["semantics_topic"] = hints.event_topic(r.get("event_method"), r.get("plugin_type"))
 
 
-def field_trace(
+def _collect_materials(
     conn, field_key: str, *,
     form_key: str | None = None, entry_key: str | None = None, level: str | None = None,
 ) -> dict[str, Any]:
-    """追踪一个字段的全部插件读写 + 落库判定，按实体坐标分组。"""
+    """取数 + enrich + 分桶 + 算 summary/coarse/dynamic_writers/convert_context，返回**未做
+    slim/cap 的原始材料**。富投影 `field_trace()` 与紧凑投影 `trace_compact()` 共用此函数
+    （红线 #6：取证逻辑只此一份，绝不重写）。group_list 各组的 writers/readers 里是 RAW 行。"""
     # entry_key 仅对分录/子分录有意义：field_access 里表头/基础资料的 entry_key 恒为 None
     # （见 schema「表头为 None」）。但 Web 的「字段定义坐标」菜单用 field 表的 entity_key 当
     # entry 传进来——而 field 表对表头字段存的是表头实体 key（非 None，见 dym_parser）。若不
@@ -192,6 +264,7 @@ def field_trace(
             "plugins": len({r["plugin_fqn"] for r in g["writers"] + g["readers"]}),
         }
         g["convert_context"] = _convert_context(conn, g["form_key"], form_names, convert_cache)
+        # 注意：此处**不做** slim/cap——RAW 行留给两种投影各自设界（富投影按行 cap、紧凑投影按类合并）。
 
     writers = [r for r in rows if r["access"] == "write"]
     readers = [r for r in rows if r["access"] == "read"]
@@ -228,11 +301,11 @@ def field_trace(
     coarse_only = [c for c in all_coarse if not c["in_high"]]            # 去掉「高精度也记」
     shown = [c for c in coarse_only if c["relpath"] not in const_relpaths]  # 再剔除常量类
     coarse = {
-        "coarse_only": len(shown),                                      # 仅粗扫见、非常量类（实际展示数）
+        "coarse_only": len(shown),                                      # 仅粗扫见、非常量类（真实总数）
         "idiom": sum(1 for c in shown if c["idiom"]),                   # 其中强信号读写习语
         "const_excluded": sum(1 for c in coarse_only if c["relpath"] in const_relpaths),  # 落常量类、已剔除
         "high_rows": len(all_rows),                                     # 高精度该字段命中条数（参照）
-        "locations": shown,
+        "locations": shown[:_CAP_COARSE],                              # 设界（真实数见 coarse_only）
     }
 
     # ── 动态写入候选：按用户查询单据收窄 + 按成因分桶（三项放宽：不按 level 过滤）──────────
@@ -282,17 +355,254 @@ def field_trace(
         "filter": {"form_key": form_key, "entry_key": entry_key, "level": level},
         "precise": precise,
         "occurrences": occurrences,
-        "groups": group_list,
-        "possible": possible,          # 可能命中（同单据同字段，层级/分录存疑）
-        "unlocated": unlocated,        # 来源未定位（form_key 为空）
-        "writers": writers,            # 扁平（精确桶内），向后兼容
-        "readers": readers,
+        "group_list": group_list,      # 各组 writers/readers 为 RAW 行
+        "possible": possible,          # RAW 行
+        "unlocated": unlocated,        # RAW 行
         "summary": summary,
-        "coarse": coarse,              # 粗精度扫描命中 + 逐处互证（与高精度并列）
-        "dynamic_writers": dynamic_writers,  # 同单据动态写入候选（钉不出字段，交段二大模型读源码定性）
+        "coarse": coarse,              # 已设界的粗扫盲点 dict（两投影共用）
+        "dynamic_writers": dynamic_writers,  # 已折叠的动态写入候选 dict（两投影共用）
         "java_available": java.get("available", True),
         "note": note,
     }
+
+
+def field_trace(
+    conn, field_key: str, *,
+    form_key: str | None = None, entry_key: str | None = None, level: str | None = None,
+) -> dict[str, Any]:
+    """追踪一个字段的全部插件读写 + 落库判定，按实体坐标分组（**富投影**：Web/CLI/builder 用）。
+
+    每坐标的 writers 按行 slim+cap，readers 折叠成「该读方法」清单；possible/unlocated 行级 slim+cap。
+    真实总数恒在 summary（红线 #4）。MCP 防截断用 `trace_compact`（按类合并 + 写读拆分），不走本函数。
+    """
+    m = _collect_materials(conn, field_key, form_key=form_key, entry_key=entry_key, level=level)
+    for g in m["group_list"]:
+        # 设界（summary 已锁真实计数）：writers 投影+cap；readers 折叠成「该读方法」清单。
+        g["writers"] = [_slim_row(r) for r in g["writers"][:_CAP_WRITERS]]
+        g["readers"] = _collapse_reader_methods(g["readers"], cap=_CAP_READER_METHODS)
+    return {
+        "field_key": m["field_key"],
+        "field_name": m["field_name"],
+        "filter": m["filter"],
+        "precise": m["precise"],
+        "occurrences": m["occurrences"],
+        "groups": m["group_list"],
+        # possible/unlocated 投影+cap（真实总数在 summary.possible / summary.unlocated）。
+        "possible": [_slim_row(r) for r in m["possible"][:_CAP_POSSIBLE]],   # 可能命中（层级/分录存疑）
+        "unlocated": [_slim_row(r) for r in m["unlocated"][:_CAP_UNLOCATED]],  # 来源未定位（form_key 为空）
+        # 顶层扁平 writers/readers 已删——与 groups[].writers/readers 重复、无消费方（Web/CLI 用 groups+summary）。
+        "summary": m["summary"],
+        "coarse": m["coarse"],              # 粗精度扫描命中 + 逐处互证（与高精度并列）
+        "dynamic_writers": m["dynamic_writers"],  # 同单据动态写入候选（钉不出字段，交段二大模型读源码定性）
+        "java_available": m["java_available"],
+        "note": m["note"],
+    }
+
+
+# ── 紧凑投影（MCP 防截断）：写/读拆分 + 按类合并 + cap/字节 governor ──────────────────
+# 32KB 是 MCP host 硬上限。per-section 行级 cap 管不住（坐标组数 + unlocated/possible 无界）。
+# 故 MCP 走本投影：把"散落的行/方法"按类塌缩成"有界的类数"，并按 access 只返一侧；真实总数恒在
+# summary、被 cap 截掉的数留在各节点 `capped`（红线 #4 不丢数）。
+_COMPACT_CAP_CLASSES = 60     # 每个集合（坐标组/possible/unlocated）保留的类节点上限
+_COMPACT_CAP_SITES = 12       # 单类内写入点上限
+_COMPACT_CAP_METHODS = 12     # 单类内读取方法上限
+_COMPACT_CAP_OVERVIEW = 80    # readers_overview 类条目上限
+_COMPACT_BUDGET = 28000       # 序列化字节预算（< 32KB 留安全裕量）
+
+
+def _calls_str(r: dict[str, Any]) -> str | None:
+    """该写入/读取点的项目内调用导航锚点（从入口插件的事件方法下钻读源码）。"""
+    fqn, mth = r.get("plugin_fqn"), r.get("event_method")
+    return f"calls {fqn} {mth}" if fqn and mth else None
+
+
+def _merge_writers_by_class(rows: list[dict[str, Any]], *, cap_classes: int, cap_sites: int
+                            ) -> dict[str, Any]:
+    """写行按**物理写入类**(`access_class` 回落 `plugin_fqn`)合并：类级常量字段只存一份，写入点
+    （行号/落库/via 等会变的）列在 `sites`。类按写入数降序、cap_classes 截断；类内 sites cap_sites
+    截断。真实总数在 `total`/各类 `count`，截断量在 `capped`/`sites_capped`。"""
+    groups: dict[str | None, dict[str, Any]] = {}
+    for r in rows:
+        cls = r.get("access_class") or r.get("plugin_fqn")
+        g = groups.get(cls)
+        if g is None:
+            g = groups[cls] = {
+                "class_fqn": cls,
+                "plugin_type": r.get("plugin_type"),
+                "plugin_form_label": r.get("plugin_form_label"),
+                "plugin_cross_form": r.get("plugin_cross_form"),
+                "sites": [],
+            }
+        g["sites"].append({
+            "event_method": r.get("event_method"),
+            "line": r.get("line"),
+            "via": r.get("via"),
+            "persists": r.get("persists"),
+            "persist_reason": r.get("persist_reason"),
+            "key_resolution": r.get("key_resolution"),
+            "source_relpath": r.get("source_relpath"),
+            "semantics_topic": r.get("semantics_topic"),
+            "calls": _calls_str(r),
+        })
+    classes = sorted(groups.values(), key=lambda c: (-len(c["sites"]), c["class_fqn"] or ""))
+    out: list[dict[str, Any]] = []
+    for c in classes[:cap_classes]:
+        sites = c["sites"]
+        out.append({
+            "class_fqn": c["class_fqn"], "plugin_type": c["plugin_type"],
+            "plugin_form_label": c["plugin_form_label"], "plugin_cross_form": c["plugin_cross_form"],
+            "count": len(sites),
+            "sites": sites[:cap_sites],
+            "sites_capped": max(0, len(sites) - cap_sites),
+        })
+    return {"total": len(rows), "classes": out, "capped": max(0, len(classes) - cap_classes)}
+
+
+def _merge_readers_by_class(rows: list[dict[str, Any]], *, cap_classes: int, cap_methods: int
+                            ) -> dict[str, Any]:
+    """读行按**类**(`access_class` 回落 `plugin_fqn`)合并，类内再按事件方法去重计数。读取价值最低，
+    塌成 `{class_fqn, methods:[{method,count,calls}], total}` 即可——要弄清谁读了它，顺 calls 去那
+    几个方法读源码。类按读取数降序、cap_classes 截断；类内 methods cap_methods 截断。"""
+    groups: dict[str | None, dict[str, Any]] = {}
+    for r in rows:
+        cls = r.get("access_class") or r.get("plugin_fqn")
+        g = groups.get(cls)
+        if g is None:
+            g = groups[cls] = {
+                "class_fqn": cls, "plugin_type": r.get("plugin_type"),
+                "plugin_form_label": r.get("plugin_form_label"), "_methods": {},
+            }
+        mk = r.get("event_method")
+        mrec = g["_methods"].get(mk)
+        if mrec is None:
+            mrec = g["_methods"][mk] = {
+                "method": mk, "count": 0, "calls": _calls_str(r),
+                "semantics_topic": r.get("semantics_topic"),
+            }
+        mrec["count"] += 1
+    classes: list[dict[str, Any]] = []
+    for g in groups.values():
+        methods = sorted(g["_methods"].values(), key=lambda d: (-d["count"], d["method"] or ""))
+        classes.append({
+            "class_fqn": g["class_fqn"], "plugin_type": g["plugin_type"],
+            "plugin_form_label": g["plugin_form_label"],
+            "total": sum(m["count"] for m in methods),
+            "methods": methods[:cap_methods],
+            "methods_capped": max(0, len(methods) - cap_methods),
+        })
+    classes.sort(key=lambda c: (-c["total"], c["class_fqn"] or ""))
+    return {"total": len(rows), "classes": classes[:cap_classes],
+            "capped": max(0, len(classes) - cap_classes)}
+
+
+def _readers_overview(rows: list[dict[str, Any]], *, cap: int) -> dict[str, Any]:
+    """读取「仅按类计数」概览（默认视图用）：`[{class_fqn, total}]`，最省字节。"""
+    cnt: dict[str | None, int] = {}
+    for r in rows:
+        cls = r.get("access_class") or r.get("plugin_fqn")
+        cnt[cls] = cnt.get(cls, 0) + 1
+    items = sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0] or ""))
+    return {"total": len(rows),
+            "classes": [{"class_fqn": c, "total": n} for c, n in items[:cap]],
+            "capped": max(0, len(items) - cap)}
+
+
+def _access_rows(rows: list[dict[str, Any]], access: str | None) -> list[dict[str, Any]]:
+    """按 access 过滤行集合：'read' 取读行，其余（None/'write'）取写行。"""
+    want = "read" if access == "read" else "write"
+    return [r for r in rows if r.get("access") == want]
+
+
+def _build_compact(
+    m: dict[str, Any], access: str | None, *,
+    cap_classes: int, cap_sites: int, cap_methods: int, cap_overview: int,
+) -> dict[str, Any]:
+    """从原始材料组装紧凑 dict（一档 cap 下的一次构建，governor 会按字节预算反复调用收紧）。"""
+    want_write = access in (None, "write")
+    want_read_detail = access == "read"
+    want_read_overview = access is None
+    capped_hit = False
+
+    def _mw(rows):
+        nonlocal capped_hit
+        d = _merge_writers_by_class(rows, cap_classes=cap_classes, cap_sites=cap_sites)
+        capped_hit = capped_hit or bool(d["capped"]) or any(c["sites_capped"] for c in d["classes"])
+        return d
+
+    def _mr(rows):
+        nonlocal capped_hit
+        d = _merge_readers_by_class(rows, cap_classes=cap_classes, cap_methods=cap_methods)
+        capped_hit = capped_hit or bool(d["capped"]) or any(c["methods_capped"] for c in d["classes"])
+        return d
+
+    groups_out: list[dict[str, Any]] = []
+    for g in m["group_list"]:
+        node: dict[str, Any] = {
+            "label": g["label"], "form_key": g["form_key"], "form_name": g["form_name"],
+            "level": g["level"], "entry_key": g["entry_key"],
+            "summary": g["summary"], "convert_context": g["convert_context"],
+        }
+        if want_write:
+            node["writers"] = _mw(g["writers"])
+        if want_read_detail:
+            node["readers"] = _mr(g["readers"])
+        elif want_read_overview:
+            d = _readers_overview(g["readers"], cap=cap_overview)
+            capped_hit = capped_hit or bool(d["capped"])
+            node["readers_overview"] = d
+        groups_out.append(node)
+
+    res: dict[str, Any] = {
+        "field_key": m["field_key"], "field_name": m["field_name"],
+        "filter": m["filter"], "precise": m["precise"], "access": access or "all",
+        "occurrences": m["occurrences"], "summary": dict(m["summary"]),
+        "groups": groups_out,
+    }
+    # possible / unlocated：按 access 过滤后同样按类合并（写侧用写合并，读侧用读合并）。
+    poss, unloc = _access_rows(m["possible"], access), _access_rows(m["unlocated"], access)
+    if want_read_detail:
+        res["possible"], res["unlocated"] = _mr(poss), _mr(unloc)
+        res["coarse"] = m["coarse"]
+    else:  # None / write：展示写侧
+        res["possible"], res["unlocated"] = _mw(poss), _mw(unloc)
+    if want_write:
+        res["dynamic_writers"] = m["dynamic_writers"]
+
+    notes = [m["note"]] if m["note"] else []
+    if capped_hit:
+        notes.append("部分类节点/明细因数量过多被截断（真实总数见各节点 total 与 summary）；"
+                     "用 form/entry/level 收窄，或 access='read'/'write' 单看一侧。")
+    res["note"] = " ".join(notes) if notes else None
+    res["java_available"] = m["java_available"]
+    return res
+
+
+def trace_compact(
+    conn, field_key: str, *,
+    form_key: str | None = None, entry_key: str | None = None, level: str | None = None,
+    access: str | None = None, budget: int = _COMPACT_BUDGET,
+) -> dict[str, Any]:
+    """**紧凑投影**（MCP 入口，防 host 32KB 截断）：写/读拆分 + 按类合并 + cap/字节 governor。
+
+    - `access='write'`：只回写入（坐标→类→写入点）+ 动态写入候选；`access='read'`：只回读取
+      （类→方法）+ 粗扫盲点；默认（None）：写入明细 + 读取按类计数概览（`readers_overview`）。
+    - 真实总数恒在 `summary`；类节点/明细被 cap 截断的数在各节点 `capped`/`sites_capped`/`methods_capped`。
+    - governor：构完测序列化字节，超 `budget` 就逐级收紧 cap 重建，直至 ≤ budget——保证永不被截断。
+    """
+    if access not in ("write", "read"):
+        access = None
+    m = _collect_materials(conn, field_key, form_key=form_key, entry_key=entry_key, level=level)
+    # cap 阶梯：从宽到窄，命中预算即返；最后一档兜底（极端情况返回最小档）。
+    ladder = [
+        (_COMPACT_CAP_CLASSES, _COMPACT_CAP_SITES, _COMPACT_CAP_METHODS, _COMPACT_CAP_OVERVIEW),
+        (40, 8, 8, 60), (25, 5, 5, 40), (15, 3, 3, 25), (8, 2, 2, 15),
+    ]
+    res: dict[str, Any] = {}
+    for cc, cs, cm, co in ladder:
+        res = _build_compact(m, access, cap_classes=cc, cap_sites=cs, cap_methods=cm, cap_overview=co)
+        if len(json.dumps(res, ensure_ascii=False)) <= budget:
+            return res
+    return res
 
 
 def parse_locator(text: str) -> tuple[str, str | None, str | None, str | None]:
@@ -421,8 +731,9 @@ def _fmt_access(r: dict[str, Any]) -> list[str]:
         lines.append(f"        方法全文直接读源文件；项目内调用导航: calls {r['plugin_fqn']} {r['event_method']}")
     if r.get("semantics_topic"):
         lines.append(f"        ⚑ 事件 {r['event_method']} 属 {r['semantics_topic']}：判触发时机/是否入库前先 cosmic_semantics('{r['semantics_topic']}')，勿凭训练知识臆断")
-    if len(r["path"]) > 1:
-        lines.append(f"        调用链: {' → '.join(r['path'])}")
+    path = r.get("path") or []   # 精简行单元素 path 已被剔除，按缺省处理
+    if len(path) > 1:
+        lines.append(f"        调用链: {' → '.join(path)}")
     if r["persist_reason"]:
         lines.append(f"        落库依据: {r['persist_reason']}")
     return lines
@@ -479,10 +790,20 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
             lines.append("  【写】（落库 > 存疑 > 内存）")
             for r in g["writers"][:max_list]:
                 lines.extend(_fmt_access(r))
-        if g["readers"]:
-            lines.append("  【读】")
-            for r in g["readers"][:max_list]:
-                lines.extend(_fmt_access(r))
+        rd = g.get("readers") or {}
+        if rd.get("total"):
+            lines.append(f"  【读】（按方法去重，共 {rd['total']} 处 → {len(rd['methods'])} 个方法）")
+            for m in rd["methods"][:max_list]:
+                cls = m.get("plugin_simple") or (m.get("class_fqn") or "?").rsplit(".", 1)[-1]
+                lines.append(
+                    f"    {cls} [{m.get('plugin_type')}]  事件 {m.get('method')}"
+                    f"  ({m['count']} 处)" + (f"  {m['calls']}" if m.get("calls") else ""))
+                if m.get("locations"):
+                    lines.append(f"        位于 {' / '.join(m['locations'])}")
+                if m.get("semantics_topic"):
+                    lines.append(f"        ⚑ 判触发时机/是否入库前先 cosmic_semantics('{m['semantics_topic']}')")
+            if rd.get("capped"):
+                lines.append(f"    …另有 {rd['capped']} 个读方法未列出（用 单据.字段 收窄、或 --json）")
 
     if not ft["groups"] and not ft.get("possible") and not ft.get("unlocated"):
         lines.append("")

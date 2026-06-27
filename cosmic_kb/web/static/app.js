@@ -484,12 +484,45 @@ function renderGroup(g) {
     body.appendChild(el("h4", null, "写该字段的插件事件（落库 > 存疑 > 内存）"));
     body.appendChild(accessTable(g.writers));
   }
-  if (g.readers && g.readers.length) {
-    body.appendChild(el("h4", null, "读该字段的插件事件"));
-    body.appendChild(accessTable(g.readers));
+  // readers 现为「按方法去重」的清单 {total, methods, capped}（防膨胀，与 trace 返回口径一致）。
+  const rd = g.readers || {};
+  if (rd.total) {
+    body.appendChild(el("h4", null,
+      `读该字段的插件事件（按方法去重，共 ${rd.total} 处 → ${(rd.methods || []).length} 个方法）`));
+    body.appendChild(readerMethodsTable(rd));
   }
   box.appendChild(body);
   return box;
+}
+
+// 读取方法清单表：同插件同事件方法去重一行，给 count + 位置 + calls 锚点（去那读源码）。
+function readerMethodsTable(rd) {
+  const t = el("table", "tbl acc");
+  t.innerHTML =
+    "<thead><tr><th>插件类</th><th>类型</th><th>事件函数</th><th>读取处数</th>" +
+    "<th>位置</th><th>导航</th></tr></thead>";
+  const tb = el("tbody");
+  (rd.methods || []).forEach((m) => {
+    const cls = m.plugin_simple || (m.class_fqn || "?").split(".").pop();
+    const tr = el("tr");
+    tr.innerHTML =
+      `<td class="ellip" title="${esc(m.class_fqn || "")}">${esc(cls)}</td>` +
+      `<td>${esc(m.plugin_type || "")}</td>` +
+      `<td>${esc(m.method || "")}</td>` +
+      `<td>${m.count}</td>` +
+      `<td class="loc">${esc((m.locations || []).join(" / "))}</td>` +
+      `<td class="mono muted">${esc(m.calls || "")}</td>`;
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb);
+  if (rd.capped) {
+    const cap = el("div", "muted", `…另有 ${rd.capped} 个读方法未列出（收窄到 单据.字段 看全部）`);
+    const wrap = el("div", null);
+    wrap.appendChild(t);
+    wrap.appendChild(cap);
+    return wrap;
+  }
+  return t;
 }
 
 // 插件所属单据单元格：标出「被另外哪个元数据的插件改了」，跨单据高亮。

@@ -32,6 +32,12 @@ INSTRUCTIONS = (
     "写入位置）：要把『谁改了 X』答全，就对清单里的方法逐个 calls/读本机源码，判定它是否真碰了 X（"
     "不臆造）。要做全项目盲点审计或缩范围，调 dynamic_writes 并用 form_key/cause/class_fqn 过滤拉切片，"
     "**别要全量逐行**（会撑爆上下文）。\n"
+    "【trace 写读拆分 + 按类合并】trace 默认回**写入明细（坐标→类→写入点）+ 读取仅按类计数概览**"
+    "（`readers_overview`）；要读取明细就再调一次 `trace(field, access='read')`（类→方法，顺 `calls` "
+    "去读源码）；只看写入用 `access='write'`。写入/读取都**按类合并**（同一类只出现一次，行号/落库等"
+    "列在该类 `sites`/`methods`），别再把同类逐行展开。**真实总数恒在 `summary`**，被 cap 截掉的数在"
+    "各节点 `capped`/`sites_capped`/`methods_capped`（红线 #4 不丢数）；仍嫌多用 `form/entry/level` "
+    "收窄到单坐标。\n"
     "【强制】凡需要解释『某插件/事件/操作在做什么』、判断『是否入库』、确认『插件类型或事件触发"
     "时机』、或读到不认识的 kd.bos.* 等平台符号时，**必须先调 cosmic_semantics(topic) 取苍穹语义"
     "再下结论**，不得仅凭读源码臆断时机与入库——这类领域语义模型易记错，是幻觉高发区。"
@@ -113,11 +119,19 @@ def tool_ask(question: str) -> dict[str, Any]:
     """
     from ..semantic import resolver
     from ..context import builder
+    from ..report import field_trace
 
     conn = _open()
     try:
         rq = resolver.resolve(conn, question)
-        return builder.build_context(conn, rq)
+        result = builder.build_context(conn, rq)
+        # 字段意图的 evidence 是完整富 trace dict，经 MCP 同样会被 host 截断——换成紧凑投影
+        # （写读拆分 + 按类合并 + 字节 governor）。复用 rq，不动 builder/CLI 路径。
+        if rq.intent == "field_who_changed" and result.get("status") == "ok":
+            result["evidence"] = field_trace.trace_compact(
+                conn, rq.field_key,
+                form_key=rq.form_key, entry_key=rq.entry_key, level=rq.level)
+        return result
     finally:
         conn.close()
 
@@ -127,23 +141,35 @@ def tool_trace(
     form: str | None = None,
     entry: str | None = None,
     level: str | None = None,
+    access: str | None = None,
 ) -> dict[str, Any]:
-    """旗舰直查：字段 → 哪些插件的哪个事件函数读/写它、是否落库、行号、源码路径。
+    """旗舰直查：字段 → 哪些类的哪个事件函数读/写它、是否落库、行号、源码路径。
 
     `field` 支持点号坐标 `单据.字段` / `单据.分录.字段` / `单据.分录.子分录.字段`（裸字段=
     列全部定义坐标）；`form/entry/level` 可显式覆盖点号推断。
+
+    **写/读拆分（`access`）+ 按类合并（防 host 32KB 截断）**：
+    - `access='write'`（或默认含写入）：写入按**坐标 → 类 → 写入点**合并——同一类只出现一次，
+      类级信息（类型/所属单据）只存一份，行号/落库等列在该类的 `sites`。
+    - `access='read'`：读取按**类 → 方法**合并（`{class_fqn, methods:[{method, count, calls}], total}`）；
+      要弄清"谁读了它"就顺 `calls` 去那几个方法读源码。
+    - **默认（不传 access）**：写入明细 + 读取**仅按类计数概览** `readers_overview`（最省）；要读取
+      明细就再调一次 `access='read'`。
+    **真实总数恒在 `summary`**，被 cap 截断的数在各节点 `capped`/`sites_capped`/`methods_capped`
+    （红线 #4 不丢数）。仍嫌多就用 `form/entry/level` 收窄到单个坐标。
     """
     from ..report import field_trace
 
     conn = _open()
     try:
         field_key, form_key, entry_key, lvl = field_trace.parse_locator(field)
-        return field_trace.field_trace(
+        return field_trace.trace_compact(
             conn,
             field_key,
             form_key=form or form_key,
             entry_key=entry or entry_key,
             level=level or lvl,
+            access=access,
         )
     finally:
         conn.close()

@@ -28,18 +28,28 @@ def kb_env(tmp_path: Path, monkeypatch):
 
 
 def test_tool_ask_same_as_builder(kb_env):
-    """tool_ask == resolver.resolve + builder.build_context（不重写取证逻辑）。"""
+    """tool_ask 复用 resolver.resolve + builder.build_context（不重写取证逻辑）；唯一差异是
+    字段意图的 evidence 经 MCP 换成紧凑投影 trace_compact（防 host 截断），其余逐键相同。"""
     from cosmic_kb.semantic import resolver
     from cosmic_kb.context import builder
+    from cosmic_kb.report import field_trace
 
     got = mcp_server.tool_ask("cqkd_collateralstatus")
     conn = store.open_kb(kb_env)
     try:
-        want = builder.build_context(conn, resolver.resolve(conn, "cqkd_collateralstatus"))
+        rq = resolver.resolve(conn, "cqkd_collateralstatus")
+        want = builder.build_context(conn, rq)
+        compact = field_trace.trace_compact(
+            conn, rq.field_key, form_key=rq.form_key, entry_key=rq.entry_key, level=rq.level)
     finally:
         conn.close()
-    assert got == want
     assert got["intent"] == "field_who_changed"
+    # 除 evidence 外逐键相同（advice/status/query 等取证逻辑未重写）。
+    assert {k: v for k, v in got.items() if k != "evidence"} == \
+           {k: v for k, v in want.items() if k != "evidence"}
+    # evidence 是紧凑投影（写读拆分 + 按类合并），不再是富 trace 的 groups[].writers 行结构。
+    assert got["evidence"] == compact
+    assert got["evidence"]["access"] == "all"
 
 
 def test_tool_ask_clarification(kb_env):
@@ -50,6 +60,7 @@ def test_tool_ask_clarification(kb_env):
 
 
 def test_tool_trace_same_as_report(kb_env):
+    """tool_trace 走紧凑投影 trace_compact（防 host 截断），与 report 同口径、零重写。"""
     from cosmic_kb.report import field_trace
 
     got = mcp_server.tool_trace("cqkd_assetcard.cqkd_collateralstatus")
@@ -57,7 +68,7 @@ def test_tool_trace_same_as_report(kb_env):
     try:
         fk, form_key, entry_key, lvl = field_trace.parse_locator(
             "cqkd_assetcard.cqkd_collateralstatus")
-        want = field_trace.field_trace(
+        want = field_trace.trace_compact(
             conn, fk, form_key=form_key, entry_key=entry_key, level=lvl)
     finally:
         conn.close()

@@ -70,7 +70,7 @@ def _ctx_field(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, Any]:
     base["evidence"] = ft
     s = ft["summary"]
     advice: list[str] = []
-    if not ft["writers"] and not ft["readers"]:
+    if not s["writers"] and not s["readers"]:
         advice.append("没有任何插件读写该字段——可能字段名有误、只被平台处理、或源码未给全。")
     else:
         advice.append(

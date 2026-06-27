@@ -247,8 +247,8 @@ def test_field_trace_plugin_home_and_convert(tmp_path: Path):
     w = g["writers"][0]
     # 插件 P 注册在 B，字段来源是 A → 跨单据修改，标签含 B。
     assert w["plugin_cross_form"] is True
+    # 精简行只留 plugin_form_label（plugin_forms 列表已剔除，label 已编码所属单据）。
     assert "cqkd_plugbill" in (w["plugin_form_label"] or "")
-    assert any(h["form_key"] == "cqkd_plugbill" for h in w["plugin_forms"])
     # 转换上下游：A 的下游目标单含 B。
     cc = g["convert_context"]
     assert any(x["entity"] == "cqkd_plugbill" for x in cc["downstream"])

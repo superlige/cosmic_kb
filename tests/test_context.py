@@ -30,8 +30,9 @@ def test_ctx_field_who_changed(tmp_path: Path):
         # 旗舰证据：CollateralService 跨类写入、落库 yes、带行号。
         assert ev["summary"]["writers"] >= 1
         assert ev["summary"]["persisting_writers"] >= 1
-        w = ev["writers"][0]
-        assert w["access_class"].endswith("CollateralService")
+        # 顶层扁平 writers 已删、精简行用 access_simple（access_class 末段）；从分组取首个写入。
+        w = next(w for g in ev["groups"] for w in g["writers"])
+        assert w["access_simple"] == "CollateralService"
         assert w["line"] == 41
         # 渲染不报错且含字段标识。
         text = builder.render_context(ctx)
