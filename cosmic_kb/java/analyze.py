@@ -74,6 +74,9 @@ class FieldAccessRow:
     confidence: float
     source_relpath: str
     evidence: str | None = None
+    form_key_source: str | None = None  # form_key 来源：data_flow / metadata_*（反查回填）/ None
+    # 接收者基变量名：仅供 _backfill_form_key 做同对象共现交集分组，不落库（store INSERT 不含它）。
+    receiver_var: str | None = None
 
 
 @dataclass
@@ -166,6 +169,9 @@ def analyze(
                                bound_entity, covered, result):
             result.standalone_class_count += 1
 
+    # ── 字段 key 反查元数据回填 form_key（待办一：数据流追不到来源时的硬约束兜底）──────────
+    _backfill_form_key(result, _field_form_index(models), bound_entity)
+
     result.field_accesses = _dedup(result.field_accesses)
     result.const_table = const          # 暴露给粗扫侧复用（信任手段二）
     return result
@@ -187,6 +193,91 @@ def _dedup(rows: list[FieldAccessRow]) -> list[FieldAccessRow]:
         seen.add(k)
         out.append(r)
     return out
+
+
+def _field_form_index(
+    models: list["MetaModel"],
+) -> dict[str, list[tuple[str | None, str | None, str | None]]]:
+    """字段 key → 它在元数据里出现的全部 (form_key, entity_key, level)。
+
+    供 form_key 解不出时反查来源实体（待办一的物理硬约束：一个 DynamicObject 不可能
+    `.set("cqkd_xxx")`，除非它的实体类型声明了该字段 key）。与 `field` 表口径一致（同源 `m.fields`）。
+    """
+    idx: dict[str, list[tuple[str | None, str | None, str | None]]] = {}
+    for m in models:
+        for f in m.fields:
+            if not f.key:
+                continue
+            idx.setdefault(f.key, []).append((m.key, f.entity_key, f.level))
+    return idx
+
+
+def _backfill_form_key(
+    result: AnalysisResult,
+    field_idx: dict[str, list[tuple[str | None, str | None, str | None]]],
+    bound_entity: dict[str, set[str]],
+) -> None:
+    """字段 key 反查元数据回填 form_key（待办一）：数据流追不到 DO 来源时，用被读写的字段 key
+    反推来源实体。三层逐级塌缩，仍解不出留 None（红线 #4：宁标未定位不臆造）。
+
+    ① 唯一反查：字段 key 在元数据只归一个单据 → 直接定 form_key（物理硬约束，高置信）。
+    ② 绑定收敛：归多单据时，与「写它的 access_class / 入口插件的绑定单据」取交，唯一 → 定它。
+    ③ 同对象共现交集：同一接收者变量在同方法连读写多字段 → 候选 form 集合取交集，唯一 → 定它。
+    回填只改 form_key=None 的行，并打独立 form_key_source + evidence 备注，明示依据是字段归属
+    （元数据反推）而非数据流证明。
+    """
+    def cand(field_key: str | None) -> set[str]:
+        return {f for f, _e, _l in field_idx.get(field_key or "", []) if f}
+
+    def assign(row: FieldAccessRow, form: str, source: str, note: str, conf_cap: float) -> None:
+        row.form_key = form
+        row.form_key_source = source
+        # 该 form 下该字段的坐标唯一时一并回填 level/entry_key（表头 entry_key 归 None）。
+        coords = {(e, lv) for f, e, lv in field_idx.get(row.field_key or "", []) if f == form}
+        if len(coords) == 1:
+            ent_key, lvl = next(iter(coords))
+            if lvl:
+                row.level = lvl
+            row.entry_key = None if lvl == "header" else ent_key
+        row.confidence = round(min(row.confidence, conf_cap), 3)
+        row.evidence = (f"{row.evidence} | {note}" if row.evidence else note)
+
+    todo = [r for r in result.field_accesses
+            if r.form_key is None and r.field_key and cand(r.field_key)]
+
+    # ③ 预计算同对象共现交集：按 (源文件, 物理类, 入口事件, 接收者变量) 分组，对组内**全部**字段
+    #    （含 ① 即将唯一定下的兄弟字段）的候选 form 集合取交集——一个接收者变量只代表一个数据包，
+    #    其来源实体须满足它读写的所有字段。交集为单元素即该变量的来源单据。
+    groups: dict[tuple, list[FieldAccessRow]] = {}
+    for r in todo:
+        if r.receiver_var:
+            groups.setdefault((r.source_relpath, r.access_class, r.event_method, r.receiver_var),
+                              []).append(r)
+    group_form: dict[tuple, str] = {}
+    for gk, grp in groups.items():
+        inter: set[str] | None = None
+        for r in grp:
+            inter = cand(r.field_key) if inter is None else (inter & cand(r.field_key))
+        if inter and len(inter) == 1:
+            group_form[gk] = next(iter(inter))
+
+    for r in todo:
+        forms = cand(r.field_key)
+        if len(forms) == 1:                                   # ① 唯一反查
+            assign(r, next(iter(forms)), "metadata_unique",
+                   "form_key 由字段 key 反查元数据推得（数据流未追到，字段归属唯一·物理硬约束）", 0.9)
+            continue
+        bound = bound_entity.get(r.access_class, set()) | bound_entity.get(r.plugin_fqn, set())
+        inter = forms & bound
+        if len(inter) == 1:                                   # ② 绑定收敛
+            assign(r, next(iter(inter)), "metadata_binding",
+                   "form_key 由字段 key 反查元数据 + 绑定插件归属收敛推得（数据流未追到）", 0.7)
+            continue
+        gk = (r.source_relpath, r.access_class, r.event_method, r.receiver_var)
+        gf = group_form.get(gk) if r.receiver_var else None   # ③ 同对象共现交集
+        if gf and gf in forms:
+            assign(r, gf, "metadata_cooccur",
+                   "form_key 由字段 key 反查元数据 + 同对象共现字段交集收敛推得（数据流未追到）", 0.7)
 
 
 def _known_entities(models: list["MetaModel"]) -> frozenset[str]:
@@ -483,6 +574,8 @@ def _emit_event(
                 access=acc.access, persists=persists, persist_reason=reason,
                 via=acc.via, line=acc.line, path=path, key_resolution=acc.key_resolution,
                 confidence=conf, source_relpath=rnode.relpath, evidence=acc.note,
+                form_key_source="data_flow" if acc.entity else None,
+                receiver_var=acc.receiver_var,
             ))
 
 
@@ -562,6 +655,8 @@ def _analyze_standalone(
                 access=acc.access, persists=persists, persist_reason=reason,
                 via=acc.via, line=acc.line, path=[name], key_resolution=acc.key_resolution,
                 confidence=acc.confidence, source_relpath=node.relpath, evidence=acc.note,
+                form_key_source="data_flow" if acc.entity else None,
+                receiver_var=acc.receiver_var,
             ))
             emitted = True
     return emitted

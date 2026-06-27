@@ -188,6 +188,32 @@ def test_ambiguous_tier_when_entity_unresolved(tmp_path: Path):
         conn.close()
 
 
+def test_resolved_by_metadata_reverse_is_honest(tmp_path: Path):
+    """收敛依据是字段 key 反查元数据回填（form_key_source=metadata_unique）时，note 须诚实标明
+    依据是字段归属、resolved_lines 仅读写所在行，不冒充数据流证明（红线 #4）。"""
+    db, _src = _kb_with_source(tmp_path)
+    conn = store.open_kb(db)
+    try:
+        # cqkd_rate 跨两单同名，本文件给一条按字段key反查回填到 cqkd_contract 的 field_access 行。
+        conn.execute(
+            "INSERT INTO field_access(form_key,field_key,level,entry_key,plugin_fqn,plugin_type,"
+            "access_class,event_method,event_phase,access,persists,persist_reason,via,line,path,"
+            "key_resolution,confidence,source_relpath,evidence,form_key_source) "
+            "VALUES('cqkd_contract','cqkd_rate','header',NULL,'cqspb.am.CollateralOp','op',"
+            "'cqspb.am.CollateralOp','beforeExecuteOperationTransaction','transaction','read','na',"
+            "NULL,'do.get',12,'[]','literal',0.9,?, '', 'metadata_unique')",
+            (REL,),
+        )
+        conn.commit()
+        rate = read_source.read_source(conn, REL)["field_names"]["cqkd_rate"]
+        assert rate["tier"] == "resolved"
+        assert rate["names"] == ["利率"]                   # 收敛到 cqkd_contract
+        assert "字段归属元数据反查" in rate["note"]
+        assert "非数据流" in rate["note"]
+    finally:
+        conn.close()
+
+
 def test_read_source_line_slice(tmp_path: Path):
     db, _src = _kb_with_source(tmp_path)
     conn = store.open_kb(db)

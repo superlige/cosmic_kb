@@ -54,6 +54,9 @@ _DO_READ = {
 # 注意 `getDynamicObject(` 的 `(` 紧跟，绝不会误匹配 `getDynamicObjectCollection(`。
 _GET_COLL_ARG_RE = re.compile(r'getDynamicObjectCollection\(\s*([^,()]+?)\s*\)')
 _GET_DO_ARG_RE = re.compile(r'getDynamicObject\(\s*([^,()]+?)\s*\)')
+# 待办二习语：`new DynamicObject(coll.getDynamicObjectType())` —— 新行元素归属该集合所代表的分录实体。
+_NEW_DO_OF_COLL_RE = re.compile(
+    r'new\s+DynamicObject\s*\(\s*(\w+)\s*\.\s*getDynamicObjectType\s*\(\s*\)\s*\)')
 _GET_ENTRY_ARG_RE = re.compile(r'getEntryEntity\(\s*([^,()]+?)\s*\)')   # model.getEntryEntity(分录)
 _STR_LIT_RE = re.compile(r'^"([^"]*)"$')
 # ORM 集合（返回某实体的表头行集合/数组）：load/loadFromCache/query。
@@ -123,6 +126,7 @@ class FieldAccess:
     key_resolution: str            # literal | constant | ambiguous | unknown | dynamic
     confidence: float
     note: str | None = None
+    receiver_var: str | None = None  # 接收者基变量名（do.* 路径填；供 analyze 做同对象共现交集回填）
 
 
 @dataclass
@@ -478,6 +482,19 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
                 model_vars.add(lv.name)
                 changed = True
                 continue
+            # 待办二习语：`new DynamicObject(coll.getDynamicObjectType())` —— 新行的类型取自某集合，
+            # 元素即归该集合所代表的分录实体（与 addNew() 同理，集合未解析则留 None，红线 #4）。
+            m_new = _NEW_DO_OF_COLL_RE.search(init_text)
+            if m_new:
+                coll_var = m_new.group(1)
+                if _pending(coll_var):
+                    continue
+                if coll_var in coll_ctx:
+                    c = coll_ctx[coll_var]
+                    doc_ctx[lv.name] = _Ctx(c.level, c.entry_key, c.entity, note=c.note)
+                    changed = True
+                continue
+
             # 行变量：引用某集合 .get(i) / .iterator() / .addNew()（新增行同样是该集合的元素行）。
             if re.search(r"\bget\(|\.iterator\b|\.addNew\b", init_text):
                 if _pending(base_var):
@@ -708,8 +725,11 @@ def _classify_access(
         if kr is None:   # 既非字段 key、又非可归因的拼接/动态表达式 → 不记录（保持原行为）
             return None
         is_write = name in _DO_WRITE
+        # 接收者基变量名（去数组下标）：供 analyze 的同对象共现交集回填按变量分组求交。
+        recv = re.sub(r"\[.*?\]$", "", obj.split(".", 1)[0].strip().split("(", 1)[0].strip())
         return _make(kr, ctx.level, ctx.entry_key, ctx.entity,
-                     "write" if is_write else "read", f"do.{name}", inv.line, ctx_note=ctx.note)
+                     "write" if is_write else "read", f"do.{name}", inv.line,
+                     ctx_note=ctx.note, receiver_var=recv or None)
     return None
 
 
@@ -736,13 +756,16 @@ def _resolve_do_ctx(
 
 
 def _make(kr, level: str, entry_key: str | None, entity: str | None,
-          access: str, via: str, line: int, *, ctx_note: str | None = None) -> FieldAccess:
+          access: str, via: str, line: int, *, ctx_note: str | None = None,
+          receiver_var: str | None = None) -> FieldAccess:
     if kr is None:
         return FieldAccess(None, level, entry_key, entity, access, via, line, "dynamic", 0.3,
-                           note=_join_note("字段 key 为表达式/拼接，无法静态解析", ctx_note))
+                           note=_join_note("字段 key 为表达式/拼接，无法静态解析", ctx_note),
+                           receiver_var=receiver_var)
     conf = kr.confidence * (0.7 if ctx_note else 1.0)
     return FieldAccess(kr.value, level, entry_key, entity, access, via, line,
-                       kr.kind, round(conf, 3), note=_join_note(kr.note, ctx_note))
+                       kr.kind, round(conf, 3), note=_join_note(kr.note, ctx_note),
+                       receiver_var=receiver_var)
 
 
 def _join_note(*notes: str | None) -> str | None:

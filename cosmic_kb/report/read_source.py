@@ -52,23 +52,35 @@ def _known_keys(conn) -> set[str]:
     return keys
 
 
-def _form_ctx_for_file(conn, relpath: str) -> dict[str, dict[str, list[int]]]:
-    """本文件 `field_access` 解析出的「key → 数据包来源实体(form_key) → 命中行号」。
+def _form_ctx_for_file(conn, relpath: str) -> dict[str, dict[str, dict[str, Any]]]:
+    """本文件 `field_access` 解析出的「key → 数据包来源实体(form_key) → {行号, 来源种类}」。
 
     form_key 是段一按数据包来源解析出的**实际操作实体**（ORM load 取到的实体/事件入参绑定单据/
     跨实体传播；判不出为 NULL），正是给 read_source 收敛同名候选的权威依据。NULL（未定位）不入表，
     它帮不了消歧。字段访问按 `field_key` 命中，分录容器按 `entry_key` 命中（容器 key 也要消歧）。
+
+    `form_key_source` 区分来源依据：`data_flow`=数据流证明；`metadata_*`=字段 key 反查元数据回填
+    （依据是字段归属、非数据流行号）。同 (key, form) 多行混源时以 data_flow 为准（更强）。
     """
-    ctx: dict[str, dict[str, set[int]]] = {}
+    ctx: dict[str, dict[str, dict[str, Any]]] = {}
     for r in conn.execute(
-        "SELECT field_key, entry_key, form_key, line FROM field_access "
+        "SELECT field_key, entry_key, form_key, line, form_key_source FROM field_access "
         "WHERE source_relpath=? AND form_key IS NOT NULL",
         (relpath,),
     ):
+        src = r["form_key_source"] or "data_flow"
         for k in (r["field_key"], r["entry_key"]):
             if k:
-                ctx.setdefault(k, {}).setdefault(r["form_key"], set()).add(r["line"])
-    return {k: {f: sorted(lines) for f, lines in forms.items()} for k, forms in ctx.items()}
+                cell = ctx.setdefault(k, {}).setdefault(r["form_key"], {"lines": set(), "srcs": set()})
+                cell["lines"].add(r["line"])
+                cell["srcs"].add(src)
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for k, forms in ctx.items():
+        out[k] = {}
+        for f, cell in forms.items():
+            src = "data_flow" if "data_flow" in cell["srcs"] else sorted(cell["srcs"])[0]
+            out[k][f] = {"lines": sorted(cell["lines"]), "src": src}
+    return out
 
 
 def _distinct(values) -> list[str]:
@@ -130,18 +142,30 @@ def _classify_key(
     resolved_forms = form_ctx.get(key, {})
     matched = [c for c in candidates if c.get("form_key") in resolved_forms]
     if matched:
+        srcs: set[str] = set()
         for c in matched:
-            c["resolved_lines"] = resolved_forms.get(c.get("form_key"), [])
+            info = resolved_forms.get(c.get("form_key"), {})
+            c["resolved_lines"] = info.get("lines", [])
+            srcs.add(info.get("src") or "data_flow")
         also = sorted({c.get("form_key") for c in candidates
                        if c.get("form_key") and c.get("form_key") not in resolved_forms})
+        also_note = f"另有同名字段在：{', '.join(also)}。" if also else ""
+        # 全凭字段归属元数据反查收敛时，诚实标明依据非数据流（resolved_lines 仅读写所在行）。
+        if srcs and all(s.startswith("metadata") for s in srcs):
+            note = ("本文件按**字段归属元数据反查**把此标识收敛到上述单据（数据流未追到来源；"
+                    "resolved_lines 仅为读写所在行，非数据流来源行）。" + also_note)
+        else:
+            note = "本文件 field_access 按数据包来源把此标识解析到上述单据；其余同名字段未在本文件命中。"
+            if any(s.startswith("metadata") for s in srcs):
+                note += "（其中部分单据依据是字段归属元数据反查而非数据流。）"
+            note += also_note
         coords, capped = _cap_coords(matched)
         out = {
             "tier": "resolved",
             "names": _distinct(c.get("name") for c in matched),
             "coordinates": coords,
             "also_in_forms": also,
-            "note": ("本文件 field_access 按数据包来源把此标识解析到上述单据；其余同名字段"
-                     "未在本文件命中。" + (f"另有同名字段在：{', '.join(also)}。" if also else "")),
+            "note": note,
         }
         if capped:
             out["coordinates_capped"] = capped

@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from ..metadata.model import MetaModel
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
-KB_SCHEMA_VERSION = "9"
+KB_SCHEMA_VERSION = "10"
 
 # DROP 顺序（FTS 虚拟表与各表；DROP TABLE 对 search 同样有效，会连带清掉 FTS 影子表）。
 _OBJECTS = [
@@ -258,11 +258,11 @@ def _populate_java(conn, res) -> dict[str, Any]:
           pm.start_line, pm.end_line, pm.source_relpath) for pm in res.plugin_methods],
     )
     conn.executemany(
-        "INSERT INTO field_access VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO field_access VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [(r.form_key, r.field_key, r.level, r.entry_key, r.plugin_fqn, r.plugin_type,
           r.access_class, r.event_method, r.event_phase, r.access, r.persists,
           r.persist_reason, r.via, r.line, _json.dumps(r.path, ensure_ascii=False),
-          r.key_resolution, r.confidence, r.source_relpath, r.evidence)
+          r.key_resolution, r.confidence, r.source_relpath, r.evidence, r.form_key_source)
          for r in res.field_accesses],
     )
     # field_access 也进 FTS（按字段 key / 类名搜得到）。

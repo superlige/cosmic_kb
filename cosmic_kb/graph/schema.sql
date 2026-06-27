@@ -156,7 +156,11 @@ CREATE TABLE field_access (
     key_resolution  TEXT,                 -- literal/constant/ambiguous/unknown/dynamic
     confidence      REAL,
     source_relpath  TEXT,
-    evidence        TEXT
+    evidence        TEXT,
+    form_key_source TEXT                   -- form_key 来源种类：data_flow（数据流解析）/
+                                           -- metadata_unique·metadata_binding·metadata_cooccur
+                                           -- （字段key反查元数据回填，依据是字段归属非数据流）/
+                                           -- NULL=未定位。诚实区分元数据反推与数据流证明（红线#4）。
 );
 
 -- ── 粗精度扫描命中（信任「手段二」：粗扫 vs 高精度对比的粗扫侧）──────────────

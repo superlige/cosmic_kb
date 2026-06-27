@@ -141,13 +141,23 @@
   局部走「空集合 + `.add(已知实体包)` 累积推断元素来源」轻量数据流。`ast_index` 加 `dynamicobject_collection_*`、
   `field_access._Env` 加 `do_coll_vars` + `.add` 累积、`analyze._coll_params` 并入 List<DO> 形参。零 schema 改动（v9）。
   真实库 form_key NULL **60.3%→56.1%**（救回 764 行，0 改写、99%+ 落确认实体）。**当前 227 passed。**
+- ✅ **信任优先·form_key 解析率再提升（字段key反查回填三层 + addNew 习语，schema v10）**（2026-06-27）：数据流追不到
+  DO 来源时，反过来用**被读写的字段 key** 问元数据反推来源实体——物理硬约束「DO 不可能 `.set("cqkd_xxx")` 除非其实体
+  声明了该 key」，对返回值/Map/helper/new/stream 等容器断链**免疫**。`analyze.py` `_field_form_index`+`_backfill_form_key`
+  在 `_dedup` 前对 form_key=None 行三层逐级塌缩：①字段key唯一反查（直接定 form_key+level+entry_key）②绑定收敛（与
+  access_class/入口插件绑定单据取交）③同对象共现交集（同接收者变量连写多字段，候选 form 取交集；为此 `field_access`
+  do.* 路径记 `receiver_var`）；仍解不出留 None（红线 #4）。待办二：`field_access` 加 `new DynamicObject(coll.getDynamicObjectType())`
+  习语（新行继承集合分录坐标）。新增 schema **v10** 列 `form_key_source`（data_flow/metadata_unique·binding·cooccur/NULL）
+  诚实区分元数据反推与数据流证明；`read_source` 对 metadata_* 来源注明「依据是字段归属、非数据流行号」。真实库 form_key
+  NULL **56.1%→34.6%**（write 52.1%→27.4%；回填 4153 行=唯一2167+绑定1234+共现752，0 改写）。**当前 240 passed。**
+  详见 `docs/form_key解析待办.md`（②反向调用图、③④诚实未知留作后续）。
 - 详细进度与每阶段"背景/目标/验收结论/命令"见 `docs/阶段验收.md`。
 
 ## 常用命令（Windows / PowerShell）
 
 ```powershell
 pip install -e ".[parse,encoding,dev,fuzzy,mcp]"  # 解析+编码+测试+模糊匹配+MCP（fuzzy/mcp 可选）
-pytest -q                                # 跑测试（当前 227 passed）
+pytest -q                                # 跑测试（当前 240 passed）
 cosmic_kb --version                      # 版本
 cosmic_kb doctor                         # 资产体检（需 skill_assets/ok-cosmic-docs.db）
 cosmic_kb ingest "<项目源码根>"          # 阶段1：摄取 + 覆盖率/可信度报告（--json 可留档）
