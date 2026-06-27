@@ -176,13 +176,41 @@
   红线 #4）。零 schema 改动（v10）。真实库 field_access **19399→20104（+705：写 +402/读 +303，此前完全不可见）**，其中 via
   model.* +429（C1）、内联 do.* +276（C2/C3）；form_key NULL **率不升反降 34.6%→34.4%、写 27.4%→26.7%**（新行多数当场定到来源,
   不进未知堆）。`addNew`/`new DynamicObject` 的**变量形式**早由上一轮覆盖，本轮专补**内联链**。**当前 264 passed。**
+- ✅ **信任优先·form_key 解析率提升（孤立方法反向调用图回填）**（2026-06-27）：`form_key=None` 未定位最大单一杠杆是
+  「孤立方法 DynamicObject 入参」（占未定位 25.0%、1679 条）——正向只从绑定插件事件/未绑定插件根方法跨类 BFS 沿
+  「实参↔形参」传源，没被任何 BFS 覆盖的 helper（`void fill(DynamicObject o){ o.set(...) }`）走全量孤立补全时 DO 形参不知
+  来源、整片 None。补「反向调用图回填」：`analyze.py` 在 `_backfill_form_key`（元数据反推）**之前**插 `_backfill_reverse_calls`
+  （数据流级证据强于字段归属反推，先定）——`_build_reverse_calls` 遍历全项目逐重载用现成 `_resolve_call` 建「目标(类,方法)→
+  调用点」反向索引（自调用不入，`new Helper().m()` 显式构造接收者可解析）；对 form_key=None 的 standalone 行按
+  (access_class,物理方法) 分组，限域到反向可达子图；`_propagate_reverse_props` 做固定点逐跳传播，只有全部调用点都推出
+  同一个非空来源才采纳；带 param_ctx 重跑 `analyze_method`，按 (line,field_key,access) 把 entity≠None 项回填到原 None 行，标
+  `form_key_source=reverse_callgraph`。单跳唯一调用方 conf≤0.85，链式/多调用一致 conf≤0.80。递归/冲突/源未知一律留 None
+  （红线 #4），只动 None 行不改写已定位。
+  `read_source` 按 `metadata` 前缀判来源，reverse_callgraph 自动归数据流类、无需改。零 schema 改动（v10）。新增
+  `tests/test_reverse_callgraph.py` 11 例（Codex 侧全量 `pytest -q`：278 passed；真实项目
+  `D:\kingdee\asset_management_sys` 重建复算命中 `reverse_callgraph=218`（读 148 / 写 70），
+  `form_key NULL=6903/20259=34.07%`）。本轮固定点版相对单跳版只新增 16 条，未达 500+ 目标；后续识别率专项应转向
+  实例字段级数据流、非标准来源/容器来源和 evidence 分桶，不应为数字放宽多调用冲突/未知来源红线。
+- ✅ **阶段 10 增补·MCP 工具面精简（10→7，审计工具下沉 CLI-only）**（2026-06-28）：段二大模型经 MCP 调
+  `cosmic_kb` 时「工具太多、职责重叠、选不准」——coverage/scan_compare 都是「扫描可信度」报告（人类验收视角、
+  非段二排障主路径、模型难判调哪个），dynamic_writes 是全项目盲点审计（模型在「谁写了 X」时易误调、绕开
+  trace），ask 与 trace/bill/method_calls 入口重叠（已知精确标识仍偷懒调）。**仅改 MCP 工具面**（CLI 16 命令/
+  KB schema v10/`report/*` 取证函数全不动，红线 #6 KB 是契约）：① 删 `tool_coverage`/`tool_scan_compare`/
+  `tool_dynamic_writes` 三纯逻辑函数、`TOOLS` 收敛为 7 项（ask/trace/bill/method_calls/resolve_fields/
+  read_source/cosmic_semantics）；② 收紧 `INSTRUCTIONS`（ask 定位为兜底路由 + 删指向已不可达 dynamic_writes 的
+  切片句，**保留** trace 返回值里 `dynamic_writers` 该读方法清单导航）；③ 收紧 docstring（ask 标兜底、
+  cosmic_semantics 空参列清单路径提前、resolve_fields↔read_source 边界互补、method_calls「只导航不解释」）。
+  审计能力只是**离开 MCP、未消失**，CLI `coverage`/`scan-compare`/`dynwrites` 仍可用。零 schema 改动（v10）。
+  `test_mcp.py` 改注册表期望为 7 名 + 新增「审计工具不暴露给 MCP」回归断言、删 coverage/scan_compare MCP 用例
+  （纯逻辑仍由 report.* + 专属套件覆盖）；删 1 增 1 净零，预期全量 `pytest -q` 仍 **278 passed**。注：MCP server
+  常驻，改后需**重连/重启 MCP** 才生效。
 - 详细进度与每阶段"背景/目标/验收结论/命令"见 `docs/阶段验收.md`。
 
 ## 常用命令（Windows / PowerShell）
 
 ```powershell
 pip install -e ".[parse,encoding,dev,fuzzy,mcp]"  # 解析+编码+测试+模糊匹配+MCP（fuzzy/mcp 可选）
-pytest -q                                # 跑测试（当前 264 passed）
+pytest -q                                # 跑测试（当前 278 passed）
 cosmic_kb --version                      # 版本
 cosmic_kb doctor                         # 资产体检（需 skill_assets/ok-cosmic-docs.db）
 cosmic_kb ingest "<项目源码根>"          # 阶段1：摄取 + 覆盖率/可信度报告（--json 可留档）
@@ -208,7 +236,12 @@ cosmic_kb mcp                            # 阶段10：起 MCP 服务器，把取
 - **对用户用简体中文回答**（用户偏好）。
 - 代码注释/文档字符串用中文，风格与现有模块一致（务实、可解释，讲清"为什么这么做"）。
 - 可选依赖分组放 `pyproject.toml` 的 optional-dependencies，避免一上来装一堆。
-- 每个新功能配 `tests/` 测试；改完跑 `pytest -q` 确认不回归。
-- **工作纪律：一个阶段 ≈ 一个会话。** 做完 → 写测试 → 用户人工验收 → 把"实现了什么 +
-  验收结果"更新进 `docs/阶段验收.md` → git 提交 → 开新会话做下一阶段，保持上下文干净。
+- **分工（2026-06-27 起）**：**Claude 负责开发 + 验收文档（`docs/阶段验收.md`）更新**；
+  **codex 负责测试 + git 提交**。Claude 改完代码即写/改对应验收结论，不自己跑测试套件、
+  不自己 `git commit`；交给 codex 跑 `pytest -q` 与提交。
+- 每个新功能仍需配 `tests/` 测试用例（Claude 写用例，codex 负责执行验证不回归）。
+- 后续凡是做 `form_key` 识别率优化，测试完成后必须同步更新
+  `docs/数据包来源与form_key解析合并.md` 的"当前识别情况"统计。
+- **工作纪律：一个阶段 ≈ 一个会话。** Claude 开发 → 写测试用例 → 更新 `docs/阶段验收.md`
+  → 用户人工验收 → codex 跑测试 + git 提交 → 开新会话做下一阶段，保持上下文干净。
 - 重要决策/架构取舍写进 `docs/`，不要只留在对话里。

@@ -97,11 +97,6 @@ def test_tool_bill_missing_form(kb_env):
     assert "error" in mcp_server.tool_bill("cqkd_nope")
 
 
-def test_tool_coverage_and_scan_compare(kb_env):
-    assert isinstance(mcp_server.tool_coverage(), dict)
-    assert isinstance(mcp_server.tool_scan_compare(), dict)
-
-
 def test_open_raises_when_kb_missing(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("COSMIC_KB_DB", str(tmp_path / "nope.db"))
     with pytest.raises(RuntimeError):
@@ -109,12 +104,20 @@ def test_open_raises_when_kb_missing(tmp_path: Path, monkeypatch):
 
 
 def test_tools_registry_matches():
-    """TOOLS 注册表与公开 tool_* 函数一一对应（防漏注册）。"""
+    """TOOLS 注册表收敛到 7 个排障核心工具（防漏注册）。"""
     assert set(mcp_server.TOOLS) == {
-        "ask", "trace", "bill", "method_calls", "coverage", "scan_compare",
-        "dynamic_writes", "resolve_fields", "read_source", "cosmic_semantics"}
+        "ask", "trace", "bill", "method_calls",
+        "resolve_fields", "read_source", "cosmic_semantics"}
     for fn in mcp_server.TOOLS.values():
         assert callable(fn)
+
+
+def test_audit_tools_not_exposed_to_mcp():
+    """三个审计工具（coverage/scan_compare/dynamic_writes）只留 CLI，不再注册到 MCP（防回归混入）。
+    其纯逻辑由 report.* 直连 + test_coverage/test_scan_compare 专属套件覆盖，无测试缺口。"""
+    for name in ("coverage", "scan_compare", "dynamic_writes"):
+        assert name not in mcp_server.TOOLS
+        assert not hasattr(mcp_server, f"tool_{name}")
 
 
 def test_tool_cosmic_semantics_lists_topics():

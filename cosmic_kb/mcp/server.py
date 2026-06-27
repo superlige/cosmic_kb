@@ -22,16 +22,16 @@ DEFAULT_DB = "cosmic_kb.db"
 INSTRUCTIONS = (
     "这是苍穹（金蝶 Cosmic）历史项目本地理解工具。问『某字段谁改的 / 某单据有哪些操作和插件 / "
     "某方法调了什么 / 某插件干嘛的』，先调取证工具再下结论：字段级用 trace，单据钻取用 bill，"
-    "方法出向调用导航用 method_calls，自然语言提问用 ask（判不准会回 need_clarification 候选，"
-    "请挑精确标识再问、绝不替用户拍板）。\n"
+    "方法出向调用导航用 method_calls。**知道精确字段/单据/方法标识就直接用 trace/bill/method_calls；"
+    "ask 只是判不准意图时的自然语言兜底**（判不准会回 need_clarification 候选，请挑精确标识再问、"
+    "绝不替用户拍板）。\n"
     "结论纪律：每条都要带 类·方法·行号 等证据，并标注 confirmed / likely / unknown 三态；"
     "缺保存链路一律判 unknown，**绝不臆造字段名/方法名/插件名**。源码全文请直接读本机源文件，"
     "取证工具只回最小证据包。\n"
     "【动态写入】部分代码对运行时/配置决定的动态字段集做泛化读写（循环/拼接/外部常量），静态钉不出"
-    "具体字段。trace 结果里的 `dynamic_writers` 是**按方法去重的「该读方法」清单**（带 calls 导航 + "
+    "具体字段。trace 返回值里的 `dynamic_writers` 是**按方法去重的「该读方法」清单**（带 calls 导航 + "
     "写入位置）：要把『谁改了 X』答全，就对清单里的方法逐个 calls/读本机源码，判定它是否真碰了 X（"
-    "不臆造）。要做全项目盲点审计或缩范围，调 dynamic_writes 并用 form_key/cause/class_fqn 过滤拉切片，"
-    "**别要全量逐行**（会撑爆上下文）。\n"
+    "不臆造）。\n"
     "【trace 写读拆分 + 按类合并】trace 默认回**写入明细（坐标→类→写入点）+ 读取仅按类计数概览**"
     "（`readers_overview`）；要读取明细就再调一次 `trace(field, access='read')`（类→方法，顺 `calls` "
     "去读源码）；只看写入用 `access='write'`。写入/读取都**按类合并**（同一类只出现一次，行号/落库等"
@@ -111,7 +111,8 @@ def _open():
 
 # ── 五个取证工具的纯逻辑（复用段一取证函数，绝不重写）────────────────────────
 def tool_ask(question: str) -> dict[str, Any]:
-    """自然语言提问 → 意图解析 → 查 KB 取确定性证据包。
+    """自然语言提问 → 意图解析 → 查 KB 取确定性证据包。**兜底路由**：已知精确字段/单据/方法标识时
+    优先直接用 trace/bill/method_calls（更稳），ask 只用于意图判不准、需要先消歧的自然语言提问。
 
     覆盖旗舰意图：字段谁改的 / 单据钻取 / 插件解释 / 操作解释。判不准时返回
     `status='need_clarification'` + `candidates` 候选——请挑一个精确标识或用
@@ -188,7 +189,8 @@ def tool_bill(form_key: str) -> dict[str, Any]:
 
 
 def tool_method_calls(class_fqn: str, method_name: str) -> dict[str, Any]:
-    """方法出向调用导航：类全限定名 + 方法名 → 该方法调用的**项目内**方法及位置。
+    """方法出向调用导航：类全限定名 + 方法名 → 该方法调用的**项目内**方法及位置。**只导航不解释**——
+    「这个方法在干嘛」请顺返回的 `target_relpath` 用 read_source 读源码自己判，本工具不复述源码逻辑。
 
     给一个能直接读本机源码的大模型：读到方法体里 `xxxService.doX()`，本工具确定性回答
     「`doX` 定义在项目里哪个类、哪个源文件」（多 ISV 前缀野生码上盲 grep 易命中错类）。
@@ -207,58 +209,13 @@ def tool_method_calls(class_fqn: str, method_name: str) -> dict[str, Any]:
         conn.close()
 
 
-def tool_coverage() -> dict[str, Any]:
-    """信任优先·手段一：字段覆盖率（元数据为分母）+ 四维扫描质量分解。"""
-    from ..report import coverage
-
-    conn = _open()
-    try:
-        return coverage.coverage(conn)
-    finally:
-        conn.close()
-
-
-def tool_scan_compare() -> dict[str, Any]:
-    """信任优先·手段二：粗精度(源码字面量) vs 高精度(field_access) 对比 → 疑似盲点/精度增量。"""
-    from ..report import scan_compare
-
-    conn = _open()
-    try:
-        return scan_compare.compare(conn)
-    finally:
-        conn.close()
-
-
-def tool_dynamic_writes(
-    form_key: str | None = None,
-    cause: str | None = None,
-    class_fqn: str | None = None,
-) -> dict[str, Any]:
-    """信任优先·全局「动态/未定位写入」审计：字段 key 钉不出（动态循环/拼接/外部常量/歧义常量）→
-    `trace` 按字段查不到的那些读写。**默认不回逐行**，按成因桶给计数 + **去重后的「该读方法」清单**
-    （每条：入口类全限定名 + 方法 + 多少处动态写 + 成因 + 物理写入位置 + `calls` 导航）——防上下文爆炸。
-
-    用法：通常先看 `trace` 结果里的「动态写入候选」方法清单；要全项目审计或缩范围时调本工具，
-    用 `form_key`（限某单据）/`cause`（dynamic-loop|concat|external-const|unknown|ambiguous|dynamic）/
-    `class_fqn`（限某类）过滤拉一个切片，再顺 `calls`/锚点**直接读本机源码**定性是否含目标字段。
-    确定性层不展开、不臆造（红线 #6）——具体碰哪些字段由你读源码判定。
-    """
-    from ..report import dynamic_writes
-
-    conn = _open()
-    try:
-        return dynamic_writes.summarize(
-            conn, form_key=form_key, cause=cause, class_fqn=class_fqn)
-    finally:
-        conn.close()
-
-
 def tool_resolve_fields(keys: list[str]) -> dict[str, Any]:
     """字段标识 → 真实元数据中文名+实体坐标（比对元数据、防命名惯例臆断）。
 
-    专治『读源码顺手核字段名』：批量传 key，回 `{"resolved": {key: [{...}] | null}}`。比 trace
-    便宜得多（O(1) 打词典，只回名字+坐标，不查谁改了它），读一段代码碰到不认识的 `<isv>_xxx`
-    就顺手批量核一次——命名惯例（`zjjnqk` 是租金还是资金？）不算证据，必须比对。
+    **边界**：手上只有一串字段 key、**并不在读某个源文件**时才用本工具；**已经在读源码**用 read_source
+    即可（它已自动回 `field_names`，无需再调本工具）。批量传 key，回 `{"resolved": {key: [{...}] | null}}`。
+    比 trace 便宜得多（O(1) 打词典，只回名字+坐标，不查谁改了它）——命名惯例（`zjjnqk` 是租金还是
+    资金？）不算证据，必须比对。
     - 字段命中：`{kind:"field", name, form_key, entity_key, level, field_kind, field_type, access}`。
       `access` 是派生取值语义：**多选基础资料字段（MulBasedataField）也用 `getDynamicObjectCollection()`
       取选中的基础资料集合，不是分录行**——取分录还是基础资料取决于 key，别凭 API 名当分录。
@@ -279,7 +236,8 @@ def tool_resolve_fields(keys: list[str]) -> dict[str, Any]:
 def tool_read_source(
     relpath: str, start_line: int | None = None, end_line: int | None = None,
 ) -> dict[str, Any]:
-    """读项目源码（野生编码正确解码）+ 自动标注其中字段 key 的真实中文名。**读源码优先用本工具**。
+    """读项目源码（野生编码正确解码）+ 自动标注其中字段 key 的真实中文名。**读源码优先用本工具**
+    （而非宿主原生 reader）；它已自动回 `field_names`，读源码时无需再单独调 resolve_fields 核名。
 
     凭什么用它而非宿主原生 reader：① 野生码（GBK/GB2312/UTF-8±BOM 混杂）原生 reader 易乱码，本工具按
     建库同款编码探测正确解码、行号还与 KB 对齐；② **自动标注** `field_names`——扫文件里出现的字段标识
@@ -302,6 +260,8 @@ def tool_read_source(
 
 def tool_cosmic_semantics(topic: str = "") -> dict[str, Any]:
     """苍穹领域语义文档查询：插件类型/事件时机/SDK 用法/DynamicObject 路径/入库判断/反模式黑名单。
+    **不确定该取哪一篇时，先空参 `cosmic_semantics("")` 列清单**——返回每个主题名 + 一行『何时用』，
+    照它挑一个 topic 再调取全文。
 
     随包语义文档（`cosmic_kb/semantics/`，分发改造后下沉进包）按主题取一篇 markdown 全文，
     让**任意 MCP agent**（不止 Claude）都能拿到苍穹纪律与领域知识。
@@ -338,9 +298,6 @@ TOOLS = {
     "trace": tool_trace,
     "bill": tool_bill,
     "method_calls": tool_method_calls,
-    "coverage": tool_coverage,
-    "scan_compare": tool_scan_compare,
-    "dynamic_writes": tool_dynamic_writes,
     "resolve_fields": tool_resolve_fields,
     "read_source": tool_read_source,
     "cosmic_semantics": tool_cosmic_semantics,

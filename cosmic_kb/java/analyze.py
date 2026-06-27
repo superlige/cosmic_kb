@@ -169,6 +169,11 @@ def analyze(
                                bound_entity, covered, result):
             result.standalone_class_count += 1
 
+    # ── 孤立方法反向调用图回填（doc §5 #1）：唯一调用方实参来源沿「实参↔形参」传播 ──────────
+    #    排在元数据兜底**之前**——反向调用图给的是真实数据流来源（实参确实携带该来源），强度高于
+    #    「字段 key 反查元数据」，先定、metadata 只补它没救到的。
+    _backfill_reverse_calls(result, pg, const, known_entities, bound_entity)
+
     # ── 字段 key 反查元数据回填 form_key（待办一：数据流追不到来源时的硬约束兜底）──────────
     _backfill_form_key(result, _field_form_index(models), bound_entity)
 
@@ -278,6 +283,248 @@ def _backfill_form_key(
         if gf and gf in forms:
             assign(r, gf, "metadata_cooccur",
                    "form_key 由字段 key 反查元数据 + 同对象共现字段交集收敛推得（数据流未追到）", 0.7)
+
+
+def _build_reverse_calls(
+    pg: "ProjectGraph",
+) -> dict[tuple[str, str], list[tuple[str, str, "ax.Invocation"]]]:
+    """全项目反向调用边索引：(目标类FQN, 目标方法) → [(调用方FQN, 调用方方法, 调用点), …]。
+
+    遍历每个类的**全部重载**方法体，对每个调用用现成的 `_resolve_call` 解析到项目内目标
+    （本类方法 / 可解析跨类方法；受者类型解不出就不收=宁缺毋滥）。自调用（递归）`_resolve_call`
+    已天然返回 None（`inv.name != method`），不会进索引。
+    """
+    callers: dict[tuple[str, str], list[tuple[str, str, "ax.Invocation"]]] = {}
+    for fqn, node in pg.classes.items():
+        for md in node.cg.method_decls:
+            if md.body is None:
+                continue
+            for inv in ax.iter_invocations(md.body):
+                tgt = _resolve_call(pg, node, md.name, inv)
+                if tgt is None:
+                    continue
+                callers.setdefault(tgt, []).append((fqn, md.name, inv))
+    return callers
+
+
+def _all_call_edges(
+    callers: dict[tuple[str, str], list[tuple[str, str, "ax.Invocation"]]],
+) -> list[tuple[tuple[str, str], tuple[str, str], "ax.Invocation"]]:
+    """把反向索引摊平成 [(caller, target, invocation)]，供固定点传播逐边重算。"""
+    out: list[tuple[tuple[str, str], tuple[str, str], "ax.Invocation"]] = []
+    for target, sites in callers.items():
+        for cfqn, cmethod, inv in sites:
+            out.append(((cfqn, cmethod), target, inv))
+    return out
+
+
+def _has_propagable_param(method_node) -> bool:
+    """方法形参里是否有「能从调用方实参携带来源」的项：DO / DO[] / 集合 / 模型视图 / String。
+
+    没有这类形参，反向回填就无入口可传播——直接跳过，省掉建调用方 env 的开销。
+    """
+    if (_do_params(method_node) or _do_array_params(method_node)
+            or _coll_params(method_node) or _model_params(method_node)):
+        return True
+    return any(t == "String" for _n, t in ax.iter_param_vars(method_node))
+
+
+def _standalone_env(
+    pg: "ProjectGraph", node: "ClassNode", md: "ax.MethodDecl",
+    const, known: frozenset[str], default_entity: str | None,
+) -> "fa._Env":
+    """按 `_analyze_standalone` 同口径为单个方法（重载）建分析 env（不注入 prop）。
+
+    供反向回填解析「调用方 ctx_map」（default_entity=调用方唯一绑定单据）与「重跑 helper」
+    （default_entity=None，来源全靠传入的 prop）共用。
+    """
+    resolver = _RetResolver(pg, const, known, node.fqn, default_entity, None)
+    return fa._Env(
+        const=const, default_entity=default_entity, known_entities=known,
+        do_vars=ax.dynamicobject_vars(md.node), do_params=_do_params(md.node),
+        do_array_params=_do_array_params(md.node),
+        coll_params=_coll_params(md.node),
+        do_coll_vars=frozenset(ax.dynamicobject_collection_vars(md.node)),
+        model_params=_model_params(md.node),
+        local_seed=resolver.local_seed(node, md.name, md=md),
+    )
+
+
+def _prop_nonempty(prop: _Prop) -> bool:
+    return bool(prop.param_ctx or prop.model_entities or prop.str_params)
+
+
+def _prop_signature(prop: _Prop) -> tuple:
+    """可哈希签名：只有完全一致的来源传播才允许多调用点合并。"""
+    return (
+        tuple(sorted((k, tuple(v)) for k, v in prop.param_ctx.items())),
+        tuple(sorted(prop.model_entities.items())),
+        tuple(sorted(prop.str_params.items())),
+    )
+
+
+def _apply_prop(env: "fa._Env", prop: _Prop) -> None:
+    env.param_ctx = dict(prop.param_ctx)
+    env.model_entities = dict(prop.model_entities)
+    env.str_params = dict(prop.str_params)
+
+
+def _method_default_entity(bound_entity: dict[str, set[str]], fqn: str) -> str | None:
+    ents = bound_entity.get(fqn)
+    return next(iter(ents)) if ents and len(ents) == 1 else None
+
+
+def _method_label(pg: "ProjectGraph", key: tuple[str, str]) -> str:
+    node = pg.classes.get(key[0])
+    return f"{node.simple if node else key[0]}.{key[1]}"
+
+
+@dataclass
+class _PropInfo:
+    prop: _Prop
+    depth: int
+    site_count: int
+    labels: tuple[str, ...]
+
+
+def _propagate_reverse_props(
+    pg: "ProjectGraph", callers: dict[tuple[str, str], list[tuple[str, str, "ax.Invocation"]]],
+    const, known: frozenset[str], bound_entity: dict[str, set[str]],
+    wanted: set[tuple[str, str]],
+) -> dict[tuple[str, str], _PropInfo]:
+    """沿可解析调用边做保守固定点传播。
+
+    每轮用调用方当前已知 prop 重跑方法体，再用 `_callee_prop` 推出目标形参来源。
+    对同一目标方法，必须**全部调用点**都推出非空且完全一致的 prop 才采纳；任一未知/冲突
+    都不传播，避免把多入口 helper 错归到某一张单据。
+    """
+    relevant = set(wanted)
+    queue = list(wanted)
+    while queue:
+        cur = queue.pop(0)
+        for cfqn, cmethod, _inv in callers.get(cur, []):
+            ck = (cfqn, cmethod)
+            if ck not in relevant:
+                relevant.add(ck)
+                queue.append(ck)
+    scoped_callers = {k: v for k, v in callers.items() if k in relevant}
+    edges = [e for e in _all_call_edges(scoped_callers) if e[0] in relevant and e[1] in relevant]
+    if not edges:
+        return {}
+    infos: dict[tuple[str, str], _PropInfo] = {}
+    limit = min(max(len(edges) + 2, 2), 64)
+
+    for _ in range(limit):
+        proposals: dict[tuple[str, str], list[tuple[_Prop, int, str]]] = {}
+        for caller, target, inv in edges:
+            caller_node = pg.classes.get(caller[0])
+            target_node = pg.classes.get(target[0])
+            if caller_node is None or target_node is None:
+                continue
+            caller_md = caller_node.cg.methods.get(caller[1])
+            target_md = target_node.cg.methods.get(target[1])
+            if (caller_md is None or caller_md.body is None or target_md is None
+                    or target_md.body is None or not _has_propagable_param(target_md.node)):
+                continue
+            caller_env = _standalone_env(
+                pg, caller_node, caller_md, const, known,
+                _method_default_entity(bound_entity, caller[0]),
+            )
+            caller_info = infos.get(caller)
+            if caller_info is not None:
+                _apply_prop(caller_env, caller_info.prop)
+            _, caller_ctx = fa.analyze_method(caller_md.body, caller_env)
+            prop = _callee_prop(pg, target, inv, caller_ctx, caller_env)
+            if not _prop_nonempty(prop):
+                continue
+            depth = (caller_info.depth + 1) if caller_info is not None else 1
+            proposals.setdefault(target, []).append((prop, depth, _method_label(pg, caller)))
+
+        new_infos: dict[tuple[str, str], _PropInfo] = {}
+        for target, sites in scoped_callers.items():
+            vals = proposals.get(target, [])
+            if len(vals) != len(sites):
+                continue
+            sigs = {_prop_signature(p) for p, _d, _label in vals}
+            if len(sigs) != 1:
+                continue
+            labels = tuple(sorted({_label for _p, _d, _label in vals}))
+            new_infos[target] = _PropInfo(
+                prop=vals[0][0],
+                depth=max(d for _p, d, _label in vals),
+                site_count=len(sites),
+                labels=labels,
+            )
+        if {k: (_prop_signature(v.prop), v.depth, v.site_count, v.labels)
+                for k, v in new_infos.items()} == {
+                    k: (_prop_signature(v.prop), v.depth, v.site_count, v.labels)
+                    for k, v in infos.items()
+                }:
+            return new_infos
+        infos = new_infos
+    return infos
+
+
+def _backfill_reverse_calls(
+    result: AnalysisResult, pg: "ProjectGraph", const, known: frozenset[str],
+    bound_entity: dict[str, set[str]],
+) -> None:
+    """孤立方法反向调用图回填（doc §5 #1）。
+
+    对 form_key=None 的孤立 helper，沿全项目可解析调用边做固定点传播：唯一调用方链式可传播；
+    多调用方必须全部推出同一个来源才传播；0 调用方、来源未知、来源冲突、解析不到调用边都留 None。
+
+    只动 form_key=None 行，绝不改写已定位行；form_key_source 独立标 `reverse_callgraph`。
+    """
+    none_rows = [r for r in result.field_accesses if r.form_key is None and r.field_key]
+    if not none_rows:
+        return
+    callers = _build_reverse_calls(pg)
+    # 按 (物理类, 物理方法) 分组。standalone 行的 event_method 即物理方法名；_emit_event 行的
+    # event_method 是入口事件名，在 helper 类里多查不到方法（md=None）而自然跳过——本回填只针对
+    # 「孤立方法 DO 入参」桶（standalone 行）。
+    groups: dict[tuple[str, str], list[FieldAccessRow]] = {}
+    for r in none_rows:
+        groups.setdefault((r.access_class, r.event_method), []).append(r)
+    infos = _propagate_reverse_props(pg, callers, const, known, bound_entity, set(groups))
+
+    for (fqn, method), rows in groups.items():
+        node = pg.classes.get(fqn)
+        if node is None:
+            continue
+        md = node.cg.methods.get(method)        # 重载取首个（与 _resolve_call/_callee_prop 同口径）
+        if md is None or md.body is None or not _has_propagable_param(md.node):
+            continue
+        info = infos.get((fqn, method))
+        if info is None:
+            continue
+        # 带 prop 重跑 helper（default_entity=None，来源全靠传入的 prop）。
+        helper_env = _standalone_env(pg, node, md, const, known, None)
+        _apply_prop(helper_env, info.prop)
+        new_accs, _ = fa.analyze_method(md.body, helper_env)
+        located = {(a.line, a.field_key, a.access): a for a in new_accs if a.entity is not None}
+        if not located:
+            continue
+        if info.site_count == 1 and info.depth == 1:
+            kind = f"唯一调用方 {info.labels[0]}"
+            cap = 0.85
+        elif info.site_count == 1:
+            kind = f"唯一调用方链式传播 {info.labels[0]}，深度 {info.depth}"
+            cap = 0.80
+        else:
+            kind = f"多调用方来源一致传播 {', '.join(info.labels)}，深度 {info.depth}"
+            cap = 0.80
+        note = f"form_key 由{kind}沿「实参↔形参」传播推得（反向调用图）"
+        for r in rows:
+            acc = located.get((r.line, r.field_key, r.access))
+            if acc is None:
+                continue
+            r.form_key = acc.entity
+            r.level = acc.level
+            r.entry_key = acc.entry_key
+            r.form_key_source = "reverse_callgraph"
+            r.evidence = f"{r.evidence} | {note}" if r.evidence else note
+            r.confidence = round(min(r.confidence, cap), 3)
 
 
 def _known_entities(models: list["MetaModel"]) -> frozenset[str]:
