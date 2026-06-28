@@ -23,6 +23,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Iterable
 
+from . import annotation_map as annmod
 from . import ast_index as ax
 from . import call_graph as cgmod
 from . import event_extractor as events
@@ -111,6 +112,11 @@ def analyze(
     const = pg.const
     known_entities = _known_entities(models)
 
+    # 注解驱动映射（POJO↔DynamicObject）索引：value 命中 KB 字段 key 才登记（KB 反验证，不臆造）。
+    # 挂到 pg 上，供 _walk_event / _analyze_standalone 走到反射 bulk-write 方法时合成 FieldAccess。
+    field_idx = _field_form_index(models)
+    pg.annmap = annmod.build_index(pg, frozenset(field_idx))
+
     from ..bridge import namespace
     plugin_base = namespace.resolve_plugin_classes(index)
 
@@ -175,7 +181,7 @@ def analyze(
     _backfill_reverse_calls(result, pg, const, known_entities, bound_entity)
 
     # ── 字段 key 反查元数据回填 form_key（待办一：数据流追不到来源时的硬约束兜底）──────────
-    _backfill_form_key(result, _field_form_index(models), bound_entity)
+    _backfill_form_key(result, field_idx, bound_entity)
 
     result.field_accesses = _dedup(result.field_accesses)
     result.const_table = const          # 暴露给粗扫侧复用（信任手段二）
@@ -767,6 +773,9 @@ def _walk_event(
             local_seed=resolver.local_seed(node, method),
         )
         accesses, ctx_map = fa.analyze_method(md.body, env)
+        annmap = getattr(pg, "annmap", None)
+        if annmap:                                  # 反射映射 bulk-write：合成该映射类全部字段写入
+            accesses = accesses + annmap.synth_accesses(fqn, method)
         records.append((fqn, method, path, accesses))
         if len(path) > _MAX_DEPTH:
             continue
@@ -822,7 +831,11 @@ def _emit_event(
         covered.add((fqn, method))
         rnode = pg.classes[fqn]
         for acc in accesses:
-            if acc.access == "write":
+            if acc.via == "annotation-map":
+                # 注解反射映射写入：是否落库取决于调用方是否保存转换产物（未证），不蹭链路 sink 结论。
+                persists, reason = "unknown", "注解反射映射写入(条件 set)；落库取决于调用方是否保存转换产物—未证"
+                conf = round(min(acc.confidence, 0.6), 3)
+            elif acc.access == "write":
                 v = persist.verdict(phase, op_type, sink_reachable, has_external=has_ext)
                 persists, reason = v.persists, v.reason
                 conf = round(min(acc.confidence, v.confidence), 3)
@@ -900,13 +913,18 @@ def _analyze_standalone(
             local_seed=resolver.local_seed(node, name, md=md),
         )
         accesses, _ = fa.analyze_method(md.body, env)
+        annmap = getattr(pg, "annmap", None)
+        if annmap:                                  # 映射类仅被孤立补全够到时（无插件入口）也别隐形
+            accesses = accesses + annmap.synth_accesses(node.fqn, name)
         if not accesses:
             continue
         info = events.classify_method(kind, name) if is_plugin else None
         phase = info.phase if info else "unknown"
         self_sink = bool(persist.find_sinks(md.body))
         for acc in accesses:
-            if acc.access == "write":
+            if acc.via == "annotation-map":
+                persists, reason = "unknown", "注解反射映射写入(条件 set)；落库取决于调用方是否保存转换产物—未证"
+            elif acc.access == "write":
                 if self_sink:
                     persists, reason = "yes", "本方法内含显式落库 sink（save/executeOperate/…）"
                 else:

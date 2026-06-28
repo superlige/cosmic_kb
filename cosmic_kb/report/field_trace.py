@@ -326,6 +326,10 @@ def _collect_materials(
         "coords": len(group_list),
         "possible": len(possible),
         "unlocated": len(unlocated),
+        # 注解反射映射写入（@…Annotation(value="key") + convertTo…DynamicObject 反射 set）命中数。
+        # 仅标量（真实总数）；明细随普通 writers 行走既有「按类合并 + cap + 字节 governor」，不另起数组。
+        "annotation_writers": sum(1 for r in all_rows
+                                  if r["via"] == "annotation-map" and r["access"] == "write"),
     }
     # ── 粗精度扫描命中（coarse_field_hit 词法扫描）——只留「仅粗扫见」疑似盲点 ──
     # 高精度命中已在上方 writers/readers 分组完整呈现，再列「高精度也记」是冗余，故剔除；
@@ -827,6 +831,10 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
         f"（落库 {s['persisting_writers']} / 存疑 {s['uncertain_writers']}），读取 {s['readers']}，"
         f"涉及插件 {s['plugins']} / 单据 {s['forms']}"
     )
+    if s.get("annotation_writers"):
+        lines.append(
+            f"  ⚙ 含注解反射映射写入 {s['annotation_writers']} 处（@…Annotation(value) + convertTo…"
+            f"DynamicObject 反射 set，via=annotation-map；落库取决于调用方是否保存转换产物，标存疑）")
     if ft["note"]:
         lines.append(f"  {ft['note']}")
 

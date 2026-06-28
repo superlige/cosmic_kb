@@ -335,6 +335,61 @@ def iter_member_field_types(type_decl: TypeDecl) -> Iterator[tuple[str, str]]:
                     yield _text(name_node), simple
 
 
+@dataclass
+class FieldAnnotation:
+    """字段上的一个注解：简单名 + 成员字面值（单值注解 `@Foo("x")` 归到 "value"）。"""
+
+    name: str                      # 注解简单名（如 ContractBillAnnotation）
+    members: dict[str, str]        # 成员名 → 字面值
+    line: int                      # 注解所在行（1-based）
+
+
+def iter_field_annotations(type_decl: TypeDecl) -> Iterator[tuple[str, list[FieldAnnotation]]]:
+    """类体内**有注解**的字段声明 (字段名, [FieldAnnotation])。
+
+    供注解驱动的 POJO↔DynamicObject 映射识别——`@ContractBillAnnotation(value="cqkd_qs", …)` 这类把
+    Java 字段映射到元数据 key 的注解，其 key 是注解里的静态字面量、不出现在 `.set()` 实参位置，
+    常规字面量扫描看不见。只读 modifiers 里的注解实参字面值，不做类型解析。
+    """
+    body = type_decl.body
+    if body is None:
+        return
+    for child in body.children:
+        if child.type != "field_declaration":
+            continue
+        fname: str | None = None
+        for vd in child.children:
+            if vd.type == "variable_declarator":
+                name_node = vd.child_by_field_name("name")
+                if name_node is not None:
+                    fname = _text(name_node)
+                    break
+        if fname is None:
+            continue
+        mods = next((c for c in child.children if c.type == "modifiers"), None)
+        if mods is None:
+            continue
+        anns: list[FieldAnnotation] = []
+        for a in mods.children:
+            if a.type not in ("annotation", "marker_annotation"):
+                continue
+            nm = simple_type_name(_text(a.child_by_field_name("name"))) or ""
+            members: dict[str, str] = {}
+            args = a.child_by_field_name("arguments")
+            if args is not None:
+                for ap in args.named_children:
+                    if ap.type == "element_value_pair":
+                        k = ap.child_by_field_name("key")
+                        v = ap.child_by_field_name("value")
+                        if k is not None and v is not None:
+                            members[_text(k)] = string_value(v) if v.type == "string_literal" else _text(v)
+                    elif ap.type == "string_literal":   # 单值注解 @Foo("x")
+                        members["value"] = string_value(ap) or _text(ap)
+            anns.append(FieldAnnotation(name=nm, members=members, line=_line(a)))
+        if anns:
+            yield fname, anns
+
+
 def package_name(root: "Node") -> str | None:
     """从 root 抽 package 声明名（无则 None）。"""
     for child in root.children:
