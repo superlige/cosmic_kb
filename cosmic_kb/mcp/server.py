@@ -41,8 +41,14 @@ INSTRUCTIONS = (
     "（`readers_overview`）；要读取明细就再调一次 `trace(field, access='read')`（类→方法，顺 `calls` "
     "去读源码）；只看写入用 `access='write'`。写入/读取都**按类合并**（同一类只出现一次，行号/落库等"
     "列在该类 `sites`/`methods`），别再把同类逐行展开。**真实总数恒在 `summary`**，被 cap 截掉的数在"
-    "各节点 `capped`/`sites_capped`/`methods_capped`（红线 #4 不丢数）；仍嫌多用 `form/entry/level` "
-    "收窄到单坐标。\n"
+    "各节点 `capped`/`sites_capped`/`methods_capped`/`groups_capped`（红线 #4 不丢数）。**知道哪张单据"
+    "就带坐标查**——`trace('单据.字段')` 或 `form=`：裸字段会命中全部单据并按坐标组裁剪（真实组数在"
+    "`groups_total`），带坐标既省返回又免二次往返。\n"
+    "【trace 翻页取回被截条目（别只读计数）】某段被 cap 时会带 `next_cursor`（如 `unlocated@4`/"
+    "`readers@20`/`dynamic_writers@4`）。要看被截掉的条目，**把该 `next_cursor` 原样作 `cursor=` 再调一次** "
+    "`trace(field, ..., cursor='unlocated@4')`，返回 `page.items`（该段下一页）+ 新 `page.next_cursor`，"
+    "循环到 `next_cursor` 为 null 即把该段**全部条目取全**（不是只有计数）。可分页：writers/readers/"
+    "unlocated/dynamic_writers/possible/coarse/occurrences（writers/readers 需先用 form/entry/level 收窄到单坐标）。\n"
     "【强制】凡需要解释『某插件/事件/操作在做什么』、判断『是否入库』、确认『插件类型或事件触发"
     "时机』、或读到不认识的 kd.bos.* 等平台符号时，**必须先调 cosmic_semantics(topic) 取苍穹语义"
     "再下结论**，不得仅凭读源码臆断时机与入库——这类领域语义模型易记错，是幻觉高发区。"
@@ -148,11 +154,15 @@ def tool_trace(
     entry: str | None = None,
     level: str | None = None,
     access: str | None = None,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """旗舰直查：字段 → 哪些类的哪个事件函数读/写它、是否落库、行号、源码路径。
 
     `field` 支持点号坐标 `单据.字段` / `单据.分录.字段` / `单据.分录.子分录.字段`（裸字段=
     列全部定义坐标）；`form/entry/level` 可显式覆盖点号推断。
+    **优先带上坐标（`单据.字段` 或 `form=`）再查**：裸字段会命中该字段的全部单据，返回值会按
+    坐标组（`groups`）裁剪——真实组数在 `groups_total`、被截组数在 `groups_capped`，并不丢数，但
+    要看全某张单据的明细仍需带坐标重查。已知是哪张单据/哪级分录就一次性带上，省一轮往返。
 
     **写/读拆分（`access`）+ 按类合并（防 host 32KB 截断）**：
     - `access='write'`（或默认含写入）：写入按**坐标 → 类 → 写入点**合并——同一类只出现一次，
@@ -161,8 +171,16 @@ def tool_trace(
       要弄清"谁读了它"就顺 `calls` 去那几个方法读源码。
     - **默认（不传 access）**：写入明细 + 读取**仅按类计数概览** `readers_overview`（最省）；要读取
       明细就再调一次 `access='read'`。
-    **真实总数恒在 `summary`**，被 cap 截断的数在各节点 `capped`/`sites_capped`/`methods_capped`
-    （红线 #4 不丢数）。仍嫌多就用 `form/entry/level` 收窄到单个坐标。
+    **真实总数恒在 `summary`**，被 cap 截断的数在各节点 `capped`/`sites_capped`/`methods_capped`/
+    `groups_capped`（红线 #4 不丢数）。
+
+    **游标分页（`cursor`）——被 cap 的内容一条不丢、全部可取回**：某段被截时，它会带一个
+    `next_cursor`（如 `"unlocated@4"` / `"readers@20"` / `"dynamic_writers@4"`）。**要看被截掉的条目，
+    不要只读计数——把该 `next_cursor` 原样作为 `cursor=` 再调一次本工具**，即返回该段从该 offset 起、
+    预算内能装下的下一页 `page.items` + 新的 `page.next_cursor`；循环直到 `next_cursor` 为 `null` 即取完
+    全部。可分页段：writers / readers / unlocated / dynamic_writers / possible / coarse / occurrences
+    （writers/readers 需先用 `form/entry/level` 收窄到单坐标）。也可改用 `form/entry/level` 收窄、
+    或 `access='read'`/`'write'` 单看一侧来减小单次返回。
 
     返回里 `unlocated` 是**「反推来源单据」工作单**：确实读写该字段、但来源单据未钉出（form_key=None）的
     读写，按方法去重 + `calls` 导航 + `plugin_form_label`（插件注册单据，仅来源线索非确诊）——顺 calls
@@ -180,6 +198,7 @@ def tool_trace(
             entry_key=entry or entry_key,
             level=level or lvl,
             access=access,
+            cursor=cursor,
         )
     finally:
         conn.close()
