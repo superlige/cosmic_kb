@@ -103,10 +103,12 @@ cosmic_kb build "D:\kingdee\asset_management_sys" "D:\codex\cqkd_ai\samples\appz
 | `field-key-undeterminable` | ~1,289 | **无意义** | 字段 key 本身钉不出（动态循环/拼接/外部常量/歧义）——来源讨论无意义。归并了旧「仅常量备注」「动态字段」「key 未消歧」三类 |
 | `dynamic-entity` | ~711 | **正确 None** | ORM 实体名是运行时变量/拼接：`load(id, getEntityKey())`、`load(id, entityName)`。静态不可钉，留 None 是对的 |
 | `unknown` | ~616 | 先补证据 | 老记录或某些 `model.*`/`do.*` 路径没留下足够来源说明 |
-| `basedata-ref` | ~595 | **正确 None** | `bill.getDynamicObject("org").set(...)` 写的是基础资料对象本身，无业务单据表头/分录坐标 |
+| `basedata-ref` | ~595 拆分（读侧） | **正确 None** | `bill.getDynamicObject("org").getString(...)` 读基础资料引用对象自身的字段，无业务单据表头/分录坐标 |
+| `basedata-write-suspect` | ~595 拆分（写侧） | **继续追** | `xxx.getDynamicObject("org").set(...)` 写到基础资料引用对象——苍穹不会取基础资料再 save，出现即扫描误绑、真实来源单据未定位（精确拆分计数待整库重建复算） |
 | `model-context` | ~423 | 补元数据 | `getModel().setValue(...)` / `IDataModel model` 形参，但插件未注册绑定单据（拿不到 default_entity） |
 
-> **`basedata-ref` 和 `dynamic-entity` 是"正确 None"**（`CORRECT_NONE_REASONS`）：本就无业务单据坐标 / 运行时才知道，**不该诱导段二去硬追**。其余成因才是"理论上可继续"的缺口。
+> **"正确 None"（`CORRECT_NONE_REASONS`）只含 `basedata-ref`（读基础资料自身字段）和 `dynamic-entity`**（运行时实体名）：本就无业务单据坐标 / 运行时才知道，**不该诱导段二去硬追**。
+> ⚠️ **`basedata-write-suspect`（写到基础资料）不是正确 None**：苍穹不会"取基础资料对象再保存"，这类写入一律是扫描器把接收者误绑成了基础资料引用、真实来源单据没追到，应继续追/修扫描器（红线 #4：不可用"无需追"掩盖扫描误判）。其余成因才是"理论上可继续"的缺口。
 
 ### 3.1 本轮（2026-06-28）方向结论
 
@@ -202,7 +204,8 @@ cosmic_kb build "D:\kingdee\asset_management_sys" "D:\codex\cqkd_ai\samples\appz
 以下情况**不应为提高数字硬填**：
 
 - ORM 实体名来自变量、方法返回值或拼接（`dynamic-entity`，正确 None）。
-- 基础资料对象本身的读写，无单据表头/分录坐标（`basedata-ref`，正确 None）。
+- **读取**基础资料引用对象自身字段，无单据表头/分录坐标（`basedata-ref`，正确 None）。
+  （注：**写到**基础资料对象不在此列——苍穹不会取基础资料再保存，那是扫描误绑，`basedata-write-suspect`，应继续追。）
 - 字段 key / 分录 key 来自运行时循环、配置、外部常量，静态无法唯一解析（`field-key-undeterminable`）。
 - 报表 `RowMeta`、配置 Map、系统参数决定的字段集合，除非能静态收敛为唯一常量集。
 - 同一 helper 被多入口以不同来源调用，无法唯一确认当前调用来源。

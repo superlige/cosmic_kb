@@ -515,6 +515,13 @@ class LocalVar:
     line: int
 
 
+@dataclass
+class Assignment:
+    name: str
+    value: "Node | None"           # 赋值右侧表达式
+    line: int
+
+
 def iter_local_vars(body: "Node | None") -> Iterator[LocalVar]:
     """遍历方法体内的局部变量声明（local_variable_declaration）。供数据流追数据包归属。"""
     if body is None:
@@ -532,4 +539,19 @@ def iter_local_vars(body: "Node | None") -> Iterator[LocalVar]:
                             init=vd.child_by_field_name("value"),
                             line=_line(vd),
                         )
+        stack.extend(n.children)
+
+
+def iter_assignments(body: "Node | None") -> Iterator[Assignment]:
+    """遍历简单局部变量赋值 `x = expr`。供数据流识别同名变量被明确重新绑定。"""
+    if body is None:
+        return
+    stack = [body]
+    while stack:
+        n = stack.pop()
+        if n.type == "assignment_expression":
+            left = n.child_by_field_name("left")
+            right = n.child_by_field_name("right")
+            if left is not None and left.type == "identifier":
+                yield Assignment(_text(left), right, _line(n))
         stack.extend(n.children)

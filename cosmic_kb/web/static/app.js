@@ -15,7 +15,8 @@ const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
 // 未定位成因码 → 人读标签（与 java/null_reason.py REASON_LABEL 同口径）。
 const NULL_REASON_LABEL = {
   "field-key-undeterminable": "字段 key 钉不出（动态/拼接/外部常量/歧义）",
-  "basedata-ref": "基础资料对象本身（正确 None，无需追）",
+  "basedata-ref": "读取基础资料对象自身字段（正确 None，无需追）",
+  "basedata-write-suspect": "写到基础资料对象——苍穹不保存基础资料，疑似误绑，应继续追",
   "dynamic-entity": "ORM 实体名运行时决定（正确 None，无需追）",
   "helper-caller-unknown": "helper 入参来源未收敛（可读源码反推）",
   "model-context": "getModel()/模型形参，插件未注册绑定单据",

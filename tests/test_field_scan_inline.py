@@ -295,3 +295,72 @@ def test_c4_genuine_basedata_write_still_basedata():
            "  }\n}\n")
     by = _analyze(src)
     assert by["cqkd_name"].level == "basedata"         # 未被任何同名循环覆盖 → 仍正确判 basedata
+
+
+def test_c4_orm_reassignment_overrides_shadowed_basedata_binding():
+    """同名 contract：先从基础资料字段取引用，随后 loadSingle 成明确单据对象，写入必须归 header。"""
+    src = ("package p;\n"
+           "import kd.bos.servicehelper.BusinessDataServiceHelper;\n"
+           "public class C {\n"
+           "  public void m(DynamicObject row){\n"
+           "    DynamicObject contract = row.getDynamicObject(\"cqkd_contract\");\n"
+           "    contract = BusinessDataServiceHelper.loadSingle(contract.getPkValue(), \"cqkd_ht\");\n"
+           "    contract.set(\"cqkd_zdysje_all\", 1);\n"
+           "  }\n}\n")
+    by = _analyze(src, known=("cqkd_ht",))
+    w = by["cqkd_zdysje_all"]
+    assert w.access == "write"
+    assert w.level == "header" and w.level != "basedata"
+    assert w.entity == "cqkd_ht"
+
+
+def test_c4_addall_arrays_aslist_preserves_loaded_array_entity():
+    """List.addAll(Arrays.asList(load数组)) 后 for-each 行变量应继承数组实体来源。"""
+    src = ("package p;\n"
+           "import java.util.*;\n"
+           "import kd.bos.servicehelper.BusinessDataServiceHelper;\n"
+           "public class C {\n"
+           "  public void m(){\n"
+           "    List<DynamicObject> contractList = new ArrayList<>();\n"
+           "    DynamicObject[] validContractArray = BusinessDataServiceHelper.load(\"cqkd_ht\", sel, fs);\n"
+           "    contractList.addAll(Arrays.asList(validContractArray));\n"
+           "    for (DynamicObject contract : contractList) {\n"
+           "      contract.set(\"cqkd_total_number_leas\", 1);\n"
+           "    }\n"
+           "  }\n}\n")
+    by = _analyze(src, known=("cqkd_ht",))
+    w = by["cqkd_total_number_leas"]
+    assert w.access == "write"
+    assert w.level == "header" and w.entity == "cqkd_ht"
+
+
+def test_c4_ambiguous_entity_constant_chooses_known_entity():
+    """ORM 实体参数常量歧义时，若只有一个字面值是已知实体，可安全收敛到该实体。"""
+    src = ("package p;\n"
+           "import java.util.*;\n"
+           "import kd.bos.servicehelper.BusinessDataServiceHelper;\n"
+           "public class C {\n"
+           "  public void m(){\n"
+           "    List<DynamicObject> contractList = new ArrayList<>();\n"
+           "    DynamicObject[] validContractArray = BusinessDataServiceHelper.load(ContractCon.ENTITY, sel, fs);\n"
+           "    contractList.addAll(Arrays.asList(validContractArray));\n"
+           "    for (DynamicObject contract : contractList) {\n"
+           "      contract.set(\"cqkd_total_number_leas\", 1);\n"
+           "    }\n"
+           "  }\n}\n")
+    const = ConstantTable()
+    const._add("ContractCon", "ENTITY", "entity")
+    const._add("ContractCon", "ENTITY", "cqkd_ht")
+    root = ax.parse_tree(src)
+    md = list(ax.iter_methods(list(ax.iter_type_declarations(root))[0]))[0]
+    env = fa._Env(
+        const=const, known_entities=frozenset({"cqkd_ht"}),
+        do_vars=ax.dynamicobject_vars(md.node),
+        do_params=an._do_params(md.node),
+        do_array_params=an._do_array_params(md.node),
+        coll_params=an._coll_params(md.node),
+        do_coll_vars=frozenset(ax.dynamicobject_collection_vars(md.node)),
+    )
+    accs, _ = fa.analyze_method(md.body, env)
+    by = {a.field_key: a for a in accs}
+    assert by["cqkd_total_number_leas"].entity == "cqkd_ht"

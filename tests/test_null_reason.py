@@ -45,6 +45,18 @@ def test_basedata_ref():
     assert nr.classify(_row(level="basedata")) == nr.BASEDATA_REF
 
 
+def test_basedata_ref_read_is_correct_none():
+    """读基础资料引用对象自身字段：无业务单据坐标 → basedata-ref（正确 None，无需追）。"""
+    assert nr.classify(_row(level="basedata", access="read")) == nr.BASEDATA_REF
+    assert nr.BASEDATA_REF in nr.CORRECT_NONE_REASONS
+
+
+def test_basedata_write_is_suspect_not_correct_none():
+    """写到基础资料引用对象：苍穹不会取基础资料再保存 → 出现即扫描误绑，应继续追，**非正确 None**。"""
+    assert nr.classify(_row(level="basedata", access="write")) == nr.BASEDATA_WRITE_SUSPECT
+    assert nr.BASEDATA_WRITE_SUSPECT not in nr.CORRECT_NONE_REASONS
+
+
 def test_dynamic_entity_from_note_constant():
     ev = "BaseCon.ID；" + nr.NOTE_DYNAMIC_ENTITY
     assert nr.classify(_row(evidence=ev)) == nr.DYNAMIC_ENTITY
@@ -134,6 +146,28 @@ def test_pipeline_reasons_land_on_rows():
     assert rows["cqkd_xx"].null_reason == nr.LOCAL_OR_CONTAINER_SOURCE
     # 全部 form_key=None（这些确实未定位）。
     assert all(r.form_key is None for r in rows.values())
+
+
+_BASEDATA = """package cqspb.am;
+public class Bd {
+  public void touch(DynamicObject bill){
+    DynamicObject org = bill.getDynamicObject("cqkd_org");   // 基础资料引用包（来源未收敛 → entity=None）
+    org.set("cqkd_name", "x");                                // 写到基础资料 → basedata-write-suspect（应继续追）
+    String n = org.getString("cqkd_number");                 // 读基础资料自身字段 → basedata-ref（正确 None）
+  }
+}
+"""
+
+
+def test_pipeline_basedata_write_suspect_read_ref():
+    """管线层：同一基础资料引用对象，写→basedata-write-suspect（非正确 None），读→basedata-ref（正确 None）。"""
+    rows = {(r.field_key, r.access): r for r in _pipeline(_BASEDATA)}
+    w = rows[("cqkd_name", "write")]
+    assert w.level == "basedata" and w.form_key is None
+    assert w.null_reason == nr.BASEDATA_WRITE_SUSPECT
+    r = rows[("cqkd_number", "read")]
+    assert r.level == "basedata" and r.form_key is None
+    assert r.null_reason == nr.BASEDATA_REF
 
 
 _RESCUED = """package cqspb.am;

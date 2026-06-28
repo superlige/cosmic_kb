@@ -259,6 +259,17 @@ def _resolve_entity_arg(text: str, env: _Env) -> tuple[str | None, str | None]:
         kr = env.const.resolve(ident)
         if kr.value:
             cands.append(kr.value)
+            field = ident.replace(" ", "").split(".")[-1]
+            vals = env.const.by_field.get(field) or set()
+            known_vals = [v for v in vals if v in env.known_entities]
+            if kr.value not in env.known_entities and len(known_vals) == 1:
+                cands.append(known_vals[0])
+        elif kr.kind == "ambiguous":
+            field = ident.replace(" ", "").split(".")[-1]
+            vals = env.const.by_field.get(field) or set()
+            known_vals = [v for v in vals if v in env.known_entities]
+            if len(known_vals) == 1:
+                cands.append(known_vals[0])
     known = [c for c in cands if c in env.known_entities]
     if known:
         return known[0], None
@@ -305,6 +316,7 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
 
     locals_ = list(ax.iter_local_vars(body))
     foreach = _foreach_pairs(body)   # [(行变量, 集合变量)]
+    assignments = list(ax.iter_assignments(body))
     pend_names = {lv.name for lv in locals_} | {row for row, _ in foreach}
 
     # DynamicObject 形参先于定点迭代播种（形参在方法体内无 init，其完整坐标可能由调用方传播注入）
@@ -372,7 +384,9 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
             if recv not in env.do_coll_vars:
                 continue
             argtxt = ax._text(inv.args[0]).strip()
-            argbase = re.sub(r"\[.*?\]$", "", argtxt.split(".", 1)[0].split("(", 1)[0].strip())
+            m_aslist = re.search(r"\bArrays\s*\.\s*asList\s*\(\s*([A-Za-z_$][\w$]*)\s*\)", argtxt)
+            argbase = m_aslist.group(1) if m_aslist else re.sub(
+                r"\[.*?\]$", "", argtxt.split(".", 1)[0].split("(", 1)[0].strip())
             inline_ent: str | None = None
             if _LOAD_SINGLE_RE.search(argtxt) or _LOAD_COLL_RE.search(argtxt):
                 inline_ent, _ = _resolve_entity_arg(argtxt, env)   # 内联 add(loadSingle(...,"实体"))
@@ -418,7 +432,7 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
         lvl = "subentry" if base_is_entry_row else "entry"
         return _Ctx(lvl, key, _base_entity(owner), note=knote)
 
-    for _ in range(len(locals_) + len(foreach) + 2):
+    for _ in range(len(locals_) + len(foreach) + len(assignments) + 2):
         changed = False
         for lv in locals_:
             if lv.init is None or lv.name in doc_ctx or lv.name in coll_ctx:
@@ -544,6 +558,21 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
                     doc_ctx[lv.name] = _Ctx(c.level, c.entry_key, c.entity, note=c.note)
                     changed = True
                     continue
+
+        for ass in assignments:
+            if ass.value is None or ass.name not in env.do_vars:
+                continue
+            init_text = ax._text(ass.value)
+            # 明确 ORM 单对象重赋值：`contract = BusinessDataServiceHelper.loadSingle(..., "cqkd_ht")`。
+            # 若同名变量早先被 `getDynamicObject(基础资料字段)` 扁平误绑为 basedata，这次重赋值应
+            # 覆盖旧绑定，否则后续 `contract.set(...)` 会被错盖成 basedata-ref「正确 None」。
+            # 只放宽 basedata → header(loadSingle/newDynamicObject/queryOne) 这一种强证据覆盖。
+            if _LOAD_SINGLE_RE.search(init_text):
+                existing = doc_ctx.get(ass.name)
+                if existing is not None and existing.level == "basedata":
+                    ent, note = _resolve_entity_arg(init_text, env)
+                    doc_ctx[ass.name] = _Ctx("header", None, ent, note=note)
+                    changed = True
 
         for cv, bases in add_args.items():  # 泛型集合：由 .add(已知实体包) 推断元素来源实体
             if cv in coll_ctx or cv in doc_ctx:

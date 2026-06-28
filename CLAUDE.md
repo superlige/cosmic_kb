@@ -69,7 +69,7 @@
   - 提高字段扫描率（模型形参识别 + 内联集合链）：补回此前**完全扫不出**的写入 +705 行。
   - 孤立方法反向调用图回填（`reverse_callgraph`，固定点传播）：回填 218 条。**结论：红线内已无安全的高收益 form_key 提升空间。**
   - **trace 防 MCP 32KB 截断**（2026-06-27）：MCP 走紧凑投影 `trace_compact`（写/读拆分 + 按类合并 + 字节 governor + 游标分页），真实总数恒在 summary、被 cap 量可翻页取回（红线 #4）。
-  - **null_reason 落库 + 暴露**（2026-06-28，schema **v11**，当前转向）：给每条 `form_key=None` 打互斥成因码（`java/null_reason.py`，7 码），告诉段二/人「这行为何 None、该不该追」；暴露在 trace/coverage/web/MCP。**未改任何 form_key 判定逻辑。**
+  - **null_reason 落库 + 暴露**（2026-06-28，schema **v11**，当前转向）：给每条 `form_key=None` 打互斥成因码（`java/null_reason.py`，8 码：2026-06-29 把基础资料「写」从 `basedata-ref` 拆出 `basedata-write-suspect`——苍穹不会取基础资料再 save，写到基础资料即扫描误绑、应继续追，不再标"正确 None"），告诉段二/人「这行为何 None、该不该追」；暴露在 trace/coverage/web/MCP。**未改任何 form_key 判定逻辑。**
 
 > ⚠️ MCP server 常驻，改 MCP/取证源码后需**重连/重启 MCP** 才生效；改 schema 后需 `cosmic_kb build` 重建 KB。
 

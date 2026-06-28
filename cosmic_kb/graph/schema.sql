@@ -162,8 +162,9 @@ CREATE TABLE field_access (
                                            -- （字段key反查元数据回填，依据是字段归属非数据流）/
                                            -- NULL=未定位。诚实区分元数据反推与数据流证明（红线#4）。
     null_reason     TEXT                   -- 未定位成因（form_key=NULL 时**为何** NULL，信任优先红线#4）：
-                                           -- field-key-undeterminable / basedata-ref / dynamic-entity /
-                                           -- helper-caller-unknown / model-context /
+                                           -- field-key-undeterminable / basedata-ref（读基础资料自身字段）/
+                                           -- basedata-write-suspect（写到基础资料·疑似误绑·应继续追）/
+                                           -- dynamic-entity / helper-caller-unknown / model-context /
                                            -- local-or-container-source / unknown；form_key 已定位则 NULL。
                                            -- 单一真源 java/null_reason.py，供 trace/coverage/web 导航。
 );
