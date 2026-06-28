@@ -264,18 +264,29 @@ def test_render_read_source(tmp_path: Path):
 
 
 def test_mcp_read_source_same_as_report(tmp_path: Path, monkeypatch):
+    """tool_read_source 走紧凑投影 read_source_compact（防 host 32KB 截断）；与 report 同口径、支持游标。"""
     from cosmic_kb.mcp import server as mcp_server
+    from cosmic_kb.report.field_trace import _wire_len, _COMPACT_BUDGET
 
     db, _src = _kb_with_source(tmp_path)
     monkeypatch.setenv("COSMIC_KB_DB", str(db))
     got = mcp_server.tool_read_source(REL)
     conn = store.open_kb(db)
     try:
-        want = read_source.read_source(conn, REL)
+        want = read_source.read_source_compact(conn, REL)
     finally:
         conn.close()
     assert got == want
+    assert _wire_len(got) <= _COMPACT_BUDGET
     assert "read_source" in mcp_server.TOOLS
+    # 小文件 overview 内联完整标注 + 源码，无需翻页。
+    assert got["field_names"]["cqkd_collateralstatus"]["names"] == ["抵押状态"]
+    assert "class CollateralOp" in got["content"]
+    assert got.get("content_next_cursor") is None
+    # 分页：content 游标喂回应返回聚焦页（page.content + next_cursor）。
+    pg = mcp_server.tool_read_source(REL, cursor="content@1")
+    assert pg["page"]["section"] == "content"
+    assert "class CollateralOp" in pg["page"]["content"]
 
 
 def test_cli_source_json(tmp_path: Path, capsys):

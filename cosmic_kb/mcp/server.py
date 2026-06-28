@@ -49,6 +49,11 @@ INSTRUCTIONS = (
     "`trace(field, ..., cursor='unlocated@4')`，返回 `page.items`（该段下一页）+ 新 `page.next_cursor`，"
     "循环到 `next_cursor` 为 null 即把该段**全部条目取全**（不是只有计数）。可分页：writers/readers/"
     "unlocated/dynamic_writers/possible/coarse/occurrences（writers/readers 需先用 form/entry/level 收窄到单坐标）。\n"
+    "【bill 紧凑投影 + 翻页】bill 返回为防截断的紧凑投影：每字段被触达的**逐条事件已折叠为「写/落库/读」"
+    "计数**——要看『某字段谁改的/在哪个事件函数/是否落库』，对该字段用 `trace 单据.字段`（entity_touch 每行"
+    "已带 `trace` 锚点）。各列表真实总数在 `*_total`，被 cap 截掉的段带 `*_next_cursor`（如 `fields@60`/"
+    "`entity_touch@80`）；要取回被截条目，把该值原样作 `cursor=` 再调 `bill(form, cursor=该值)`，循环到 "
+    "`next_cursor` 为 null。可分页：fields/operations/plugins/bindings/entities/entity_touch。\n"
     "【强制】凡需要解释『某插件/事件/操作在做什么』、判断『是否入库』、确认『插件类型或事件触发"
     "时机』、或读到不认识的 kd.bos.* 等平台符号时，**必须先调 cosmic_semantics(topic) 取苍穹语义"
     "再下结论**，不得仅凭读源码臆断时机与入库——这类领域语义模型易记错，是幻觉高发区。"
@@ -72,7 +77,11 @@ INSTRUCTIONS = (
     "同名字段、本文件未解析到具体实体——别默认当前单据，按 note 顺调用链消歧**。"
     "未列出的 `<isv>_` 标识 resolve_fields 核对，绝不按命名惯例/拼音猜。"
     "**`getDynamicObjectCollection(key)` 取分录行还是多选基础资料集合，取决于 key 是什么——"
-    "看坐标的 `field_type`/`access`（基础资料字段≠分录），别凭 API 名断定是分录。**"
+    "看坐标的 `field_type`/`access`（基础资料字段≠分录），别凭 API 名断定是分录。** "
+    "read_source 为防截断的紧凑投影：标注 `field_names` 在前，源码正文 `content` 按预算填充；"
+    "`content` 未读全时带 `content_next_cursor`（如 `content@120`），把该值原样作 `cursor=` 再调 "
+    "`read_source(relpath, cursor=该值)` 即从该行**续读至文件末尾**，循环到 `next_cursor` 为 null 读完"
+    "（要限定上界改用 `end_line`）；`field_names` 超档同带 `field_names_next_cursor` 可翻页取全。"
 )
 
 
@@ -131,18 +140,21 @@ def tool_ask(question: str) -> dict[str, Any]:
     """
     from ..semantic import resolver
     from ..context import builder
-    from ..report import field_trace
+    from ..report import field_trace, bill_view
 
     conn = _open()
     try:
         rq = resolver.resolve(conn, question)
         result = builder.build_context(conn, rq)
-        # 字段意图的 evidence 是完整富 trace dict，经 MCP 同样会被 host 截断——换成紧凑投影
-        # （写读拆分 + 按类合并 + 字节 governor）。复用 rq，不动 builder/CLI 路径。
-        if rq.intent == "field_who_changed" and result.get("status") == "ok":
-            result["evidence"] = field_trace.trace_compact(
-                conn, rq.field_key,
-                form_key=rq.form_key, entry_key=rq.entry_key, level=rq.level)
+        # 字段/单据意图的 evidence 是完整富 dict，经 MCP 同样会被 host 截断——换成紧凑投影
+        # （cap + 字节 governor + 游标分页）。复用 rq，不动 builder/CLI 路径。
+        if result.get("status") == "ok":
+            if rq.intent == "field_who_changed":
+                result["evidence"] = field_trace.trace_compact(
+                    conn, rq.field_key,
+                    form_key=rq.form_key, entry_key=rq.entry_key, level=rq.level)
+            elif rq.intent == "bill_drilldown":
+                result["evidence"] = bill_view.bill_compact(conn, rq.form_key)
         return result
     finally:
         conn.close()
@@ -204,14 +216,24 @@ def tool_trace(
         conn.close()
 
 
-def tool_bill(form_key: str) -> dict[str, Any]:
-    """单据钻取：操作集 / 插件清单 / 字段触达（按实体）/ 桥接风险。"""
+def tool_bill(form_key: str, cursor: str | None = None) -> dict[str, Any]:
+    """单据钻取：操作集 / 插件清单 / 字段触达（按实体）/ 桥接风险。
+
+    **紧凑投影（防 host 32KB 截断）**：每字段被触达的逐条事件已折叠为「写/落库/读」计数——要看
+    『某字段谁改的/在哪个事件函数/是否落库』，对该字段用 `trace 单据.字段`（entity_touch 每行已带 trace 锚点）。
+    各列表真实总数在 `*_total`；被 cap 截掉的段带 `*_next_cursor`。
+
+    **游标分页（`cursor`）——被 cap 的条目一条不丢、全部可取回**：某段被截时它带一个
+    `next_cursor`（如 `"fields@60"` / `"entity_touch@80"` / `"plugins@40"`）。要看被截掉的条目，
+    **把该值原样作 `cursor=` 再调一次本工具** `bill(form_key, cursor='fields@60')`，返回 `page.items`
+    （该段下一页）+ 新的 `page.next_cursor`；循环到 `next_cursor` 为 `null` 即把该段取全。
+    可分页段：fields / operations / plugins / bindings / entities / entity_touch。
+    """
     from ..report import bill_view
 
     conn = _open()
     try:
-        bv = bill_view.bill_view(conn, form_key)
-        return bv if bv is not None else {"error": f"单据不存在: {form_key}"}
+        return bill_view.bill_compact(conn, form_key, cursor=cursor)
     finally:
         conn.close()
 
@@ -263,6 +285,7 @@ def tool_resolve_fields(keys: list[str]) -> dict[str, Any]:
 
 def tool_read_source(
     relpath: str, start_line: int | None = None, end_line: int | None = None,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """读项目源码（野生编码正确解码）+ 自动标注其中字段 key 的真实中文名。**读源码优先用本工具**
     （而非宿主原生 reader）；它已自动回 `field_names`，读源码时无需再单独调 resolve_fields 核名。
@@ -276,12 +299,19 @@ def tool_read_source(
     取分录行还是多选基础资料集合取决于 key——基础资料字段（MulBasedataField）≠分录，**别凭 API 名断定是分录**。
     `start_line/end_line`（1 基含端点）可只读一段（大文件按区间读）；越界路径（../ 逃逸出源码根）会被拒。
     本工具只做"正确解码 + 字段名标注"，代码逻辑理解由你直接读返回的 `content`。
+
+    **紧凑投影 + 游标分页（防 host 32KB 截断）**：标注 `field_names` 在前（高价值、有界），源码正文
+    `content` 按字节预算填充。`content` 未读全时带 `content_next_cursor`（如 `"content@120"`）——把该值
+    原样作 `cursor=` 再调一次本工具 `read_source(relpath, cursor='content@120')`，即从该行**续读至文件
+    末尾**（逐页 `page.content` + 新 `next_cursor`，到 `null` 读完）；要限定上界改用 `end_line` 重调。
+    `field_names` 超档时带 `field_names_next_cursor`，同法翻页取回全部标注（红线 #4：被截内容可达、不丢）。
     """
     from ..report import read_source
 
     conn = _open()
     try:
-        return read_source.read_source(conn, relpath, start=start_line, end=end_line)
+        return read_source.read_source_compact(
+            conn, relpath, start=start_line, end=end_line, cursor=cursor)
     finally:
         conn.close()
 

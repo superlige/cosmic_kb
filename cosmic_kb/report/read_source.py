@@ -33,10 +33,13 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
 from . import resolve_fields, source_read
+# 复用 trace 的「host 口径字节度量 + 游标解析 + 预算/哨兵」单一事实源（红线 #6：度量逻辑只此一份）。
+from .field_trace import _wire_len, _parse_cursor, _COMPACT_BUDGET, _BIG_CAP
 from .resolve_fields import _LEVEL_CN
 
 # 字段标识 token：字母开头、含下划线的标识符（cqkd_tzrq / KEY_TZRQ 都会被切出；与 KB 已知 key 取交集才算命中）。
@@ -255,6 +258,190 @@ def read_source(
         "note": note,
         "content": body,
     }
+
+
+# ── 紧凑投影（MCP 防截断）：标注在前 + content 按字节预算填充 + 游标分页 ────────────────
+# 富 read_source 把整文件 `content` 整串返回——大文件（或大区间）经 MCP 会被 host 在 32KB 处从
+# 中段**硬切**，被砍的恰是不可重读的尾部。早期靠「标注在前、content 垫底」只能保住标注、源码仍被
+# 静默截断。本投影与 trace_compact/bill_compact 同款治理：
+#   ① 标注优先——`field_names`（高价值、有界）排在前，按档保住；
+#   ② content 弹性填充——按 host 口径 `_wire_len` 把源码行装到预算上限，未读全带 `content_next_cursor`；
+#   ③ 游标分页——`read_source(relpath, cursor='content@120')` 从该行**续读至文件末尾**，逐页取回；
+#      `field_names` 超档同法翻页（红线 #4：被截内容可达，不只报计数）。
+# 富 read_source 不动（CLI/Web 走终端/HTTP 无 32KB 限制，仍用富投影）。
+_RS_PAGE_SECTIONS = ("content", "field_names")
+# field_names 展示档（从宽到窄）：留出 content 最低余量，field_names 是高价值有界部分、优先保住。
+_RS_FIELD_CAPS = (60, 40, 25, 15, 8, 4, 1)
+_RS_MIN_CONTENT_BUDGET = 4000   # 至少给源码正文留这么多字节（否则只见标注不见码）
+
+_RS_COMPACT_NOTE = (
+    "紧凑投影（防 MCP 32KB 截断）：字段名标注 `field_names` 在前（高价值、有界），源码正文 `content` "
+    "按字节预算填充。`content` 未读全时带 `content_next_cursor`（如 `content@120`）——把该值原样作 "
+    "`cursor=` 再调 `read_source(relpath, cursor=该值)` 即从该行**续读至文件末尾**（逐页 `page.content` + "
+    "新 `next_cursor`，到 null 读完）；要限定上界改用 `end_line` 重调。`field_names` 超档时带 "
+    "`field_names_next_cursor`（同法翻页取回全部标注）。字段名按三档置信：✅ unique/resolved 照抄；"
+    "⚠️ ambiguous 多单据同名、本文件未解析到实体，勿默认当前单据，按各 key 的 note 顺调用链消歧。"
+    " getDynamicObjectCollection(key) 取分录行还是多选基础资料集合取决于 key——看坐标 field_type/access，"
+    "勿凭 API 名断定是分录。"
+)
+
+
+def _content_str_bytes(base_bytes: int, content: str) -> int:
+    """已知空 content 时的 base 字节，反推填入 content 后的总字节。
+
+    content 是返回 dict 里**唯一的弹性 scalar**：indent=2 不会缩进字符串值内部、换行在 JSON 里转义为
+    `\\n`，故换 content 值不改其余字段的序列化字节——总字节 = base_bytes - len('""') + len(json.dumps(content))。
+    这样二分行数只需对 content 串做 json.dumps，避免每步整 dict 重新序列化（O(n²)→O(n log n)）。
+    """
+    return base_bytes - 2 + len(json.dumps(content, ensure_ascii=True))
+
+
+def _rs_overview(
+    rich: dict[str, Any], fn_shown: dict[str, Any], *, fn_omitted: int,
+    s: int, e: int, total: int, content: str, shown_to: int, content_more: bool,
+) -> dict[str, Any]:
+    """组装紧凑 overview dict（标注在前、content 垫底；按需补 next_cursor）。"""
+    res: dict[str, Any] = {
+        "found": True,
+        "relpath": rich["relpath"],
+        "source_root": rich.get("source_root"),
+        "encoding": rich.get("encoding"),
+        "total_lines": total,
+        "lines": [s, shown_to] if total else None,
+        "keys_omitted": fn_omitted,
+        "field_names": fn_shown,
+        "note": _RS_COMPACT_NOTE,
+    }
+    if fn_omitted:
+        res["field_names_next_cursor"] = f"field_names@{len(fn_shown)}"
+    if content_more:
+        res["content_capped_lines"] = max(0, e - shown_to)
+        res["content_next_cursor"] = f"content@{shown_to + 1}"
+    res["content"] = content   # 垫底：host 截尾时牺牲可续读的源码，不可替代的标注存活
+    return res
+
+
+def _build_rs_compact(rich: dict[str, Any], start: int | None, end: int | None,
+                      budget: int) -> dict[str, Any]:
+    """一次构建紧凑 overview：先选 field_names 展示档（留 content 余量），再按字节预算二分填 content。"""
+    # 用 splitlines() 与富层 total_lines 同口径切行（split("\n") 会因文件尾换行多出空行、错位）。
+    all_lines = rich["content"].splitlines()
+    total = len(all_lines)
+    s = max(1, start or 1)
+    e = min(total, end or total) if total else 0
+    window = all_lines[s - 1:e] if total else []
+    fn_full = list(rich["field_names"].items())
+
+    # 选 field_names 展示档：阶梯从宽到窄，留出 content 最低余量（标注优先保住）。
+    fn_cap = min(_RS_FIELD_CAPS[-1], len(fn_full))
+    for cap in _RS_FIELD_CAPS:
+        cap = min(cap, len(fn_full))
+        probe = _rs_overview(rich, dict(fn_full[:cap]), fn_omitted=len(fn_full) - cap,
+                             s=s, e=e, total=total, content="", shown_to=e, content_more=True)
+        if _wire_len(probe) <= budget - _RS_MIN_CONTENT_BUDGET:
+            fn_cap = cap
+            break
+    fn_shown = dict(fn_full[:fn_cap])
+    fn_omitted = len(fn_full) - fn_cap
+
+    # content 弹性填充：base（content=""，worst-case 带 cursor）字节定后，二分窗口内最大可容行数。
+    base_bytes = _wire_len(_rs_overview(
+        rich, fn_shown, fn_omitted=fn_omitted, s=s, e=e, total=total,
+        content="", shown_to=e, content_more=True))
+    lo, hi = 0, len(window)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _content_str_bytes(base_bytes, "\n".join(window[:mid])) <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    k = lo if lo or not window else 1   # 至少给一行（单行即便超 budget 也给，仍远小于 32KB host 上限）
+    shown = window[:k]
+    content_more = k < len(window)
+    shown_to = (s + k - 1) if k else e
+    return _rs_overview(rich, fn_shown, fn_omitted=fn_omitted, s=s, e=e, total=total,
+                        content="\n".join(shown), shown_to=shown_to, content_more=content_more)
+
+
+def _rs_page_content(rich: dict[str, Any], offset: int, budget: int) -> dict[str, Any]:
+    """content 续读：从绝对行号 offset 起按预算装入源码行，**续读至文件末尾**（逐页可取全）。"""
+    all_lines = rich["content"].splitlines()   # 与 total_lines 同口径，见 _build_rs_compact
+    total = len(all_lines)
+    start = min(max(1, offset or 1), total + 1)
+    base = {"found": True, "relpath": rich["relpath"], "encoding": rich.get("encoding"),
+            "total_lines": total}
+
+    def _wrap(k: int) -> dict[str, Any]:
+        end_idx = start - 1 + k
+        return {**base, "page": {
+            "section": "content", "from_line": start,
+            "to_line": (start + k - 1) if k else start - 1, "total_lines": total,
+            "content": "\n".join(all_lines[start - 1:end_idx]),
+            "next_cursor": (f"content@{end_idx + 1}" if end_idx < total else None)}}
+
+    avail = max(0, total - (start - 1))
+    base_bytes = _wire_len(_wrap(0))
+    lo, hi = 0, avail
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        body = "\n".join(all_lines[start - 1:start - 1 + mid])
+        if _content_str_bytes(base_bytes, body) <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    k = lo if lo or not avail else 1
+    return _wrap(k)
+
+
+def _rs_page_field_names(rich: dict[str, Any], offset: int, budget: int) -> dict[str, Any]:
+    """field_names 翻页：从 offset 起按预算装入已分类的字段标注条目（`{key, info}`）。"""
+    items = [{"key": k, "info": v} for k, v in rich["field_names"].items()]
+    total = len(items)
+    offset = min(max(0, offset), total)
+    base = {"found": True, "relpath": rich["relpath"]}
+
+    def _wrap(page: list[dict[str, Any]], nxt: int) -> dict[str, Any]:
+        return {**base, "page": {"section": "field_names", "offset": offset,
+                "returned": len(page), "total": total, "items": page,
+                "next_cursor": (f"field_names@{nxt}" if nxt < total else None)}}
+
+    page: list[dict[str, Any]] = []
+    for it in items[offset:]:
+        trial = page + [it]
+        if page and _wire_len(_wrap(trial, offset + len(trial))) > budget:
+            break          # 至少装一条（单条即便超 budget 也给，仍远小于 32KB）
+        page = trial
+    return _wrap(page, offset + len(page))
+
+
+def read_source_compact(
+    conn, relpath: str, *,
+    source_root: str | None = None,
+    start: int | None = None, end: int | None = None,
+    cursor: str | None = None, budget: int = _COMPACT_BUDGET,
+) -> dict[str, Any]:
+    """**紧凑投影**（MCP 入口，防 host 32KB 截断）：标注在前 + content 按字节预算填充 + 游标分页。
+
+    - overview：`field_names`（按档保住）+ 窗口 `[start,end]`（默认整文件）内预算填得下的 `content`；
+      未读全带 `content_next_cursor`，`field_names` 超档带 `field_names_next_cursor`。
+    - `cursor`（`"content@120"` / `"field_names@60"`）：把 overview 给出的 next_cursor 原样传回即翻页——
+      content 从该行**续读至文件末尾**，field_names 续取后续标注；循环到 `next_cursor` 为 null 即取全。
+    - governor 按 host 真实序列化口径（`_wire_len` = json.dumps indent=2）度量，保证永不被截断（红线 #4）。
+    """
+    # 取整文件富材料（max_keys 放开 → 全部字段分类，供分页 slice；whole-file 让游标无状态一致）。
+    rich = read_source(conn, relpath, source_root=source_root, max_keys=_BIG_CAP)
+    if not rich.get("found"):
+        return rich   # 错误 dict 很小，直接回
+    if cursor:
+        section, offset = _parse_cursor(cursor)
+        if section == "content":
+            return _rs_page_content(rich, offset, budget)
+        if section == "field_names":
+            return _rs_page_field_names(rich, offset, budget)
+        return {"found": True, "relpath": relpath, "page": {
+            "section": section,
+            "error": f"未知或不可分页的 section: {section}（可分页：{', '.join(_RS_PAGE_SECTIONS)}）"}}
+    return _build_rs_compact(rich, start, end, budget)
 
 
 def _coord_line(key: str, c: dict[str, Any], *, mark: str, suffix: str = "") -> str:

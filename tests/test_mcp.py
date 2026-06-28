@@ -76,7 +76,7 @@ def test_tool_trace_same_as_report(kb_env):
 
 
 def test_tool_bill_handles_null_field_key(kb_env):
-    """单据钻取：即使有 field_key=NULL 的未定位访问也不崩（回归保护）。"""
+    """单据钻取（紧凑投影）：即使有 field_key=NULL 的未定位访问也不崩，且不混进字段触达清单。"""
     conn = sqlite3.connect(str(kb_env))
     try:
         conn.execute(
@@ -88,9 +88,29 @@ def test_tool_bill_handles_null_field_key(kb_env):
         conn.close()
 
     bv = mcp_server.tool_bill("cqkd_assetcard")
-    assert "field_touch" in bv
-    # NULL field_key 不该混进按字段聚合的触达清单。
-    assert None not in bv["field_touch"]
+    # 紧凑投影：逐字段事件已折叠为计数，按实体分组的 entity_touch 取代扁平 field_touch。
+    assert "entity_touch" in bv and "field_touch" not in bv
+    touched = [f["field_key"] for et in bv["entity_touch"] for f in et["fields"]]
+    assert None not in touched                          # NULL field_key 不该混进触达清单
+    assert "cqkd_collateralstatus" in touched           # 已定位写入仍在
+
+
+def test_tool_bill_compact_under_budget_and_pages(kb_env):
+    """tool_bill 走紧凑投影 bill_compact（防 host 32KB 截断）；与 report 同口径、支持游标分页。"""
+    from cosmic_kb.report import bill_view, field_trace
+
+    got = mcp_server.tool_bill("cqkd_assetcard")
+    conn = store.open_kb(kb_env)
+    try:
+        want = bill_view.bill_compact(conn, "cqkd_assetcard")
+    finally:
+        conn.close()
+    assert got == want
+    assert field_trace._wire_len(got) <= field_trace._COMPACT_BUDGET
+    # 分页：把某段游标喂回 tool_bill 应返回聚焦页（page.items + next_cursor）。
+    pg = mcp_server.tool_bill("cqkd_assetcard", cursor="fields@0")
+    assert pg["page"]["section"] == "fields"
+    assert "items" in pg["page"]
 
 
 def test_tool_bill_missing_form(kb_env):
