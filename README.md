@@ -104,8 +104,12 @@ cosmic_kb web
 | `cosmic_kb trace <单据.[分录.[子分录.]]字段>` | **旗舰**：字段→读写它的插件/事件/是否落库/行号 |
 | `cosmic_kb bill <单据标识>` | 单据钻取：操作集 / 插件 / 字段触达 / 风险 |
 | `cosmic_kb ask "<自然语言问题>"` | NL→意图→查 KB 取证（消歧退出码 3，`--json` 喂 Skill） |
+| `cosmic_kb calls <类全限定名> <方法名>` | 方法出向调用导航：调了项目内哪些方法 + 本方法读写字段 |
+| `cosmic_kb source <相对源文件路径>` | 读源码（野生编码正确解码）+ 自动标注字段真名 |
+| `cosmic_kb resolve <字段标识> …` | 字段名 O(1) 核对：标识→真实中文名 + 坐标，钉不出回 null |
 | `cosmic_kb coverage` | **信任优先**：以元数据字段为分母的覆盖率 + 扫描质量分解 |
 | `cosmic_kb scan-compare` | **信任优先**：粗扫(字面量) vs 高精度对比 → 疑似盲点 / 精度增量 |
+| `cosmic_kb dynwrites` | **信任优先**：字段 key 钉不出的动态读写按「该读方法」去重列出 |
 | `cosmic_kb web` | 本地浏览器排障（含「扫描可信度」页签） |
 | `cosmic_kb mcp` | 起 MCP 服务器，把取证命令暴露给 LLM 宿主 |
 | `cosmic_kb meta <dym\|cr\|zip>` | 只解析元数据，看分类计数 / JSON 快照 |
@@ -134,9 +138,11 @@ cosmic_kb web
 工具本身**不调 LLM**——确定性建库、确定性取证。要让大模型帮你做语义解释/排查建议时，走 **MCP**——
 一次注册，**任意支持 MCP 的 agent 通用**（Claude Code / Claude Desktop / Cursor / Cline / Windsurf / Codex …）。
 
-它把 `ask / trace / bill / method_calls / coverage / scan_compare` 包成 MCP 工具（返回值与 CLI `--json`
-**同口径**，每次只回最小证据包，源码全文由大模型直接读本机文件），并额外暴露 `cosmic_semantics(topic)`
-回传苍穹领域知识（插件类型 / 事件时机 / SDK 用法 / 入库判断 / 反模式黑名单）。**苍穹纪律（三态置信度、
+它把 7 个排障主路径命令包成 MCP 工具——`ask / trace / bill / method_calls / resolve_fields /
+read_source / cosmic_semantics`（返回值与 CLI `--json` **同口径**，每次只回最小证据包，源码全文由
+大模型经 `read_source` 正确解码读取），其中 `cosmic_semantics(topic)` 回传苍穹领域知识（插件类型 /
+事件时机 / SDK 用法 / 入库判断 / 反模式黑名单）。审计类命令（`coverage / scan-compare / dynwrites`）
+下沉为 CLI-only，段二只留这 7 个。各工具返回字段的含义见上节「返回值字段词典」。**苍穹纪律（三态置信度、
 不臆造、入库判断）随 MCP `instructions` 注入宿主系统提示**，故非 Claude agent 也能"带语义"作答，无需单独装 Skill。
 
 ### 使用者：把 agent 接到本工具的 MCP
@@ -174,6 +180,110 @@ cosmic_kb web
 
 接好后直接问 agent「cqkd_amount 这个金额是谁改的」「这张单有哪些插件」「这个方法调了什么」，
 它会自动调 MCP 工具取证、带类·方法·行号·三态置信度作答。
+
+---
+
+## 返回值字段词典（工具到底回了什么）
+
+工具返回（CLI `--json` / MCP）刻意用了一批专有字段名（`unlocated` / `dynamic_writers` /
+`possible` …）。它们都不是随手起的——每个对应「老项目分析天生不完整」里的一种**确定性程度**。
+读懂它们，才能分清哪些是确诊、哪些是「值得人工/大模型去核的工作单」、哪些被截断需翻页。下面按
+工具逐一解释。
+
+### 贯穿所有工具的通用约定
+
+| 字段 | 真实含义 |
+|------|---------|
+| `summary` | **真实总数（永远全量）**。无论返回怎么被裁剪，这里的计数都是库里的真值——判「完整 vs 截断」先看它。红线 #4。 |
+| `*_total`（如 `groups_total` / `fields_total`） | 该列表的真实条数。返回里只展示了一部分时，全量数在这。 |
+| `*_capped` / `capped` / `sites_capped` / `methods_capped` | **被设计内 cap 截掉的条数**（>0 表示这一段没列全）。不是丢数——总数在 `*_total`，被截条目可翻页取回。 |
+| `next_cursor` / `*_next_cursor`（如 `"unlocated@4"`） | **翻页游标**：把这个值原样作 `cursor=` 再调一次同一工具，即取回该段下一页（`page.items` + 新 `next_cursor`），循环到 `null` 即把被截条目**一条不漏取全**。 |
+| `note` | 人读提示：为何没命中、被截了该怎么收窄/翻页、tree-sitter 没装等。 |
+| `confidence` / 三态 | `confirmed`（确诊）/ `likely`（很可能）/ `unknown`（判不准，标 unknown 不臆造）。 |
+| `persists`（落库三态） | `yes`=落库（写进数据库，CLI 显示 ✅落库）；`no`=仅内存（—内存）；`unknown`=存疑（❓存疑，缺保存链路一律判这个，不臆造）；`na`=不适用。 |
+
+### `trace` —— 字段排障旗舰（参数最多，重点看这个）
+
+输入字段、输出「谁读写它/在哪个事件/是否落库」。返回里**三种"命中桶"按确定性递减**排列：
+
+| 字段 | 真实含义 |
+|------|---------|
+| `field_key` / `field_name` | 被查字段标识 + **已核对的真实中文名**（来自元数据，引用时照抄，**别按拼音/命名惯例猜**）。同一 key 跨多坐标且名字不同时 `field_name` 为 `null`，消歧看 `occurrences`。 |
+| `filter` / `precise` | 本次查询的坐标过滤（form/entry/level）、是否精确到单一坐标。 |
+| `occurrences` / `occurrences_total` | 该字段在**元数据里的定义坐标**（单据·层级·分录）——即"这个字段名在哪些单据上有定义"的**消歧菜单**，不是读写记录。 |
+| `groups` / `groups_total` / `groups_capped` | **确诊命中**：按坐标 (单据·层级·分录) 分组，每组列该坐标下读写它的类。裸字段会命中多张单据，故 `groups` 可能被裁——真实组数在 `groups_total`。 |
+| `groups[].writers` | 该坐标的**写入**，按写入类合并：`classes[]` 每类一份，行号/落库/via 列在该类的 `sites`。`total`/`capped`/`sites_capped` 同通用约定。 |
+| `groups[].readers` / `readers_overview` | 读取。默认只回**按类计数概览** `readers_overview`（最省字节）；要读取明细另调 `access='read'`，回 `readers`（类→方法，顺 `calls` 去读源码）。 |
+| `possible` | **存疑命中**：同单据同字段、但**层级/分录对不精确**（碰哪级分录判不准）的读写。不丢弃、降一档放这（"宁可多列也不漏"）。 |
+| **`unlocated`** | **「反推来源单据」工作单**：这些读写**确实碰了被查字段**，但来源 DynamicObject **属于哪张单据没钉出**（`form_key=None`）。按方法去重，每条带 `calls` 导航 + `plugin_form_label`（该插件注册的单据，**只是线索非确诊**，别当确定来源）+ `null_reason`（见下）。要确认它改的是哪张单据，顺 `calls`/读源码反推。 |
+| **`dynamic_writers`** | **「字段钉不出」的动态写入候选**：代码对运行时/配置决定的字段集做泛化写入（循环遍历/字符串拼接 key/引用外部常量），静态钉不出**具体改了哪个字段**，但可能正改本字段。按"该读方法"去重列出（`methods[]` + `calls` + `by_cause`），交人/大模型读源码定性。⚠️ 与 `unlocated` 对称：`unlocated` 是钉不出"哪张单据"，`dynamic_writers` 是钉不出"哪个字段"——**两者都是工作单不是结论，别直接当成"谁改了它"的答案**。 |
+| `coarse`（仅 `access='read'`） | **粗扫疑似盲点**：纯正则把字段标识当源码字面量搜到、但高精度分析没覆盖的位置（`coarse_only` + `locations` 带行号）。候选非确诊，供人工核对扫描盲区。 |
+| `summary` | 真实总数集合：`writers`/`readers`/`persisting_writers`(落库写入数)/`uncertain_writers`(存疑写入数)/`plugins`/`forms`/`coords`(坐标组数)/`possible`/`unlocated`/`dynamic_writers`/`annotation_writers`(注解反射映射写入数) + `unlocated_by_reason`(未定位成因直方图)。 |
+
+#### `null_reason` —— `unlocated` 每条/每段的成因码（该不该追）
+
+`form_key=None` 的行为何 None，决定了"值不值得顺源码反推"。7 个**互斥**成因码：
+
+| 成因码 | 含义 | 该追吗 |
+|--------|------|-------|
+| `basedata-ref` | 写的是基础资料对象本身，本就无业务单据坐标 | **正确 None，无需追** |
+| `dynamic-entity` | ORM 实体名是运行时变量/拼接，静态不可钉 | **正确 None，无需追** |
+| `helper-caller-unknown` | helper 的 DynamicObject 入参，调用方未安全收敛 | 值得顺 `calls` 读源码反推 |
+| `local-or-container-source` | 本地 new/Map/返回值等容器来源未识别 | 值得读源码反推 |
+| `model-context` | `getModel()`/模型形参写入，但插件未注册绑定单据 | 读源码/补元数据可定（多为未注册表单插件） |
+| `field-key-undeterminable` | 字段 key 本身就钉不出（动态/拼接/外部常量/歧义） | 来源讨论无意义 |
+| `unknown` | 暂无足够证据归因 | 先补证据再判断 |
+
+全量成因分布在 `summary.unlocated_by_reason`（真实总数恒在此）。
+
+### `bill` —— 单据钻取
+
+| 字段 | 真实含义 |
+|------|---------|
+| `form` / `stats` | 单据元信息 + 计数（实体数/字段数/操作数/插件数/被触达字段数）。 |
+| `entities` / `fields` / `operations` / `plugins` / `bindings` | 该单的实体、字段元、操作集、插件清单、动态绑定（各有 `*_total`，被截带 `*_next_cursor`）。 |
+| `entity_touch` | 按实体分组的**字段触达**：每字段被触达的逐条事件已折叠为「写/落库/读」计数（`writers`/`persisting`/`readers`）。每行带 `trace` 锚点（`"trace 单据.字段"`）——要看"某字段谁改的/在哪个事件/是否落库"，照它对该字段 `trace`。 |
+| `risk_bindings` | 桥接有风险的绑定（如插件类没在源码命中），通常很少、整列内联。 |
+
+### `method_calls` —— 方法出向调用导航
+
+野生多前缀码上的"跳转到定义"。**只导航不解释**（方法在干嘛请读源码自己判）。
+
+| 字段 | 真实含义 |
+|------|---------|
+| `found` | 是否定位到类+方法。`False` 时带 `reason`（`class_not_found`/`class_ambiguous`/`method_not_found`）+ `candidates`，请挑全限定名/正确方法名再查。 |
+| `methods[].calls` | 该方法调用的**项目内**方法清单，每条：`name`(调用名) + `target_fqn`(目标类全限定名，可再对它 `method_calls` 下钻) + `target_relpath`(目标源文件，去这里接着读) + `line`(调用行号)。**只列项目内可下钻调用**，平台/外部/`equals`/常量调用一律不回（噪声）。 |
+| `methods[].fields` | 该方法体读写的字段：`writes`/`reads`（带**已核对中文名** `field_name` + `persists` + `semantics_topic`）+ `dynamic_writes`(钉不出具体字段的动态写入数，只计数)。导航到方法、还没读源码就拿到真名，杜绝猜字段名。 |
+| `semantics_topic` | 若该方法是苍穹事件回调，指明该读哪篇语义文档（如 `plugin-form`/`plugin-operation`）——解释它"何时触发/是否入库"前先 `cosmic_semantics(该 topic)`。 |
+
+### `resolve_fields` —— 字段名 O(1) 核对
+
+手上有一串字段 key、想核对真名时用（已在读源码用 `read_source` 即可，它自带 `field_names`）。
+
+返回 `{"resolved": {key: [item, ...] | null}}`，每个 item 带 `kind` 判别：
+
+- `kind:"field"`：字段定义 —— `{name, form_key, entity_key, level, field_kind, field_type, access}`。
+  `access` 是派生取值语义：**多选基础资料字段（MulBasedataField）也用 `getDynamicObjectCollection()` 取集合，不是分录行**——取分录还是基础资料取决于 key，别凭 API 名当分录。
+- `kind:"entry"/"subentry"/"header"`：**分录容器** key（不是字段 key）—— `{name, form_key, level, parent_key, access}`。
+- 同 key 跨多坐标 → 回 list 全摆出（**不替你选**，消歧靠你读代码时的实体上下文）；**钉不出回 `null`——标 unknown，绝不臆造**。
+
+### `read_source` —— 读源码（野生编码正确解码 + 自动标注字段名）
+
+| 字段 | 真实含义 |
+|------|---------|
+| `content` / `content_next_cursor` | 正确解码、行号与 KB 对齐的源码正文；未读全时带游标，`cursor=该值` 续读至文件末尾。 |
+| `encoding` / `total_lines` / `lines` | 探测到的编码、文件总行数、本次返回的行区间。 |
+| `field_names` | 本文件出现的字段标识 → 真名，已按本文件**数据包来源做归属消歧**，按 `tier` 分三档： |
+| └ `tier:"unique"` / `"resolved"` | 唯一确定 / 已按上下文解析到具体实体——`names` 可**直接照抄**。 |
+| └ `tier:"ambiguous"` | **多张单据有同名字段、本文件未解析到具体实体**——`names` 为空，**别默认当前单据**，按 `note` 顺调用链消歧。 |
+
+### `cosmic_semantics` —— 苍穹领域语义文档
+
+- 命中 → `{topic, content}`（单篇 markdown 全文）。
+- 空参/未命中 → `{status:"need_topic", available_topics:[...], grouped:{...}}`，每条带「何时用」，挑一个主题名再取全文。
+
+> 想看 `trace` 返回"到底完整还是截断"的完整推演（三种"截断"的区别、游标分页机制），见
+> [`docs/trace返回详解.md`](docs/trace返回详解.md)。
 
 ---
 
@@ -254,7 +364,7 @@ cqkd_ai/
 ├── comic-understand-long/    # Claude Code skill 增强入口（SKILL.md + scripts，语义已下沉进包）
 ├── skill_assets/             # 离线 SDK 文档库 ok-cosmic-docs.db（可选，不进 wheel）
 ├── scripts/                  # 整包兜底脚本（make_dist.ps1 + 安装说明.md）
-├── tests/                    # pytest（187 passed）
+├── tests/                    # pytest（330 passed）
 ├── docs/                     # 项目企划 / 开发计划 / 阶段验收
 ├── samples/                  # 示例元数据
 └── vendor/                   # 上游 ok-cosmic 原件（参考）

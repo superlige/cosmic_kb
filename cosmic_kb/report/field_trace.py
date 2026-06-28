@@ -14,9 +14,11 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from typing import Any
 
 from ..graph import store
+from ..java import null_reason as nrmod
 from ..semantic import hints
 from . import dynamic_writes
 
@@ -31,7 +33,7 @@ _LEVEL_LABEL = {"header": "表头", "entry": "分录", "subentry": "子分录",
 _FA_COLS = (
     "form_key,field_key,level,entry_key,plugin_fqn,plugin_type,access_class,"
     "event_method,event_phase,access,persists,persist_reason,via,line,path,"
-    "key_resolution,confidence,source_relpath"
+    "key_resolution,confidence,source_relpath,null_reason"
 )
 
 # ── 返回 dict 的数组上界（红线 #4：cap 后仍把真实总数留在 summary，消费方比 len 即知截断量）──
@@ -123,20 +125,25 @@ def _collapse_unlocated_methods(rows: list[dict[str, Any]], *, cap: int) -> dict
                 "plugin_simple": r.get("plugin_simple"), "plugin_type": r.get("plugin_type"),
                 "plugin_form_label": r.get("plugin_form_label"),
                 "semantics_topic": r.get("semantics_topic"),
-                "writes": 0, "reads": 0, "locations": {},
+                "writes": 0, "reads": 0, "locations": {}, "reasons": Counter(),
             }
         if r.get("access") == "write":
             g["writes"] += 1
         else:
             g["reads"] += 1
+        if r.get("null_reason"):
+            g["reasons"][r["null_reason"]] += 1
         ac = r.get("access_class") or r.get("plugin_fqn")
         g["locations"].setdefault(ac, f"{r.get('source_relpath')}:{r.get('line')}")
     out: list[dict[str, Any]] = []
     for g in groups.values():
+        # 该方法多行的主因（取最高频）+ 人读标签，提示段二「该不该顺 calls 反推」。
+        reason = g["reasons"].most_common(1)[0][0] if g["reasons"] else None
         out.append({
             "class_fqn": g["class_fqn"], "method": g["method"],
             "plugin_simple": g["plugin_simple"], "plugin_type": g["plugin_type"],
             "plugin_form_label": g["plugin_form_label"], "semantics_topic": g["semantics_topic"],
+            "null_reason": reason,
             "writes": g["writes"], "reads": g["reads"], "count": g["writes"] + g["reads"],
             "calls": (f"calls {g['class_fqn']} {g['method']}"
                       if g["class_fqn"] and g["method"] else None),
@@ -147,9 +154,16 @@ def _collapse_unlocated_methods(rows: list[dict[str, Any]], *, cap: int) -> dict
         "total": len(rows),
         "writes": sum(1 for r in rows if r.get("access") == "write"),
         "reads": sum(1 for r in rows if r.get("access") != "write"),
+        "by_reason": _reason_histogram(rows),
         "methods": out[:cap],
         "capped": max(0, len(out) - cap),
     }
+
+
+def _reason_histogram(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """未定位行按成因计数（真实总数恒在此，不受方法 cap 影响；红线 #4 不丢数）。"""
+    c = Counter(r.get("null_reason") or nrmod.UNKNOWN for r in rows)
+    return dict(c.most_common())
 # 动态写入候选纳入的成因（用户 2026-06-24 三项全放宽：含 unknown，未识别局部变量持 key 也算候选）。
 _DYN_CAUSES = ("dynamic-loop", "concat", "external-const", "unknown")
 # 动态写入候选的成因标签（key_resolution → 人读）。
@@ -326,6 +340,10 @@ def _collect_materials(
         "coords": len(group_list),
         "possible": len(possible),
         "unlocated": len(unlocated),
+        # 未定位行按成因分布（信任优先）：哪些该不该顺源码反推，真实总数恒在此。按本字段**全部**
+        # form_key=None 行统计（裸字段查询不拆 unlocated 桶，故不能只数 unlocated 变量）。
+        "unlocated_by_reason": _reason_histogram(
+            [r for r in all_rows if r["form_key"] is None]),
         # 注解反射映射写入（@…Annotation(value="key") + convertTo…DynamicObject 反射 set）命中数。
         # 仅标量（真实总数）；明细随普通 writers 行走既有「按类合并 + cap + 字节 governor」，不另起数组。
         "annotation_writers": sum(1 for r in all_rows
@@ -1098,6 +1116,10 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
             f"{unloc['total']} 处（写 {unloc.get('writes', 0)} / 读 {unloc.get('reads', 0)}）"
             f" → {len(unloc.get('methods', []))} 个方法"
         )
+        by_reason = unloc.get("by_reason") or {}
+        if by_reason:
+            parts = [f"{nrmod.REASON_LABEL.get(k, k)}×{v}" for k, v in by_reason.items()]
+            lines.append("  成因分布：" + "；".join(parts))
         lines.append("  去这几个方法读源码，反推这个 DynamicObject 来自哪张单据（按写入数降序）：")
         for m in unloc.get("methods", [])[:max_list]:
             cls = m.get("plugin_simple") or (m.get("class_fqn") or "?").rsplit(".", 1)[-1]
@@ -1106,6 +1128,8 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
                 f"  · {cls}.{m['method']} [{m.get('plugin_type')}]"
                 f"  (写 {m['writes']}/读 {m['reads']}){home}"
                 + (f"  {m['calls']}" if m.get("calls") else ""))
+            if m.get("null_reason"):
+                lines.append(f"        成因：{nrmod.REASON_LABEL.get(m['null_reason'], m['null_reason'])}")
             if m.get("locations"):
                 lines.append(f"        位于 {' / '.join(m['locations'])}")
             if m.get("semantics_topic"):

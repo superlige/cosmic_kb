@@ -233,3 +233,65 @@ def test_standalone_skips_only_bfs_covered_overload():
     keys = {r.field_key for r in result.field_accesses}
     assert "cqkd_ssfq" in keys                         # IDataModel 重载仍补扫
     assert "cqkd_other" not in keys                    # 首个重载已 covered → 跳过（不重复归因）
+
+
+# ── C4：变量名作用域冲突——for-each/lambda 循环变量覆盖同名 basedata 误绑（红线 #4）──────────
+#
+# doc_ctx 方法级扁平、无块级作用域：同名局部变量「先到先得」。真实项目 AssetCardCleanQuantityTask
+# 里内层 `asset = card.getDynamicObject(基础资料字段)` 先把 asset 钉成 basedata，外层
+# `for (DynamicObject asset : 已load的卡片集合)` 想重绑表头却被旧绑定挡住，于是该循环里对资产卡片
+# 真实字段的 set(...) 被错盖成 level=basedata → null_reason=basedata-ref「正确None·无需追」而**静默漏报**。
+# 修复：for-each/lambda 循环变量是新作用域的新绑定，来源集合有坐标(header/entry/subentry)时覆盖
+# 同名 basedata 旧绑定。本用例护栏：写入必须归 header（不得是 basedata）。
+
+def test_c4_foreach_var_overrides_shadowed_basedata_binding():
+    """同名 asset：内层 getDynamicObject(basedata) 在前，外层 for-each(已load表头集合) 的写入必须归 header。"""
+    src = ("package p;\n"
+           "import kd.bos.servicehelper.BusinessDataServiceHelper;\n"
+           "public class CleanTask {\n"
+           "  public void execute(){\n"
+           "    DynamicObject[] cards = BusinessDataServiceHelper.load(\"cqkd_bill\", sel, fil);\n"
+           "    for (DynamicObject row : rows) {\n"
+           "      DynamicObject asset = row.getDynamicObject(\"cqkd_assetref\");\n"  # 基础资料钻取
+           "      long x = asset.getLong(\"cqkd_id\");\n"
+           "    }\n"
+           "    for (DynamicObject asset : cards) {\n"                               # 同名，真·表头循环
+           "      asset.set(\"cqkd_status\", 1);\n"                                  # 真实业务写入
+           "    }\n"
+           "  }\n}\n")
+    by = _analyze(src)
+    w = by["cqkd_status"]
+    assert w.access == "write"
+    assert w.level == "header", "for-each 循环变量被同名 basedata 误绑覆盖：真实写入不得归 basedata"
+    assert w.level != "basedata"
+    assert w.entity == "cqkd_bill"                     # 来源=已 load 的卡片集合实体，form_key 能定位
+
+
+def test_c4_lambda_param_overrides_shadowed_basedata_binding():
+    """lambda 形参同理：同名 it 先被 getDynamicObject 钉 basedata，forEach 行变量写入仍须归 header。"""
+    src = ("package p;\n"
+           "import kd.bos.servicehelper.BusinessDataServiceHelper;\n"
+           "public class CleanTask {\n"
+           "  public void execute(){\n"
+           "    DynamicObject[] cards = BusinessDataServiceHelper.load(\"cqkd_bill\", sel, fil);\n"
+           "    DynamicObject it = src.getDynamicObject(\"cqkd_assetref\");\n"        # 先钉 basedata
+           "    long x = it.getLong(\"cqkd_id\");\n"
+           "    Arrays.stream(cards).forEach(it -> it.set(\"cqkd_status\", 1));\n"    # 同名 lambda 形参
+           "  }\n}\n")
+    by = _analyze(src)
+    w = by["cqkd_status"]
+    assert w.access == "write"
+    assert w.level == "header" and w.level != "basedata"
+    assert w.entity == "cqkd_bill"
+
+
+def test_c4_genuine_basedata_write_still_basedata():
+    """护栏（防过度修正）：没有同名集合循环覆盖时，真·基础资料对象内部写入仍判 basedata。"""
+    src = ("package p;\n"
+           "public class C {\n"
+           "  public void m(DynamicObject bill){\n"
+           "    DynamicObject org = bill.getDynamicObject(\"cqkd_org\");\n"
+           "    org.set(\"cqkd_name\", \"x\");\n"                                     # 写基础资料对象内部字段
+           "  }\n}\n")
+    by = _analyze(src)
+    assert by["cqkd_name"].level == "basedata"         # 未被任何同名循环覆盖 → 仍正确判 basedata

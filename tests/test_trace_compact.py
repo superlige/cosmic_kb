@@ -170,7 +170,7 @@ def test_compact_unlocated_is_worklist(tmp_path: Path):
     finally:
         conn.close()
     ul = ft["unlocated"]
-    assert set(ul) == {"total", "writes", "reads", "methods", "capped"}
+    assert set(ul) == {"total", "writes", "reads", "by_reason", "methods", "capped"}
     assert ul["total"] == 2 and ul["writes"] == 2          # 两处写入去重前真实数
     m = ul["methods"][0]
     assert m["method"] == "fill" and m["writes"] == 2 and m["calls"] == "calls cqspb.assets.CollateralOp fill"

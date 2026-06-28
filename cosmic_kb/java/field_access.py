@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from . import ast_index as ax
+from . import null_reason as nr
 from .constants import KeyResolution
 
 if TYPE_CHECKING:
@@ -263,7 +264,7 @@ def _resolve_entity_arg(text: str, env: _Env) -> tuple[str | None, str | None]:
         return known[0], None
     if cands:
         return cands[0], "来源实体未在元数据中确认（可能跨模块/外部实体）"
-    return None, "ORM 实体实参为动态表达式，无法静态解析来源单据"
+    return None, nr.NOTE_DYNAMIC_ENTITY
 
 
 def _resolve_key_token(token: str, env: "_Env") -> tuple[str | None, str | None]:
@@ -315,7 +316,7 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
                 doc_ctx[v] = _Ctx(pc[0], pc[1], pc[2])   # 传播来的完整坐标，置信
             else:
                 doc_ctx[v] = _Ctx("header", None, None,
-                                  note="DynamicObject 入参，调用方未知，来源单据/层级未定位")
+                                  note=nr.NOTE_HELPER_CALLER_UNKNOWN)
 
     # DynamicObjectCollection 形参：调用方传来的若是集合坐标，则其元素行继承之（供 for-each/lambda
     # 取行）——修复「插件取 dataEntity.getDynamicObjectCollection(分录) 后整集合传给 service 改字段」
@@ -337,7 +338,7 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
             coll_ctx[v] = _Ctx(pc[0], pc[1], pc[2], is_collection=True)
         else:
             coll_ctx[v] = _Ctx("header", None, None, is_collection=True,
-                               note="DynamicObject[] 入参，调用方未知，来源单据未定位")
+                               note=nr.NOTE_HELPER_CALLER_UNKNOWN_ARR)
 
     # 调用返回数据包注入：`localvar = this.helper(...)` 的 helper 返回某行/集合，analyze 已按
     # 被调方法的返回上下文解析成完整坐标。先于定点迭代播种，使后续对该变量的取分录/取行/set 继承之。
@@ -501,7 +502,7 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
             if m_do:
                 bd_key, _kn = _resolve_key_token(m_do.group(1), env)
                 doc_ctx[lv.name] = _Ctx("basedata", bd_key, _base_entity(base_var),
-                                        note="基础资料引用包，写入归该基础资料实体")
+                                        note=nr.NOTE_BASEDATA)
                 changed = True
                 continue
             # 事件数据实体（表头）：getDataEntity()/getDataEntities()[i]/getBizDataEntity() / this。
@@ -555,8 +556,15 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
             changed = True
 
         for row_var, coll_var in foreach:  # for-each 行继承集合元素上下文（含 load 数组）
-            if row_var not in doc_ctx and coll_var in coll_ctx:
-                c = coll_ctx[coll_var]
+            if coll_var not in coll_ctx:
+                continue
+            c = coll_ctx[coll_var]
+            existing = doc_ctx.get(row_var)
+            # for-each 循环变量是**新作用域的新绑定**：未绑定→绑定。若早先被同名变量的
+            # getDynamicObject 误钉为 basedata（doc_ctx 扁平、无块级作用域，先到先得），而本循环
+            # 来源集合是有坐标的业务集合(header/entry/subentry)，则以循环绑定为准——否则该循环里
+            # 对行的真实读写会被错盖成 basedata「正确None·无需追」而静默漏报（红线 #4 信任优先）。
+            if existing is None or (existing.level == "basedata" and c.level != "basedata"):
                 doc_ctx[row_var] = _Ctx(c.level, c.entry_key, c.entity, note=c.note)
                 changed = True
         if not changed:
@@ -571,14 +579,18 @@ def _build_contexts(body: "Node", env: _Env) -> tuple[set[str], dict[str, _Ctx],
             c = _inline_coll_elem(recv)
         if c is not None:
             for pn in params:
-                doc_ctx.setdefault(pn, _Ctx(c.level, c.entry_key, c.entity, note=c.note))
+                # lambda 形参同 for-each 循环变量：新作用域的新绑定。未绑定→绑定；若早先被同名
+                # 变量的 getDynamicObject 误钉为 basedata 而本集合有坐标，则以 lambda 绑定为准（同上，红线 #4）。
+                existing = doc_ctx.get(pn)
+                if existing is None or (existing.level == "basedata" and c.level != "basedata"):
+                    doc_ctx[pn] = _Ctx(c.level, c.entry_key, c.entity, note=c.note)
 
     # DynamicObject 局部/循环变量：上面没认出明确数据流的（非入参/非 ORM/非事件包），按表头
     # 保守归位、来源未定位（形参已先播种）。诚实留证据，供精确查询走"可能命中（存疑）"桶。
     for v in env.do_vars - env.do_params - env.do_array_params:
         if v not in doc_ctx and v not in coll_ctx and v not in model_vars:
             doc_ctx[v] = _Ctx("header", None, None,
-                              note="数据包来源未识别（非入参/非 ORM 查询），层级/来源单据未定位")
+                              note=nr.NOTE_SOURCE_UNIDENTIFIED)
     return model_vars, doc_ctx, coll_ctx
 
 

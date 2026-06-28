@@ -12,6 +12,17 @@ const el = (tag, cls, html) => {
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+// 未定位成因码 → 人读标签（与 java/null_reason.py REASON_LABEL 同口径）。
+const NULL_REASON_LABEL = {
+  "field-key-undeterminable": "字段 key 钉不出（动态/拼接/外部常量/歧义）",
+  "basedata-ref": "基础资料对象本身（正确 None，无需追）",
+  "dynamic-entity": "ORM 实体名运行时决定（正确 None，无需追）",
+  "helper-caller-unknown": "helper 入参来源未收敛（可读源码反推）",
+  "model-context": "getModel()/模型形参，插件未注册绑定单据",
+  "local-or-container-source": "本地 new/Map/返回值来源未识别（可读源码反推）",
+  "unknown": "暂无足够证据归因",
+};
+
 async function api(path) {
   const r = await fetch(path);
   return r.json();
@@ -273,6 +284,22 @@ function renderCoveragePane() {
     `对不上 ${mm.unmatched || 0}（多为平台字段/常量解析偏差）`));
   box.appendChild(mbox);
 
+  // 未定位成因分布（信任优先）：把「未定位单据」拆成确定性成因——哪些本就该 None、哪些值得追。
+  const reasons = lq.unlocated_reasons || {};
+  const rkeys = Object.keys(reasons);
+  if (rkeys.length) {
+    const cn = lq.unlocated_correct_none || 0;
+    box.appendChild(el("h3", null, "未定位成因分布"));
+    box.appendChild(el("p", "muted",
+      `共 ${lq.unlocated_form || 0} 处未定位来源单据，其中本就该 None 约 ${cn}（基础资料/动态实体，无需追）。`));
+    const ul = el("ul", "reasons");
+    for (const k of rkeys) {
+      ul.appendChild(el("li", null,
+        `<b>${reasons[k]}</b> · ${esc(NULL_REASON_LABEL[k] || k)}`));
+    }
+    box.appendChild(ul);
+  }
+
   // 上游可信度（覆盖率天花板）。
   const up = c.upstream || {};
   box.appendChild(el("p", "muted",
@@ -404,16 +431,18 @@ function unlocatedMethodsTable(ul) {
   const t = el("table", "tbl acc");
   t.innerHTML =
     "<thead><tr><th>插件类</th><th>类型</th><th>事件函数</th><th>写/读</th>" +
-    "<th>来源线索(插件注册单据)</th><th>位置</th><th>导航</th></tr></thead>";
+    "<th>成因</th><th>来源线索(插件注册单据)</th><th>位置</th><th>导航</th></tr></thead>";
   const tb = el("tbody");
   (ul.methods || []).forEach((m) => {
     const cls = m.plugin_simple || (m.class_fqn || "?").split(".").pop();
+    const reason = m.null_reason ? (NULL_REASON_LABEL[m.null_reason] || m.null_reason) : "";
     const tr = el("tr");
     tr.innerHTML =
       `<td class="ellip" title="${esc(m.class_fqn || "")}">${esc(cls)}</td>` +
       `<td>${esc(m.plugin_type || "")}</td>` +
       `<td>${esc(m.method || "")}</td>` +
       `<td>写 ${m.writes || 0} / 读 ${m.reads || 0}</td>` +
+      `<td class="ellip" title="${esc(reason)}">${esc(reason)}</td>` +
       `<td class="ellip" title="${esc(m.plugin_form_label || "")}">${esc(m.plugin_form_label || "service/未注册")}</td>` +
       `<td class="loc">${esc((m.locations || []).join(" / "))}</td>` +
       `<td class="mono muted">${esc(m.calls || "")}</td>`;

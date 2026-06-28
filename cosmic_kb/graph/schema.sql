@@ -157,10 +157,15 @@ CREATE TABLE field_access (
     confidence      REAL,
     source_relpath  TEXT,
     evidence        TEXT,
-    form_key_source TEXT                   -- form_key 来源种类：data_flow（数据流解析）/
+    form_key_source TEXT,                  -- form_key 来源种类：data_flow（数据流解析）/
                                            -- metadata_unique·metadata_binding·metadata_cooccur
                                            -- （字段key反查元数据回填，依据是字段归属非数据流）/
                                            -- NULL=未定位。诚实区分元数据反推与数据流证明（红线#4）。
+    null_reason     TEXT                   -- 未定位成因（form_key=NULL 时**为何** NULL，信任优先红线#4）：
+                                           -- field-key-undeterminable / basedata-ref / dynamic-entity /
+                                           -- helper-caller-unknown / model-context /
+                                           -- local-or-container-source / unknown；form_key 已定位则 NULL。
+                                           -- 单一真源 java/null_reason.py，供 trace/coverage/web 导航。
 );
 
 -- ── 粗精度扫描命中（信任「手段二」：粗扫 vs 高精度对比的粗扫侧）──────────────
@@ -217,6 +222,7 @@ CREATE INDEX idx_facc_plugin      ON field_access(plugin_fqn);
 CREATE INDEX idx_facc_form        ON field_access(form_key);
 CREATE INDEX idx_facc_aclass      ON field_access(access_class);
 CREATE INDEX idx_facc_coord       ON field_access(field_key, form_key, level, entry_key);
+CREATE INDEX idx_facc_nullreason  ON field_access(null_reason);
 CREATE INDEX idx_coarse_field     ON coarse_field_hit(field_key);
 
 -- ── FTS5 全文检索（为阶段 9 NL 查询打底：中文名↔标识 / 字段 / 类名）──────────

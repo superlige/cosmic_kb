@@ -44,173 +44,40 @@
 
 ## 当前进度
 
-- ✅ 阶段 0（脚手架 + 资产复用）、阶段 1（源码摄取 + 解析可信度报告）已完成并人工验收。
-- ✅ 阶段 2（元数据解析 + 整包处理）：三类 dym 统一解析为 `MetaModel`、hex oid 模板回填、
-  整包双层 zip；`cosmic_kb meta <dym|zip>`。
-- ✅ **阶段 3（元数据 `<ClassName>` ↔ 源码桥接）已完成并人工验收**：
-  `bridge/namespace.py`（源码 FQN 索引 + 前缀发现）+ `bridge/linker.py`（五态分类、孤儿
-  收录并标常量类）+ `report/bridge_report.py`；`cosmic_kb bridge <源码根> <dym|zip>`；
-  真实整包命中率 91.1%、孤儿 1075（常量 207 + 真孤儿 868）；59 passed。
-- ✅ **阶段 2/3 增补（转换规则 + 转换插件桥接 + 插件基类孤儿）**：`.cr` 转换规则解析、转换插件
-  桥接、插件基类孤儿闭包识别；图谱增 `convert_rule`/`converts_to`/`plugin_base`（schema v5）。
-- ✅ **阶段 4（KB 图谱存储 + Web）已完成**：`graph/schema.sql`+`store.py`（SQLite+FTS5
-  幂等重建）、`report/project_map.py`（多信号模块识别，已降为次要）、`report/overview.py`、
-  本地 Web（`web/`）。
-- ✅ **阶段 5+6（类内+跨类）+7（字段级排障引擎·旗舰）**（产品方向重定向：从「项目普查」转向
-  「排障导航」，用户 2026-06-17 拍板）：输入字段标识 → 列出所有读/写它的**插件 + 事件函数 +
-  是否落库 + 行号 + 源码路径**，按**实体坐标 (单据·层级·分录)** 分组定位。Java 语义层 `java/`
-  （ast_index/constants/plugin_classifier/event_extractor/field_access/call_graph/persistence/
-  project_graph/analyze），跨类回溯 + 数据包来源识别（事件入参/ORM load/转换/for-each/lambda/
-  stream/DynamicObject 入参传播）+ 落库三态判定；未绑定苍穹插件（Task/WebApi）也作入口。
-  KB 增 `field_access.access_class`（schema v7）；报告 `field_trace`/`bill_view`；CLI `trace`/`bill`。
-- ✅ **信任优先·可信度报告（手段一 + 手段二）**（红线 #4）：手段一 `coverage`（元数据业务字段
-  为分母算覆盖率 + 四维质量分解）；手段二 `scan-compare`（高精度 `field_access` vs 粗精度正则
-  字面量，分桶：两者都见 / 仅粗扫见=疑似盲点 / 仅高精度见=精度增量）。KB 增 `coarse_field_hit`
-  表（schema v8）；Web「扫描可信度」页签。
-- ⬜ **阶段 8（业务流分析）拍板搁置**（2026-06-22）：不单独做，折进阶段 9 按需——业务流上下文
-  只用现成 BOTP 边（`convert_rule`/`converts_to`），引用/审核回写无数据则留 unknown。
-- ✅ **阶段 9（语义解析 + Context Builder + Skill 集成）**：自然语言提问 → 工具**确定性**解析成
-  KB 查询并组装带证据答案（`ask` 不调 LLM，推理交段二 Skill）。`semantic/dictionary`（中文名↔标识
-  词典 + 模糊候选）+ `resolver`（意图分类 + 低置信反问，不替用户拍板）+ `context/builder`（按意图
-  复用取证函数组装证据包）；CLI `ask`（消歧退出码 3）。
-- ✅ **阶段 10（MCP 封装·段二大模型接入）**：按红线 #6 走 MCP Server——`mcp/server.py`（FastMCP +
-  取证工具，返回值与 CLI `--json` 同口径、零重写、未装 `[mcp]` 也可 import）；CLI `cosmic_kb mcp`
-  + `cosmic_kb-mcp` 入口 + `.mcp.json`。取证走最小证据包 JSON；大模型亦可直接读本机源码全文做完整解释（红线 #1 放松后）。
-- ✅ **阶段 10 增补·方法出向调用导航 `method_calls`**（2026-06-23 定位重置，取代原"方法级深读
-  `read_method`"）：段二形态拍板为**大模型直接读本机源码 + 挂苍穹 skill**——复述源码 / 列平台·
-  `equals`·常量调用 / 做自然语言解释，大模型自己做得更好，静态层在这块零增量甚至是噪声，故砍掉。
-  确定性层只保留大模型猜不准的那件事——**野生多 ISV 前缀不可编译码上的"跳转到定义"**：给定 类
-  全限定名 + 方法名 → 只回该方法调用的**项目内**方法（调用名 + 目标类全限定名 `target_fqn` +
-  目标源文件 `target_relpath` + 调用行号），供大模型顺调用链逐层读源码下钻。**不回源码全文**（大
-  模型自己读）、**不列平台/外部/落库 sink 调用**（噪声）、**不做字段落库取证**（那是 `trace` 的
-  本职）。接收者类型解不出 → 不收录（宁缺毋滥）。schema 不变 v9。四入口：CLI `calls` + MCP 工具
-  `method_calls` + `ask` 意图 `method_calls` + `trace`/`bill` 跳转提示。**当前 180 passed。**
-- ✅ **阶段 10 增补·unknown 字段诚实分类 + 动态写入交段二读源码**（2026-06-24 拍板）：字段 key 钉不出的
-  写入（`field_access.field_key=None`，对 `trace` 隐形）按成因细分 `key_resolution`（`dynamic-loop`/`concat`
-  /`external-const`/`unknown`）——绝大多数是代码对运行时/配置/元数据决定的**动态字段集泛化写入**，静态钉
-  不出唯一字段，故确定性层**不解释/不展开/不调大模型**，只分类+收集导航证据，"碰哪些字段、是否含 X"交
-  段二大模型直接读源码（红线 #1/#4/#6）。`trace X` 折进「动态写入候选」段（按同单据限定范围）、全局
-  `dynwrites`（CLI + MCP `dynamic_writes`，form/cause/class 过滤）；二者一律**按 (入口类,事件方法) 去重成
-  「该读方法」清单**（cap 10 + calls 锚点）防上下文爆炸。schema 不变 v9。**当前 191 passed。**
-- ✅ **阶段 10 增补·字段名核对 `resolve_fields`**（2026-06-25 拍板）：段二大模型读源码靠**命名惯例猜
-  字段中文名**翻车（`cqkd_zjjnqk` 猜成"资金"真实是"租金"），现有 `trace`/`bill`/`ask` 太"重"模型不愿
-  为核一个名去调。新增 O(1) 轻量取证：标识 → 真实元数据中文名+实体坐标，**同时覆盖 `field`+`entity`
-  两表**（分录容器 key 也能解析），同 key 多坐标全摆出不替选，**钉不出回 `null` 不臆造**。复用词典层
-  `Lexicon`（补 `entities_by_key` 索引），纯逻辑 `report/resolve_fields.py`，零 schema 改动。配套 MCP
-  `INSTRUCTIONS` 加「字段名纪律」。四入口：CLI `resolve` + MCP `resolve_fields`（+ 已有 trace/bill/ask
-  仍可查名）。schema 不变 v9。**当前 201 passed。**
-  - 配套修复：`entity.parent_key` 曾误存父实体 **oid**（`1B+5Q7IXAJGI`），现 `store.py` 用本单据 oid→key
-    映射翻成父实体 **key**（`resolve_fields`/`bill` 不再泄漏 oid）；需 `cosmic_kb build` 重建 KB 生效。
-- ✅ **阶段 10 增补·模式 B 语义增强（把核对结果焊进工具返回值）**（2026-06-25 拍板）：真实样本显示段二
-  大模型**绕过** `resolve_fields`/`cosmic_semantics`，凭命名惯例猜字段名、凭训练知识臆断事件触发时机/
-  入库——`INSTRUCTIONS` 软约束（规则在场、模型知道）压不住自信先验。诊断：模型"读源码→直接答"的默认
-  回路一个取证工具都不碰，约束施加的位置不对。通用 host 无钩子，**唯一所有 MCP host 都必读的硬信息是
-  我们自己工具的返回值**，故不"强制调用"（对自主 agent 不可达），改为在它本来就要走的导航工具返回里
-  **内联**：① 字段旁 `field_name` 已核对中文名（trace 顶层 + bill `field_touch` + ask 插件/操作证据，
-  覆盖 field+entity 两表，钉不出留 None）；② 事件方法旁 `semantics_topic`（`propertyChanged`→plugin-form、
-  `beforeDoOperation`→plugin-operation…），提示"判触发时机/入库前先 cosmic_semantics(topic)"。新增中立
-  复用模块 `semantic/hints.py`（事件→主题映射 + 字段名索引），report/context/method_calls 复用、不反向依赖
-  mcp；`INSTRUCTIONS` 加「返回值已带证据，直接采用」。host-agnostic，零 schema 改动（v9）。
-- ✅ **阶段 10 增补·堵两条"读源码猜字段名"路径：method_calls 带字段 + read_source（模式 A）**（2026-06-25）：
-  第二次真实样本暴露模式 B 的覆盖天花板——模型走「`method_calls`（不带字段名）→ 宿主原生 reader 直接读
-  源码 → 字段 key 只在源码正文里 → 猜」，全程没流经带名的工具。两手补齐：① **method_calls 延伸模式 B**——
-  按方法 `start_line..end_line` 行范围圈 `field_access`，返回该方法读写字段 + 已核对名 + 是否落库 + 语义
-  路由（导航到方法就拿真名）；钉不出的动态写只计数。② **新增 `read_source`（模式 A）**——让模型读源码走
-  我们的工具：野生编码（GBK/GB2312/UTF-8±BOM）正确解码（原生 reader 易乱码=拉它过来的硬理由）+ 扫文本里
-  已知字段 key 自动标注真名（常量 `KEY_X="cqkd_x"` 的字面值就在源码，无需常量表，直接复用 `resolve_fields`）；
-  路径防越界。新增 `report/source_read.py`（源码读取公共件，method_calls 委托复用）+ `report/read_source.py`；
-  四入口 CLI `source` + MCP `read_source` + `INSTRUCTIONS`「读源码优先用 read_source」+ method_calls 字段块。
-  零 schema 改动（v9）。**天花板仍在（诚实）：read_source 是"引导非强制"——模型若坚持用原生 reader、连
-  read_source 都不调，host-agnostic 拦不住；能做的是把"正确解码+自带真名+行号对齐"做成它用我们 reader 的
-  硬理由。当前 220 passed。**
-- ✅ **阶段 10 增补·read_source 字段名三档置信消歧**（2026-06-26 拍板）：真实样本暴露 read_source 把同一
-  `<isv>_xxx` key 在**多张单据**的同名候选**全平铺**返回（名字可能不同），诱导段二模型脑补归属（严重误导）。
-  诊断：read_source 明明知道"在读哪个文件"，却没用本文件的解析上下文收敛，直接倒 `resolve_fields` 全候选。
-  修复（仅改 read_source，其余工具早已用 `FieldNames.get(key, form_key)` 按数据包来源取名、本无此病）：用本
-  文件 `field_access.form_key`（=数据包**实际来源实体**，经 ORM load/事件入参/跨实体传播解析，`analyze.py` 里
-  `form_key=acc.entity`）收敛同名候选，按**三档置信**标注——✅`unique`（元数据唯一）/ ✅`resolved`（本文件已
-  解析到具体单据，含 `loadSingle` 跨实体的情形，附依据行号 + 标明其余单据）/ ⚠️`ambiguous`（多单据同名又没
-  解析到实体 → 显式标歧义、列候选、指出消歧方向「看接收变量来源 dataEntity/loadSingle/getAllSonList」，绝不
-  替选、不默认当前单据）。`field_names` 形状改为 `{key:{tier,names,coordinates,note}|None}`；MCP `INSTRUCTIONS`
-  /工具说明加「ambiguous 别默认当前单据」。零 schema 改动（v9）。**当前 222 passed。**
-- ✅ **信任优先·form_key 解析率提升（绑定回落 + 泛型集合建模）**（2026-06-27）：`read_source` 同名跨单据消歧靠
-  `field_access.form_key` 收敛，None 时只能平铺候选诱导脑补。真实库 60.3% 写入 form_key=None，按 evidence 分桶挖到
-  两个**可救**根因并补断链（红线 #4 不臆造）：① **绑定回落**——已绑定插件里未被事件 BFS 覆盖的 helper（第②轮孤立
-  补全）用本类**唯一绑定单据**作来源（绑多张留 None）；② **泛型集合建模**——`List/Set/Collection<DynamicObject>`
-  （项目里传查询结果最常用、原本三种 DO 形参都不认、整链来源 None）建模成集合：形参走「实参↔形参」坐标传播、
-  局部走「空集合 + `.add(已知实体包)` 累积推断元素来源」轻量数据流。`ast_index` 加 `dynamicobject_collection_*`、
-  `field_access._Env` 加 `do_coll_vars` + `.add` 累积、`analyze._coll_params` 并入 List<DO> 形参。零 schema 改动（v9）。
-  真实库 form_key NULL **60.3%→56.1%**（救回 764 行，0 改写、99%+ 落确认实体）。**当前 227 passed。**
-- ✅ **信任优先·form_key 解析率再提升（字段key反查回填三层 + addNew 习语，schema v10）**（2026-06-27）：数据流追不到
-  DO 来源时，反过来用**被读写的字段 key** 问元数据反推来源实体——物理硬约束「DO 不可能 `.set("cqkd_xxx")` 除非其实体
-  声明了该 key」，对返回值/Map/helper/new/stream 等容器断链**免疫**。`analyze.py` `_field_form_index`+`_backfill_form_key`
-  在 `_dedup` 前对 form_key=None 行三层逐级塌缩：①字段key唯一反查（直接定 form_key+level+entry_key）②绑定收敛（与
-  access_class/入口插件绑定单据取交）③同对象共现交集（同接收者变量连写多字段，候选 form 取交集；为此 `field_access`
-  do.* 路径记 `receiver_var`）；仍解不出留 None（红线 #4）。待办二：`field_access` 加 `new DynamicObject(coll.getDynamicObjectType())`
-  习语（新行继承集合分录坐标）。新增 schema **v10** 列 `form_key_source`（data_flow/metadata_unique·binding·cooccur/NULL）
-  诚实区分元数据反推与数据流证明；`read_source` 对 metadata_* 来源注明「依据是字段归属、非数据流行号」。真实库 form_key
-  NULL **56.1%→34.6%**（write 52.1%→27.4%；回填 4153 行=唯一2167+绑定1234+共现752，0 改写）。**当前 240 passed。**
-  详见 `docs/form_key解析待办.md`（②反向调用图、③④诚实未知留作后续）。
-- ✅ **信任优先·trace 防 MCP 截断（写/读拆分 + 按类合并 + 字节 governor）**（2026-06-27）：段二经 MCP 调 `trace`
-  返回被宿主在 **32KB 硬上限**处从中间截断（真实样本 67879→32768）。先一轮"删 evidence 死重列 + 白名单投影 + readers
-  折叠成「该读方法」+ 各数组 cap"仍 67KB——根因是**数组条数本身无界**（坐标组 + unlocated/possible/coarse/dynamic 都
-  无界），行级 cap 管不住。MCP 改走紧凑投影 `field_trace.trace_compact`：① **写/读拆分**（`access` 参数 write/read/默认，
-  每次只返一半）；② **按类合并**（散落行/方法按 `access_class or plugin_fqn` 塌成有界类节点，`_merge_writers_by_class`
-  类→sites、`_merge_readers_by_class` 类→方法、`_readers_overview` 仅类+计数；每行重复的插件常量提到类节点只存一份）；
-  ③ **cap + 字节 governor**（cap 类节点 + 按 `json.dumps` 字节预算 28000 逐级收紧重建直至 ≤ budget，真实总数恒在
-  `summary`、截掉量在 `capped`/`sites_capped`/`methods_capped`，红线 #4 不丢数）。复用红线 #6 抽 `_collect_materials`
-  共享取数，富 `field_trace()` 输出**逐字节不变**（现有测试不改即过）；`tool_ask` 字段意图 evidence 同样换 compact
-  （堵 ask 截断，复用 rq 不动 builder/CLI）；CLI 文本/本地 Web（HTTP 无限制）不动。真实库 `cqkd_ht.cqkd_zdgl.cqkd_qs`
-  富 dict 51456B→compact 默认 22761/write 20217/read 23182B（全 < 32KB）。零 schema 改动（v10）。注：MCP server 常驻，
-  改源码需**重连/重启 MCP** 才生效。**当前 253 passed。**
-- ✅ **信任优先·提高字段扫描率（模型形参识别 + 内联集合链，1+2+3）**（2026-06-27）：比 form_key=None 更糟的一类是
-  **写入根本没被扫出**（access 记录都不产生、查询时彻底隐形）。三条边界清晰、高收益、低误报的确定性缺口，全落在
-  `field_access.py` 轻量数据流：① **IDataModel/IBillModel/IFormView 形参识别为模型上下文**——helper
-  `void calc(IDataModel model){ model.setValue(...) }` 的写入原被整条丢弃（`_is_model_receiver` 只认 getModel() 结尾/已知
-  model_vars，形参永不入集）。`analyze._model_params` 按 `_MODEL_TYPES` 抽形参名注入 `_Env.model_params`，`_build_contexts`
-  播种 `model_vars`；模型 API 来源改走 `_model_entity`（跨类 service 收 getModel()/getView() 定到绑定单据，插件自身回落
-  default_entity 不变；仅类型白名单入集、不靠变量名猜=低误报）。② **内联 `X.getDynamicObjectCollection("k").addNew()`
-  赋给 DynamicObject 局部**——原 `_GET_COLL_ARG_RE` 先命中把新行误当集合 → 后续 `row.set` 整片判不出；新增内联守卫
-  （仿 stream 前置）+ 共享闭包 `_inline_coll_elem` 解析元素行坐标。③ **内联 `…getDynamicObjectCollection("k").forEach(o->o.set(..))`
-  / `.stream()` lambda**——`_lambda_recv` 回传接收者原文，binding 处复用 `_inline_coll_elem` 兜底（owner 解不出则 entity=None,
-  红线 #4）。零 schema 改动（v10）。真实库 field_access **19399→20104（+705：写 +402/读 +303，此前完全不可见）**，其中 via
-  model.* +429（C1）、内联 do.* +276（C2/C3）；form_key NULL **率不升反降 34.6%→34.4%、写 27.4%→26.7%**（新行多数当场定到来源,
-  不进未知堆）。`addNew`/`new DynamicObject` 的**变量形式**早由上一轮覆盖，本轮专补**内联链**。**当前 264 passed。**
-- ✅ **信任优先·form_key 解析率提升（孤立方法反向调用图回填）**（2026-06-27）：`form_key=None` 未定位最大单一杠杆是
-  「孤立方法 DynamicObject 入参」（占未定位 25.0%、1679 条）——正向只从绑定插件事件/未绑定插件根方法跨类 BFS 沿
-  「实参↔形参」传源，没被任何 BFS 覆盖的 helper（`void fill(DynamicObject o){ o.set(...) }`）走全量孤立补全时 DO 形参不知
-  来源、整片 None。补「反向调用图回填」：`analyze.py` 在 `_backfill_form_key`（元数据反推）**之前**插 `_backfill_reverse_calls`
-  （数据流级证据强于字段归属反推，先定）——`_build_reverse_calls` 遍历全项目逐重载用现成 `_resolve_call` 建「目标(类,方法)→
-  调用点」反向索引（自调用不入，`new Helper().m()` 显式构造接收者可解析）；对 form_key=None 的 standalone 行按
-  (access_class,物理方法) 分组，限域到反向可达子图；`_propagate_reverse_props` 做固定点逐跳传播，只有全部调用点都推出
-  同一个非空来源才采纳；带 param_ctx 重跑 `analyze_method`，按 (line,field_key,access) 把 entity≠None 项回填到原 None 行，标
-  `form_key_source=reverse_callgraph`。单跳唯一调用方 conf≤0.85，链式/多调用一致 conf≤0.80。递归/冲突/源未知一律留 None
-  （红线 #4），只动 None 行不改写已定位。
-  `read_source` 按 `metadata` 前缀判来源，reverse_callgraph 自动归数据流类、无需改。零 schema 改动（v10）。新增
-  `tests/test_reverse_callgraph.py` 11 例（Codex 侧全量 `pytest -q`：278 passed；真实项目
-  `D:\kingdee\asset_management_sys` 重建复算命中 `reverse_callgraph=218`（读 148 / 写 70），
-  `form_key NULL=6903/20259=34.07%`）。本轮固定点版相对单跳版只新增 16 条，未达 500+ 目标；后续识别率专项应转向
-  实例字段级数据流、非标准来源/容器来源和 evidence 分桶，不应为数字放宽多调用冲突/未知来源红线。
-- ✅ **阶段 10 增补·MCP 工具面精简（10→7，审计工具下沉 CLI-only）**（2026-06-28）：段二大模型经 MCP 调
-  `cosmic_kb` 时「工具太多、职责重叠、选不准」——coverage/scan_compare 都是「扫描可信度」报告（人类验收视角、
-  非段二排障主路径、模型难判调哪个），dynamic_writes 是全项目盲点审计（模型在「谁写了 X」时易误调、绕开
-  trace），ask 与 trace/bill/method_calls 入口重叠（已知精确标识仍偷懒调）。**仅改 MCP 工具面**（CLI 16 命令/
-  KB schema v10/`report/*` 取证函数全不动，红线 #6 KB 是契约）：① 删 `tool_coverage`/`tool_scan_compare`/
-  `tool_dynamic_writes` 三纯逻辑函数、`TOOLS` 收敛为 7 项（ask/trace/bill/method_calls/resolve_fields/
-  read_source/cosmic_semantics）；② 收紧 `INSTRUCTIONS`（ask 定位为兜底路由 + 删指向已不可达 dynamic_writes 的
-  切片句，**保留** trace 返回值里 `dynamic_writers` 该读方法清单导航）；③ 收紧 docstring（ask 标兜底、
-  cosmic_semantics 空参列清单路径提前、resolve_fields↔read_source 边界互补、method_calls「只导航不解释」）。
-  审计能力只是**离开 MCP、未消失**，CLI `coverage`/`scan-compare`/`dynwrites` 仍可用。零 schema 改动（v10）。
-  `test_mcp.py` 改注册表期望为 7 名 + 新增「审计工具不暴露给 MCP」回归断言、删 coverage/scan_compare MCP 用例
-  （纯逻辑仍由 report.* + 专属套件覆盖）；删 1 增 1 净零，预期全量 `pytest -q` 仍 **278 passed**。注：MCP server
-  常驻，改后需**重连/重启 MCP** 才生效。
-- 详细进度与每阶段"背景/目标/验收结论/命令"见 `docs/阶段验收.md`。
+> 一行一里程碑。**每条的背景/目标/验收结论/实现细节都在 `docs/阶段验收.md` 台账**，本节只够回到状态。
+> 当前 schema **v11**，**330 passed**。产品方向 2026-06-17 重定向：从「项目普查」转向「字段级排障导航」。
+
+- ✅ **阶段 0–2**：脚手架 + 资产复用；源码摄取 + 解析可信度报告；元数据解析（三类 dym→`MetaModel`、hex oid 回填、整包双层 zip）。
+- ✅ **阶段 3（+2/3 增补）**：元数据 `<ClassName>` ↔ 源码桥接（FQN 索引 + 前缀发现 + 五态分类 + 孤儿/常量类）；`.cr` 转换规则、转换插件桥接、插件基类孤儿（schema v5）。
+- ✅ **阶段 4**：KB 图谱存储（SQLite+FTS5 幂等重建）+ `overview`/`project_map` + 本地 Web。
+- ✅ **阶段 5+6+7（旗舰·字段级排障引擎）**：输入字段 → 列出所有读/写它的插件 + 事件函数 + 是否落库 + 行号 + 源码路径，按实体坐标 (单据·层级·分录) 分组。Java 语义层 `java/`（跨类回溯 + 数据包来源识别 + 落库三态）；schema v7；CLI `trace`/`bill`。
+- ✅ **信任优先·可信度报告**（红线 #4）：`coverage`（元数据为分母算覆盖率 + 质量分解）+ `scan-compare`（粗扫 vs 高精度→盲点/精度增量）；schema v8；Web「扫描可信度」页签。
+- ⬜ **阶段 8（业务流）拍板搁置**（2026-06-22）：折进阶段 9 按需，只用现成 BOTP 边，无数据留 unknown。
+- ✅ **阶段 9（语义解析 + ask）**：NL → 意图 → **确定性**查 KB 组装证据包（`ask` 不调 LLM，推理交段二 Skill）；消歧退出码 3。
+- ✅ **阶段 10（MCP 封装·段二接入）**：MCP Server 把取证命令暴露成工具（返回值与 CLI `--json` 同口径）；段二大模型直接读本机源码全文 + 挂苍穹 Skill（红线 #1 放松后）。schema v9。
+
+  段二接入打磨（一系列增补，主线=**堵"大模型按命名惯例猜字段名/臆断语义"**与**form_key 识别率**）：
+  - `method_calls`（2026-06-23）：野生不可编译码上的「跳转到定义」——给类+方法 → 只回项目内被调方法（目标类/源文件/行）；源码全文与"在干嘛"交大模型读。
+  - `dynwrites` + 动态写入分类（2026-06-24）：字段 key 钉不出的写入按 `key_resolution` 细分，折叠成「该读方法」清单交段二读源码定性。
+  - `resolve_fields`（2026-06-25）：O(1) 字段名核对（标识→真实中文名+坐标，覆盖 field+entity 两表，钉不出回 null）。
+  - 模式 B 语义增强（2026-06-25）：把已核对 `field_name` + 事件 `semantics_topic` **焊进导航工具返回值**（host 无钩子，唯一必读的硬信息是工具返回值）；`semantic/hints.py`。
+  - `read_source`（模式 A，2026-06-25）+ 三档置信消歧（2026-06-26）：读源码走我们的工具（野生编码正确解码 + 自动标注字段名）；同名跨单据按本文件 `form_key` 收敛为 unique/resolved/⚠️ambiguous，绝不默认当前单据。
+  - **MCP 工具面精简 10→7**（2026-06-28）：审计工具（coverage/scan-compare/dynwrites）下沉 CLI-only，段二只留 7 个排障主路径工具。
+
+  form_key 识别率系列（信任优先，真实库 NULL **60.3%→34.07%**，0 改写、不臆造，详见 `docs/数据包来源与form_key解析合并.md`）：
+  - 绑定回落 + 泛型集合建模（→56.1%）；字段 key 反查元数据三层回填 + addNew 习语（→34.6%，schema **v10** 加 `form_key_source` 诚实区分数据流证明/元数据反推）。
+  - 提高字段扫描率（模型形参识别 + 内联集合链）：补回此前**完全扫不出**的写入 +705 行。
+  - 孤立方法反向调用图回填（`reverse_callgraph`，固定点传播）：回填 218 条。**结论：红线内已无安全的高收益 form_key 提升空间。**
+  - **trace 防 MCP 32KB 截断**（2026-06-27）：MCP 走紧凑投影 `trace_compact`（写/读拆分 + 按类合并 + 字节 governor + 游标分页），真实总数恒在 summary、被 cap 量可翻页取回（红线 #4）。
+  - **null_reason 落库 + 暴露**（2026-06-28，schema **v11**，当前转向）：给每条 `form_key=None` 打互斥成因码（`java/null_reason.py`，7 码），告诉段二/人「这行为何 None、该不该追」；暴露在 trace/coverage/web/MCP。**未改任何 form_key 判定逻辑。**
+
+> ⚠️ MCP server 常驻，改 MCP/取证源码后需**重连/重启 MCP** 才生效；改 schema 后需 `cosmic_kb build` 重建 KB。
 
 ## 常用命令（Windows / PowerShell）
 
 ```powershell
 pip install -e ".[parse,encoding,dev,fuzzy,mcp]"  # 解析+编码+测试+模糊匹配+MCP（fuzzy/mcp 可选）
-pytest -q                                # 跑测试（当前 278 passed）
+pytest -q                                # 跑测试（当前 330 passed）
 cosmic_kb --version                      # 版本
 cosmic_kb doctor                         # 资产体检（需 skill_assets/ok-cosmic-docs.db）
 cosmic_kb ingest "<项目源码根>"          # 阶段1：摄取 + 覆盖率/可信度报告（--json 可留档）
@@ -240,8 +107,8 @@ cosmic_kb mcp                            # 阶段10：起 MCP 服务器，把取
   **codex 负责测试 + git 提交**。Claude 改完代码即写/改对应验收结论，不自己跑测试套件、
   不自己 `git commit`；交给 codex 跑 `pytest -q` 与提交。
 - 每个新功能仍需配 `tests/` 测试用例（Claude 写用例，codex 负责执行验证不回归）。
-- 后续凡是做 `form_key` 识别率优化，测试完成后必须同步更新
-  `docs/数据包来源与form_key解析合并.md` 的"当前识别情况"统计。
+- 后续凡是做 `form_key` 识别率优化，测试完成后必须同步刷新
+  `docs/数据包来源与form_key解析合并.md` 的 **§2「当前识别情况」两张统计表**（总体定位率 + 来源依据分布）。
 - **工作纪律：一个阶段 ≈ 一个会话。** Claude 开发 → 写测试用例 → 更新 `docs/阶段验收.md`
   → 用户人工验收 → codex 跑测试 + git 提交 → 开新会话做下一阶段，保持上下文干净。
 - 重要决策/架构取舍写进 `docs/`，不要只留在对话里。

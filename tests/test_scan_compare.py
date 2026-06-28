@@ -158,9 +158,9 @@ def _kb(tmp_path: Path) -> sqlite3.Connection:
     def fa(fkey, access):
         return ("f1", fkey, "header", None, "cqspb.P", "form", "cqspb.P",
                 "ev", "transaction", access, "yes" if access == "write" else "na",
-                "r", "set", 1, "[]", "literal", 1.0, "P.java", "", "data_flow")
+                "r", "set", 1, "[]", "literal", 1.0, "P.java", "", "data_flow", None)
     conn.executemany(
-        "INSERT INTO field_access VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO field_access VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [fa("a", "write"), fa("b", "read")])
 
     conn.executemany(

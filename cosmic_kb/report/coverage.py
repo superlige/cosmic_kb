@@ -19,6 +19,7 @@ import json
 from typing import Any
 
 from ..graph import store
+from ..java import null_reason as nr
 
 # 业务字段（覆盖率分母）：实体字段 / 动态字段 / 基础资料属性 —— 项目真正自定义、可能被代码
 # 读写的字段。平台字段(platform，如 id/billno)与继承字段(inherited)是框架给的，不纳入分母
@@ -153,12 +154,20 @@ def coverage(conn) -> dict[str, Any]:
     unknown_level = conn.execute(
         "SELECT COUNT(*) FROM field_access WHERE form_key IS NOT NULL AND level='unknown'"
     ).fetchone()[0]
+    # 未定位成因分布（信任优先）：把「未定位单据」从一个不透明数字拆成确定性成因——哪些是
+    # 「正确 None」（基础资料/动态实体，无需追）、哪些值得段二顺源码反推（helper/容器/model）。
+    unlocated_reasons = {r["null_reason"] or nr.UNKNOWN: r["n"] for r in conn.execute(
+        "SELECT null_reason, COUNT(*) n FROM field_access WHERE form_key IS NULL "
+        "GROUP BY null_reason ORDER BY n DESC")}
+    correct_none = sum(v for k, v in unlocated_reasons.items() if k in nr.CORRECT_NONE_REASONS)
     location_quality = {
         "total": loc_total,
         "located": located,
         "unlocated_form": unlocated_form,
         "unknown_level": unknown_level,
         "located_rate": _rate(located, loc_total),
+        "unlocated_reasons": unlocated_reasons,
+        "unlocated_correct_none": correct_none,   # 这部分本就该 None，不计入「待救」
     }
 
     # ── 质量分解③：落库判定（仅写入；yes/no 为确定，unknown 为存疑）─────────────
@@ -321,6 +330,12 @@ def render_coverage(c: dict[str, Any], *, max_list: int = 20) -> str:
     lines.append(
         f"  ② 来源单据定位     {_bar(lq['located_rate'], 16)} {_pct(lq['located_rate'])}  "
         f"（未定位单据 {lq['unlocated_form']} · 层级未知 {lq['unknown_level']}）")
+    if lq.get("unlocated_reasons"):
+        cn = lq.get("unlocated_correct_none", 0)
+        lines.append(
+            f"     未定位成因（共 {lq['unlocated_form']}，其中本就该 None 约 {cn}，无需追）：")
+        for k, v in lq["unlocated_reasons"].items():
+            lines.append(f"       · {nr.REASON_LABEL.get(k, k)}：{v}")
     lines.append(
         f"  ③ 落库判定确定     {_bar(pq['certain_rate'], 16)} {_pct(pq['certain_rate'])}  "
         f"（落库 {pq['persisting']} / 内存 {pq['memory_only']} / 存疑 {pq['uncertain']}，共 {pq['write_total']} 写）")

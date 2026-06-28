@@ -28,6 +28,7 @@ from . import ast_index as ax
 from . import call_graph as cgmod
 from . import event_extractor as events
 from . import field_access as fa
+from . import null_reason as nrmod
 from . import persistence as persist
 from . import plugin_classifier as classifier
 from . import project_graph as pgmod
@@ -76,6 +77,9 @@ class FieldAccessRow:
     source_relpath: str
     evidence: str | None = None
     form_key_source: str | None = None  # form_key 来源：data_flow / metadata_*（反查回填）/ None
+    # 未定位成因：form_key=None 时**为何** None（信任优先，红线 #4）。由 _finalize_null_reason 在全部
+    # 回填后定稿，取值见 java/null_reason.py；form_key 已定位则为 None（被回填救活的行也清空）。
+    null_reason: str | None = None
     # 接收者基变量名：仅供 _backfill_form_key 做同对象共现交集分组，不落库（store INSERT 不含它）。
     receiver_var: str | None = None
 
@@ -184,6 +188,8 @@ def analyze(
     _backfill_form_key(result, field_idx, bound_entity)
 
     result.field_accesses = _dedup(result.field_accesses)
+    # ── 未定位成因定稿（信任优先）：全部回填之后，给仍 form_key=None 的行打结构化成因 ──────────
+    _finalize_null_reason(result)
     result.const_table = const          # 暴露给粗扫侧复用（信任手段二）
     return result
 
@@ -204,6 +210,16 @@ def _dedup(rows: list[FieldAccessRow]) -> list[FieldAccessRow]:
         seen.add(k)
         out.append(r)
     return out
+
+
+def _finalize_null_reason(result: AnalysisResult) -> None:
+    """未定位成因定稿（信任优先，红线 #4）：全部回填**之后**，给每条 form_key=None 的行打结构化成因。
+
+    单一真源在 `java/null_reason.classify`（定稿层与 trace/coverage/web 共用同口径）：form_key 已定位
+    （含被反向调用图/元数据回填救活的行）→ 成因清空（None）；仍 None → 按优先级归一个互斥成因码。
+    """
+    for r in result.field_accesses:
+        r.null_reason = nrmod.classify(r)
 
 
 def _field_form_index(

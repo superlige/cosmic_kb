@@ -140,7 +140,7 @@ def test_trace_dict_is_bounded(tmp_path: Path):
     assert len(ft["possible"]) <= field_trace._CAP_POSSIBLE
     # unlocated 现为「反推来源单据」工作单 dict（非平铺行）。
     ul = ft["unlocated"]
-    assert set(ul) == {"total", "writes", "reads", "methods", "capped"}
+    assert set(ul) == {"total", "writes", "reads", "by_reason", "methods", "capped"}
     assert len(ul["methods"]) <= field_trace._CAP_UNLOCATED_METHODS
     assert len(ft["coarse"]["locations"]) <= field_trace._CAP_COARSE
     # 真实总数仍在 summary（不丢数）。

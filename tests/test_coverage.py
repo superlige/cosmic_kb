@@ -13,6 +13,7 @@ import sqlite3
 from pathlib import Path
 
 from cosmic_kb.graph import store
+from cosmic_kb.java import null_reason as nr_mod
 from cosmic_kb.report import coverage
 
 
@@ -46,9 +47,12 @@ def _kb_with_fields(tmp_path: Path) -> sqlite3.Connection:
     # field_access：f1.a 被写(落库,literal)、f1.b 被读(constant)；
     #   一条 form_key=NULL 的未定位写(ambiguous)；一条解析出元数据没有的 key 'zzz'。
     def fa(form, fkey, level, access, persists, res):
+        nreason = None if form else nr_mod.classify(
+            {"form_key": form, "field_key": fkey, "level": level,
+             "via": "do.set", "key_resolution": res, "evidence": ""})
         return (form, fkey, level, None, "cqspb.P", "form", "cqspb.P",
                 "ev", "transaction", access, persists, "r", "set", 1, "[]",
-                res, 1.0, "P.java", "", "data_flow" if form else None)
+                res, 1.0, "P.java", "", "data_flow" if form else None, nreason)
     accesses = [
         fa("f1", "a", "header", "write", "yes", "literal"),
         fa("f1", "b", "header", "read", "na", "constant"),
@@ -56,7 +60,7 @@ def _kb_with_fields(tmp_path: Path) -> sqlite3.Connection:
         fa("f1", "zzz", "header", "write", "no", "literal"),  # 元数据没有 zzz
     ]
     conn.executemany(
-        "INSERT INTO field_access VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", accesses)
+        "INSERT INTO field_access VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", accesses)
     conn.execute("INSERT INTO kb_meta(key,value) VALUES('java_analysis',?)",
                  ('{"available": true, "analyzed_plugins": 1, "field_access": 4}',))
     conn.commit()
