@@ -90,15 +90,22 @@ _LIST = dict([
 # 工作流插件：审批写字段，落库语义（保守标 transaction）。
 _WORKFLOW: dict[str, EventInfo] = {}
 
+# 校验器（AbstractValidator）：操作插件 onAddValidators 里 addValidator 挂载的校验逻辑，
+# 入口固定为 validate()，以读单据字段 + addErrorMessage 为主、通常不写字段（validate 相位）。
+_VALIDATOR = dict([
+    _ev("validate", "validate", "校验逻辑（读单据字段校验、报错；提交/审核报错的真凶）"),
+])
+
 EVENT_TABLE: dict[str, dict[str, EventInfo]] = {
     "form": _FORM, "op": _OP, "convert": _CONVERT,
     "writeback": _WRITEBACK, "list": _LIST, "workflow": _WORKFLOW,
+    "validator": _VALIDATOR,
 }
 
 # 种类未知时的并集表（宽松匹配；相位取各表里该名的相位，冲突优先 transaction>build>memory）。
 _PHASE_RANK = {"transaction": 3, "build": 2, "validate": 1, "memory": 1, "none": 0}
 _ALL_EVENTS: dict[str, EventInfo] = {}
-for _tbl in (_OP, _CONVERT, _WRITEBACK, _FORM, _LIST):
+for _tbl in (_OP, _CONVERT, _WRITEBACK, _FORM, _LIST, _VALIDATOR):
     for _n, _info in _tbl.items():
         cur = _ALL_EVENTS.get(_n)
         if cur is None or _PHASE_RANK[_info.phase] > _PHASE_RANK[cur.phase]:

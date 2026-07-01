@@ -328,6 +328,24 @@ def _fields(*keys):
                       "cqkd_bill") for k in keys]
 
 
+# 独立校验器（AbstractValidator）：op 插件 onAddValidators 里 new 出来挂载、不进元数据绑定。
+# 此前一律落成 orphan_role='unknown'、plugin_type='service'，bill/plugin 看不到——
+# 现应识别为 kind='validator'，validate() 作入口、读单据字段（提交/审核报错真凶）。
+VALIDATOR_PLUGIN = """package cqspb.am;
+import kd.bos.entity.validate.AbstractValidator;
+import kd.bos.entity.ExtendedDataEntity;
+public class AmValidator extends AbstractValidator {
+  public void validate() {
+    ExtendedDataEntity[] ds = getDataEntities();
+    for (ExtendedDataEntity d : ds) {
+      Object v = d.getDataEntity().get("cqkd_valf");
+      if (v == null) { addErrorMessage(d, "请填写"); }
+    }
+  }
+}
+"""
+
+
 def _build(tmp_path: Path):
     src = tmp_path / "src"
     _w(src / "AmFormPlugin.java", FORM_PLUGIN)
@@ -352,12 +370,14 @@ def _build(tmp_path: Path):
     _w(src / "AmArrayOp.java", ARRAY_PARAM_OP)
     _w(src / "AmHelperPlugin.java", HELPER_PLUGIN)
     _w(src / "AmListParamPlugin.java", LISTPARAM_PLUGIN)
+    _w(src / "AmValidator.java", VALIDATOR_PLUGIN)
     scan = scanner.scan(src)
 
     ents = [MetaEntity("BillEntity", "cqkd_bill", "单据头", "1", "header", None, "t"),
             MetaEntity("EntryEntity", "cqkd_entry", "分录", "2", "entry", "1", "te"),
             MetaEntity("SubEntryEntity", "cqkd_sub", "子分录", "3", "subentry", "2", "ts")]
-    flds = _fields("cqkd_head", "cqkd_entryf", "cqkd_subf", "cqkd_amount", "cqkd_status")
+    flds = _fields("cqkd_head", "cqkd_entryf", "cqkd_subf", "cqkd_amount", "cqkd_status",
+                   "cqkd_valf")
     ops = [MetaOperation("submit", "提交", "submit", None, None, resolved_from="self"),
            MetaOperation("calc", "计算", "donothing", None, None, resolved_from="self"),
            MetaOperation("calc2", "计算2", "donothing", None, None, resolved_from="self"),
@@ -691,6 +711,39 @@ def test_unbound_webapi_entry(tmp_path: Path):
         assert r["plugin_type"] == "webapi"
         assert r["form_key"] == "cqkd_assetcollateral"        # loadSingle 第 2 参实体
         assert r["persists"] == "yes"
+    finally:
+        conn.close()
+
+
+def test_validator_entry(tmp_path: Path):
+    """独立校验器（AbstractValidator）识别为 kind='validator'：validate() 作入口、读字段被抓到。
+
+    回归 docs/动作车道词表.md 附录 B 的盲区：此前校验器落 orphan_role='unknown'、
+    plugin_type='service'、plugin_method 全 helper、bill/plugin 看不见。修复后：
+      * field_access.plugin_type='validator'、event_method/phase='validate'；
+      * 读到的字段 key 经反查回填来源单据（校验器读单据字段、不写）；
+      * source_class 里该类 orphan_role='plugin'、plugin_base='AbstractValidator'。
+    """
+    db, _ = _build(tmp_path)
+    conn = store.open_kb(db)
+    try:
+        r = conn.execute(
+            "SELECT plugin_fqn,plugin_type,event_method,event_phase,access,form_key "
+            "FROM field_access WHERE field_key='cqkd_valf'").fetchone()
+        assert r is not None, "校验器 validate() 里读的字段必须被抓到"
+        assert r["plugin_fqn"] == "cqspb.am.AmValidator"
+        assert r["plugin_type"] == "validator"               # 不再是 service
+        assert r["event_method"] == "validate"
+        assert r["event_phase"] == "validate"
+        assert r["access"] == "read"                         # 校验器读字段校验、不写
+        assert r["form_key"] == "cqkd_bill"                  # 字段 key 唯一反查回填来源单据
+        # 孤儿角色：识别为 plugin（命中苍穹基类），不再是 unknown。
+        sc = conn.execute(
+            "SELECT orphan_role,plugin_base FROM source_class "
+            "WHERE fqn='cqspb.am.AmValidator'").fetchone()
+        assert sc is not None
+        assert sc[0] == "plugin"
+        assert sc[1] == "AbstractValidator"
     finally:
         conn.close()
 

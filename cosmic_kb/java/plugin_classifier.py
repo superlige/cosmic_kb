@@ -20,6 +20,7 @@ _BASE_TO_KIND: dict[str, str] = {
     "AbstractListPlugin": "list", "AbstractTreeListPlugin": "list",
     "StandardTreeListPlugin": "list", "AbstractMobListPlugin": "list",
     "AbstractOperationServicePlugIn": "op",
+    "AbstractValidator": "validator",
     "AbstractConvertPlugIn": "convert",
     "AbstractWriteBackPlugIn": "writeback",
     "BatchImportPlugin": "import",
