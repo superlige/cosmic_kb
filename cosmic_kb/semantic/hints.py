@@ -68,6 +68,34 @@ _PLUGIN_TYPE_TOPIC = {
 }
 
 
+# ── 轴 A · 场景/插件类型车道（bill 单据绑定插件分流）─────────────────────────
+# 顾问真实排障是「动作优先」：报某动作出问题 → 进对应单据该场景的插件。轴 A 把单据绑定插件
+# 先按"属于哪类场景"切开（外层分组，对每个插件无条件适用）。plugin_type → (lane_id, 中文label,
+# 一句触发场景语义)；列表顺序即排障优先级（op+form 主力在前）。语义句取自 references/base/plugin/*.md。
+# 注意：只覆盖单据绑定的 5 类 plugin_type；validator/task/report 等孤儿无 form_key、不进 plugin 表，
+# 归后续"孤儿类型目录旁路"，不在本车道词表里（诚实降级为"单据绑定插件的分流"，非完整清单）。
+PLUGIN_LANE_ORDER = ["op", "form", "list", "writeback", "convert"]
+_PLUGIN_LANE: dict[str, tuple[str, str, str]] = {
+    "op": ("operation", "操作插件",
+           "单据预制操作(save/submit/audit…)的服务端事务逻辑；报「保存/提交/审核报错、之后某值变了」看这里"),
+    "form": ("form", "界面插件",
+             "界面打开/字段联动/按钮点击等 UI 交互；报「打开就错、选了X带出Y、点按钮没反应」看这里"),
+    "list": ("list", "列表插件",
+             "列表查询/过滤/列/行交互；报「列表数据/过滤/列不对」看这里"),
+    "writeback": ("writeback", "反写插件",
+                  "下游→上游数量金额回写/超额检查；报「上游没回写、超额放过/卡住」看这里"),
+    "convert": ("convert", "转换插件",
+                "下推/选单生成目标单据字段映射；报「下推带不出/带错、分单合单」看这里"),
+}
+
+
+def plugin_lane(plugin_type: str | None) -> tuple[str, str, str]:
+    """plugin_type → (lane_id, 中文label, 一句触发场景语义)。词表外的类型归 other 兜底，不吞。"""
+    if plugin_type and plugin_type in _PLUGIN_LANE:
+        return _PLUGIN_LANE[plugin_type]
+    return ("other", "其他插件", "")
+
+
 def event_topic(event_method: str | None = None, plugin_type: str | None = None) -> str | None:
     """事件方法/插件类型 → 苍穹语义文档主题 stem；无可路由（纯工具方法等）返回 None。"""
     if event_method and event_method in _EVENT_TOPIC:

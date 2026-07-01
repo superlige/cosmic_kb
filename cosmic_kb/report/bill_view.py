@@ -87,12 +87,20 @@ def bill_view(conn, key: str) -> dict[str, Any] | None:
     # 风险：有 project 插件却找不到源码 / 歧义。
     risk_bindings = [b for b in bindings if b["status"] in ("missing", "ambiguous")]
 
+    # 轴 A · 场景/插件类型分流：把平铺插件清单按 plugin_type 切成带语义的车道（叠加视图，
+    # 不替换 plugins 平铺）。binding 命中态挂到插件上，便于渲染层标「未命中源码」风险。
+    # 平台预制插件（kd.bos.*）不进车道，但计数诚实呈现（红线 #4，不静默丢）。
+    plugin_lanes = _build_plugin_lanes(plugins, bindings)
+    platform_plugins_excluded = sum(1 for p in plugins if p.get("source") == "platform")
+
     return {
         "form": dict(form),
         "entities": entities,
         "fields": fields,
         "operations": operations,
         "plugins": plugins,
+        "plugin_lanes": plugin_lanes,
+        "platform_plugins_excluded": platform_plugins_excluded,
         "bindings": bindings,
         "field_touch": field_touch,
         "entity_touch": list(entity_touch.values()),
@@ -103,6 +111,48 @@ def bill_view(conn, key: str) -> dict[str, Any] | None:
             "touched_fields": len(field_touch),
         },
     }
+
+
+def _build_plugin_lanes(
+    plugins: list[dict[str, Any]], bindings: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """轴 A：按 plugin_type 把插件分成带语义的场景车道（op+form 主力在前，空车道不出现）。
+
+    只覆盖单据绑定的 5 类 plugin_type；词表外的类型归 `other` 车道兜底（不吞）。每车道附一句
+    触发场景语义 + 语义文档路由（判触发时机/是否入库前先 cosmic_semantics）。孤儿插件（validator/
+    task/report 等无 form_key）本就不进 plugin 表，故不在此分流——归后续「孤儿类型目录旁路」。
+
+    **平台预制插件（source=platform，即 kd.bos.* 前缀）排除在车道外**：它们由平台提供、无源码、
+    不是二开排障目标，列进车道只会淹没真正要看的项目插件。排除数量由调用方另计并诚实呈现（不静默丢）。
+    """
+    # binding 命中态：class_name → status（missing/ambiguous 提示"未命中源码"）。
+    status_by_cls = {b["class_name"]: b["status"] for b in bindings}
+    # 车道桶：lane_id → 车道 dict。优先级序 = 词表 plugin_type 顺序映射成 lane_id（op→operation…），
+    # 词表外类型（other）动态垫在其后。
+    buckets: dict[str, dict[str, Any]] = {}
+    lane_order = [hints.plugin_lane(pt)[0] for pt in hints.PLUGIN_LANE_ORDER]
+    for p in plugins:
+        if p.get("source") == "platform":   # 平台预制 kd.bos.*：不进车道
+            continue
+        lane_id, label, semantic = hints.plugin_lane(p["plugin_type"])
+        slot = buckets.get(lane_id)
+        if slot is None:
+            slot = buckets[lane_id] = {
+                "lane_id": lane_id, "label": label, "semantic": semantic,
+                "semantics_topic": hints.event_topic(None, p["plugin_type"]),
+                "plugins": [], "count": 0,
+            }
+            if lane_id not in lane_order:
+                lane_order.append(lane_id)   # 未知类型（other）垫在词表车道之后
+        st = status_by_cls.get(p["class_name"])
+        slot["plugins"].append({
+            "class_name": p["class_name"], "plugin_type": p["plugin_type"],
+            "source": p["source"], "operation_key": p.get("operation_key"),
+            "operation_name": p.get("operation_name"),
+            "binding_risk": st if st in ("missing", "ambiguous") else None,
+        })
+        slot["count"] += 1
+    return [buckets[lid] for lid in lane_order if lid in buckets]
 
 
 # ── 紧凑投影（MCP 防截断）：折叠逐字段事件 + cap/字节 governor + 游标分页 ──────────────
@@ -147,6 +197,12 @@ def _slim_plugin(p: dict[str, Any]) -> dict[str, Any]:
 def _slim_binding(b: dict[str, Any]) -> dict[str, Any]:
     return {k: b.get(k) for k in
             ("class_name", "plugin_type", "status", "source_relpath", "note")}
+
+
+def _slim_lanes(lanes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """轴 A 车道的轻量索引（MCP 投影）：每车道只留 lane_id/label/语义/文档路由/计数，无逐插件行。"""
+    return [{"lane_id": ln["lane_id"], "label": ln["label"], "semantic": ln["semantic"],
+             "semantics_topic": ln["semantics_topic"], "count": ln["count"]} for ln in lanes]
 
 
 def _slim_field_meta(f: dict[str, Any]) -> dict[str, Any]:
@@ -216,6 +272,10 @@ def _build_bill_compact(
         "operations_total": len(ops),
         "plugins": [_slim_plugin(p) for p in plugins[:cap_plugins]],
         "plugins_total": len(plugins),
+        # 轴 A 轻量车道索引：只给分流语义/优先级/文档路由 + 计数，不复制逐插件行（明细在
+        # 平铺 plugins 段，各带 plugin_type，LLM 自行归位）。体积极小，不进 ladder cap。
+        "plugin_lanes": _slim_lanes(bv["plugin_lanes"]),
+        "platform_plugins_excluded": bv.get("platform_plugins_excluded", 0),
         "bindings": [_slim_binding(b) for b in binds[:cap_bindings]],
         "bindings_total": len(binds),
         "risk_bindings": [_slim_binding(b) for b in bv["risk_bindings"]],  # 通常很少，整列内联
@@ -236,7 +296,10 @@ def _build_bill_compact(
         capped = True
 
     note = ("紧凑投影（防 MCP 32KB 截断）：每字段的逐条事件已折叠为「写/落库/读」计数——要看『某字段"
-            "谁改的/在哪个事件函数/是否落库』逐字段用 `trace 单据.字段`（entity_touch 每行已给 trace 锚点）。")
+            "谁改的/在哪个事件函数/是否落库』逐字段用 `trace 单据.字段`（entity_touch 每行已给 trace 锚点）。"
+            "插件按场景车道分流见 `plugin_lanes`（操作/界面/列表/反写/转换，op+form 主力在前，带语义文档路由）；"
+            "逐插件明细在平铺 `plugins`（各带 plugin_type，按此归位）——只含单据绑定插件，孤儿类不在此。"
+            "平台预制插件 kd.bos.*（source=platform）不进车道（`platform_plugins_excluded` 计数），非二开排障目标。")
     if capped:
         note += ("各列表真实总数在 `*_total`，被 cap 截掉的段带 `*_next_cursor`，"
                  "用 `bill(key, cursor=该值)` 再调可逐页**取回全部被截条目**（不丢数）；"
@@ -329,12 +392,23 @@ def render_bill(bv: dict[str, Any], *, max_list: int = 30) -> str:
             star = "★" if o["has_plugin"] else " "
             lines.append(f"  {star} {o['key'] or '?':<18} {o['name'] or '':<10} [{o['operation_type'] or '?'}]")
 
-    if bv["plugins"]:
+    if bv.get("plugin_lanes"):
         lines.append("")
-        lines.append("【插件清单】（某事件方法调了项目内哪些方法：calls <类全限定名> <方法名>）")
-        for p in bv["plugins"]:
-            op = f" ←{p['operation_key']}" if p["operation_key"] else ""
-            lines.append(f"  [{p['plugin_type']}] {p['class_name']} ({p['source']}){op}")
+        lines.append("【插件清单·按场景分流】（单据绑定插件，不含孤儿类：调度/报表/校验器等，见 coverage 边界声明）")
+        lines.append("  （某事件方法调了项目内哪些方法：calls <类全限定名> <方法名>）")
+        for lane in bv["plugin_lanes"]:
+            lines.append("")
+            lines.append(f"  ▶ {lane['label']}（{lane['count']}）  {lane['semantic']}")
+            if lane["semantics_topic"]:
+                lines.append(f"    ↳ 判触发时机/是否入库前先 cosmic_semantics('{lane['semantics_topic']}')")
+            for p in lane["plugins"]:
+                op = f" ←{p['operation_key']}" if p["operation_key"] else ""
+                warn = f"  ⚠{p['binding_risk']}" if p.get("binding_risk") else ""
+                lines.append(f"      [{p['plugin_type']}] {p['class_name']} ({p['source']}){op}{warn}")
+        if bv.get("platform_plugins_excluded"):
+            lines.append("")
+            lines.append(f"  （另有 {bv['platform_plugins_excluded']} 个平台预制插件 kd.bos.* 未列入车道"
+                         "：平台提供、无源码、非二开排障目标）")
 
     if bv["field_touch"]:
         lines.append("")

@@ -712,13 +712,35 @@ function renderBill(bv) {
       `${o.has_plugin ? "★ " : ""}${esc(o.key)} 「${esc(o.name || "")}」[${esc(o.operation_type || "?")}]`)));
     out.appendChild(ul);
   }
-  if (bv.plugins.length) {
-    out.appendChild(el("h3", null, "插件清单"));
-    const ul = el("ul");
-    bv.plugins.forEach((p) => ul.appendChild(el("li", null,
-      `[${esc(p.plugin_type)}] <span class="mono">${esc(p.class_name)}</span> ` +
-      `<span class="muted">(${esc(p.source)}${p.operation_key ? " ←" + esc(p.operation_key) : ""})</span>`)));
-    out.appendChild(ul);
+  // 轴 A · 插件清单按场景车道分流（单据绑定插件；孤儿类走后续类型目录旁路）。
+  const lanes = bv.plugin_lanes || [];
+  if (lanes.length) {
+    out.appendChild(el("h3", null, "插件清单·按场景分流"));
+    out.appendChild(el("p", "muted",
+      "单据绑定插件，不含孤儿类（调度/报表/校验器等，见「扫描可信度」边界声明）"));
+    lanes.forEach((lane) => {
+      const box = el("div", "group");
+      const head = el("div", "ghead");
+      head.appendChild(el("div", "glabel", `${esc(lane.label)}（${lane.count}）`));
+      head.appendChild(el("div", "gstat", esc(lane.semantic || "")));
+      box.appendChild(head);
+      if (lane.semantics_topic) {
+        box.appendChild(el("p", "muted",
+          `↳ 判触发时机/是否入库前先查语义文档 ${esc(lane.semantics_topic)}`));
+      }
+      const ul = el("ul");
+      lane.plugins.forEach((p) => ul.appendChild(el("li", p.binding_risk ? "warn" : null,
+        `[${esc(p.plugin_type)}] <span class="mono">${esc(p.class_name)}</span> ` +
+        `<span class="muted">(${esc(p.source)}${p.operation_key ? " ←" + esc(p.operation_key) : ""})</span>` +
+        (p.binding_risk ? ` <span class="warn">⚠${esc(p.binding_risk)}</span>` : ""))));
+      box.appendChild(ul);
+      out.appendChild(box);
+    });
+    if (bv.platform_plugins_excluded) {
+      out.appendChild(el("p", "muted",
+        `另有 ${bv.platform_plugins_excluded} 个平台预制插件 kd.bos.* 未列入车道` +
+        "（平台提供、无源码、非二开排障目标）"));
+    }
   }
 
   // 字段触达：按实体分组（每个实体一块，块内列字段）。

@@ -230,6 +230,11 @@ def tool_bill(form_key: str, cursor: str | None = None) -> dict[str, Any]:
     『某字段谁改的/在哪个事件函数/是否落库』，对该字段用 `trace 单据.字段`（entity_touch 每行已带 trace 锚点）。
     各列表真实总数在 `*_total`；被 cap 截掉的段带 `*_next_cursor`。
 
+    **轴 A · 插件按场景车道分流**：`plugin_lanes` 给「操作/界面/列表/反写/转换」各车道的分流语义、
+    排障优先级（op+form 主力在前）与语义文档路由（`semantics_topic`，判触发时机/是否入库前先查）+ 计数；
+    逐插件明细仍在平铺 `plugins` 段（各带 `plugin_type`，按此归位到对应车道）。**只含单据绑定插件**——
+    孤儿类（调度/报表/校验器等无 form_key）不在此，归后续「孤儿类型目录」入口。
+
     **游标分页（`cursor`）——被 cap 的条目一条不丢、全部可取回**：某段被截时它带一个
     `next_cursor`（如 `"fields@60"` / `"entity_touch@80"` / `"plugins@40"`）。要看被截掉的条目，
     **把该值原样作 `cursor=` 再调一次本工具** `bill(form_key, cursor='fields@60')`，返回 `page.items`
