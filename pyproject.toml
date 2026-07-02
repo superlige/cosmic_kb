@@ -25,6 +25,8 @@ encoding = ["charset-normalizer>=3.0"]
 fuzzy = ["rapidfuzz>=3.0"]
 # 段二接入：MCP 服务器（把取证命令暴露成 MCP 工具供 LLM 宿主调用）
 mcp = ["mcp>=1.0"]
+# 底层库元数据源：直连苍穹平台库（只读）取原厂/扩展元数据。当前实现 PostgreSQL
+postgres = ["psycopg2-binary>=2.9"]
 # 开发与验收
 dev = ["pytest>=7"]
 

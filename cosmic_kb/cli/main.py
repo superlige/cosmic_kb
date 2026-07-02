@@ -644,6 +644,69 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
     return mcp_server.serve()
 
 
+def _cmd_db_meta(args: argparse.Namespace) -> int:
+    """从苍穹底层库（只读）按 fnumber 取 form+entity 元数据，合成 MetaModel。
+
+    动机见 docs/扩展元数据识别方案.md：拿回原厂标准单据的完整字段，补齐扩展单据半盲。
+    """
+    from ..dbmeta import DbMetaReader, load_config, sample_config_text
+    from ..dbmeta.config import find_config_file, DEFAULT_CONFIG_NAMES
+
+    # --init-config：生成配置模板后退出（不连库）。
+    if getattr(args, "init_config", False):
+        target = Path(args.config) if args.config else Path(DEFAULT_CONFIG_NAMES[0])
+        if target.exists():
+            print(f"配置文件已存在，未覆盖: {target}", file=sys.stderr)
+            return 2
+        target.write_text(sample_config_text(), encoding="utf-8")
+        print(f"已生成配置模板: {target}（填好后口令建议用环境变量 COSMIC_DB_PASSWORD）")
+        return 0
+
+    try:
+        cfg = load_config(args.config)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 2
+
+    try:
+        with DbMetaReader(cfg) as reader:
+            if getattr(args, "check", False):
+                info = reader.ping()
+                if args.json:
+                    print(json.dumps(info, ensure_ascii=False, indent=2))
+                else:
+                    print(f"连接成功（只读）: {cfg.driver}@{cfg.host}:{cfg.port}/{cfg.read_database}")
+                    for table, st in info["tables"].items():
+                        if st["ok"]:
+                            print(f"  {table:<22} 可读，共 {st['count']} 行")
+                        else:
+                            print(f"  {table:<22} 读取失败: {st['error']}")
+                return 0
+
+            if not args.fnumber:
+                print("错误: 需提供元数据标识 fnumber（或用 --check 仅测连接）", file=sys.stderr)
+                return 2
+            model = reader.read_model(args.fnumber)
+    except Exception as e:
+        print(f"错误: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(model.to_dict(), ensure_ascii=False, indent=2))
+        return 0
+
+    db_fields = [f for f in model.fields if f.db_column]
+    print(f"# {model.key}  {model.name or ''}  [{model.form_type}]  来源: 底层库 {cfg.read_database}")
+    print(f"实体 {len(model.entities)} · 字段 {len(model.fields)}（落库 {len(db_fields)}）"
+          f" · 操作 {len(model.operations)} · 插件 {len(model.plugins)}")
+    proj = [p.class_name for p in model.plugins if p.source == "project"]
+    if proj:
+        print(f"项目插件 {len(proj)} 个: " + "、".join(proj[:8]) + (" …" if len(proj) > 8 else ""))
+    if model.warnings:
+        print(f"警告 {len(model.warnings)} 条（见 --json）")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cosmic_kb",
@@ -901,6 +964,18 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"KB 文件路径（默认从当前目录向上就近发现 {DEFAULT_DB}）",
     )
     mcp.set_defaults(func=_cmd_mcp)
+
+    # ── 底层库元数据源（只读）：直连平台库取原厂/扩展元数据，补齐扩展单据半盲 ─────
+    db_meta = sub.add_parser(
+        "db-meta",
+        help="从苍穹底层库（只读）按标识取 form+entity 元数据合成 MetaModel（--check 测连接）",
+    )
+    db_meta.add_argument("fnumber", nargs="?", default=None, help="元数据标识（如 bd_customer）")
+    db_meta.add_argument("--config", default=None, help="配置文件路径（默认就近找 cosmic_db.json）")
+    db_meta.add_argument("--check", action="store_true", help="仅测只读连接 + 两表可读性，不取具体元数据")
+    db_meta.add_argument("--init-config", dest="init_config", action="store_true", help="生成配置模板后退出")
+    db_meta.add_argument("--json", action="store_true", help="输出 MetaModel 完整 JSON 快照")
+    db_meta.set_defaults(func=_cmd_db_meta)
 
     return parser
 

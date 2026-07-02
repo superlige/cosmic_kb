@@ -11,6 +11,8 @@ dist/
 comic-understand-long/.cosmic-understand/config.json
 comic-understand-long/.cosmic-understand/ok-cosmic.json
 .claude/settings.local.json
+cosmic_db.json
+.cosmic_db.json
 
 # 验收 / 运行临时产物
 coverage.json
