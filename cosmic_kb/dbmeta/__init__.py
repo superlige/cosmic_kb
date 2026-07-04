@@ -13,16 +13,26 @@
     connection.py  只读驱动抽象 + PostgresDriver（SQL 白名单 + 会话只读 + 永不提交）
     reader.py      按 fnumber 取两表 fdata → 合成 MetaModel；ping 自检
     assemble.py    两段 fdata XML 套回 DeployMetadata 骨架 → 复用 metadata.parse_element（零改动）
+    discover.py    发现代码库里引用到、本地元数据没有的候选原厂 key（三类确定性信号：
+                   扩展母体 / ORM 查询 / 操作执行，命中即必摄取）
+    integrate.py   把 --vendor 指定的原厂 fnumber 拉取/合并进 build/bridge 的 models 列表
 """
 
 from .assemble import assemble_model
 from .config import DbConfig, load_config, sample_config_text
+from .discover import VendorCandidate, discover_candidates, known_keys_from_db, isv_prefixes_from_db
+from .integrate import apply_vendor_metadata
 from .reader import DbMetaReader
 
 __all__ = [
     "DbConfig",
     "DbMetaReader",
+    "VendorCandidate",
+    "apply_vendor_metadata",
     "assemble_model",
+    "discover_candidates",
+    "known_keys_from_db",
+    "isv_prefixes_from_db",
     "load_config",
     "sample_config_text",
 ]

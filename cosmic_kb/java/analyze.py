@@ -229,11 +229,19 @@ def _field_form_index(
 
     供 form_key 解不出时反查来源实体（待办一的物理硬约束：一个 DynamicObject 不可能
     `.set("cqkd_xxx")`，除非它的实体类型声明了该字段 key）。与 `field` 表口径一致（同源 `m.fields`）。
+
+    排除 `kind='platform'`（苍穹平台通用系统字段，如 `id/name/number/status/org/creator/
+    createtime/modifier/modifytime`）：这类字段语义在任意实体间通用，"某 key 在当前已知
+    元数据里只归一张单据"这件事一旦发生在通用系统字段上，往往只是因为**还没并入**其它同样
+    带这个字段的实体（如原厂元数据只选择性并入了被代码引用到的少数实体，见
+    `cosmic_kb/dbmeta/integrate.py`），不是真的语义唯一——若不排除，会让毫不相关的孤立 helper
+    被"看似确定实则臆造"地误判定位（红线 #4）。排除后这类字段只要数据流本身能追到来源仍会
+    正常定位，只是这条反查兜底对它们失效——追不到就诚实留 None，不是回归。
     """
     idx: dict[str, list[tuple[str | None, str | None, str | None]]] = {}
     for m in models:
         for f in m.fields:
-            if not f.key:
+            if not f.key or f.kind == "platform":
                 continue
             idx.setdefault(f.key, []).append((m.key, f.entity_key, f.level))
     return idx

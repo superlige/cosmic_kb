@@ -27,12 +27,12 @@ if TYPE_CHECKING:
     from ..metadata.model import MetaModel
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
-KB_SCHEMA_VERSION = "11"
+KB_SCHEMA_VERSION = "13"
 
 # DROP 顺序（FTS 虚拟表与各表；DROP TABLE 对 search 同样有效，会连带清掉 FTS 影子表）。
 _OBJECTS = [
-    "search", "edge", "coarse_field_hit", "field_access", "plugin_method", "operation",
-    "binding", "source_class", "convert_rule",
+    "search", "edge", "coarse_field_hit", "java_constant", "field_access", "plugin_method",
+    "operation", "binding", "source_class", "convert_rule",
     "plugin", "field", "entity", "form", "module", "kb_meta",
 ]
 
@@ -92,6 +92,7 @@ def build_kb(
             from ..java import analyze as java_analyze
             res = java_analyze.analyze(scan_result, models, bridge_result, index)
             counts.update(_populate_java(conn, res))
+            counts.update(_populate_java_constants(conn, res))
             counts.update(_populate_coarse(conn, scan_result, models, res))
             _write_meta(conn, counts, bridge_result, module_map, source_args)
         return counts
@@ -149,7 +150,8 @@ def _populate(
             continue
 
         forms.append((m.key, m.name, m.form_type, m.model_type, m.isv,
-                      m.app_key, mod, m.source_file))
+                      m.app_key, mod, m.source_file,
+                      1 if m.is_extension else 0, m.extends))
         if m.key:
             search.append(("form", m.key, m.name or "", mod or ""))
             if mod:
@@ -182,7 +184,7 @@ def _populate(
                 edges.append(("plugin", uid, "class", p.class_name, "bound_to", 1.0, None))
                 search.append(("plugin", p.class_name, p.operation_name or "", m.key or ""))
 
-    conn.executemany("INSERT INTO form VALUES(?,?,?,?,?,?,?,?)", forms)
+    conn.executemany("INSERT INTO form VALUES(?,?,?,?,?,?,?,?,?,?)", forms)
     conn.executemany("INSERT INTO entity VALUES(?,?,?,?,?,?)", entities)
     conn.executemany("INSERT INTO field VALUES(?,?,?,?,?,?,?,?,?)", fields)
     conn.executemany("INSERT INTO plugin VALUES(?,?,?,?,?,?,?)", plugins)
@@ -283,6 +285,22 @@ def _populate_java(conn, res) -> dict[str, Any]:
         }, ensure_ascii=False),),
     )
     return {"plugin_method": len(res.plugin_methods), "field_access": len(res.field_accesses)}
+
+
+def _populate_java_constants(conn, res) -> dict[str, Any]:
+    """全工程常量定义表 → `java_constant`（供查询期 read_source 解析 `类.常量` 引用）。
+
+    `res.const_table.records` 逐条留证（不去重、不按 by_class 折叠），查询侧靠 (class_name,
+    const_name) 分组自行判断「唯一」还是「多处定义字面值不同」的歧义（红线 #4，见 schema.sql）。
+    tree-sitter 未装时 res.const_table 为 None，空表、计数 0（与 java_available 口径一致）。
+    """
+    const_table = getattr(res, "const_table", None)
+    if const_table is None:
+        return {"java_constant": 0}
+    conn.executemany(
+        "INSERT INTO java_constant VALUES(?,?,?,?,?)", const_table.records,
+    )
+    return {"java_constant": len(const_table.records)}
 
 
 # 业务字段标识（字面量或常量名）作 get/set/getValue/setValue 首参 → 更强的读写信号。

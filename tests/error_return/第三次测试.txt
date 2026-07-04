@@ -1,0 +1,140 @@
+mcp调用：
+mcp__cosmic_kb__ask
+534 ms
+
+{
+  "question": "解析 InvoiceWriteBackTask.execute 方法的作用"
+}
+mcp__cosmic_kb__read_source
+
+{
+  "relpath": "am_business/src/main/java/cqkd/am/sys/task/invoiceapply/InvoiceWriteBackTask.java",
+  "start_line": 30,
+  "end_line": 210
+}
+mcp__cosmic_kb__read_source
+
+{
+  "relpath": "am_business/src/main/java/cqkd/am/sys/task/invoiceapply/InvoiceWriteBackTask.java",
+  "cursor": "content@110",
+  "end_line": 210
+}
+
+
+llm-return:
+好，不调 MCP，只用本会话中已有的缓存结果逐条溯源。
+
+---
+
+## 源码中所有实体和字段的中文名来源（逐条标注）
+
+### 一、表单级实体（form_key）
+
+出现在 `BusinessDataServiceHelper.load("xxx", ...)` 中的 form_key，以及它们中文名的**来源位置**：
+
+| form_key | 我的中文名 | 来源（本会话中哪次 MCP 返回的） |
+|---|---|---|
+| `sim_original_bill` | **未给出中文名** ← 我上次没写这个的中文名，只写了"发票云开票申请"——这是根据 `textfield1` 字段内容（资产申请单号）推断的，**MCP 未返回** |
+| `sim_bill_inv_relation` | **未给出中文名** ← 同上，只说"发票关系表"，**MCP 未返回** |
+| `sim_vatinvoice` | ~~增值税发票~~ → 更正为 **发票查询** | 第 3 轮 `ask("sim_vatinvoice 是什么单据")` → `evidence.form.name: "发票查询"` |
+| `cqkd_invoic_apply` | 开票申请 | **MCP 未显式返回表单名**。`read_source` 的 `field_names` 里它只作为 `coordinates[].form_key` 出现——那只是"某字段属于这张单据"，不给表单本身的中文名。我写的"开票申请"是从 `cqkd_invoic`≈"开票" + `apply`≈"申请" 推断的。❌ **无 MCP 来源** |
+| `cqkd_contractbill` | 合同账单 | **MCP 未显式返回表单名**。`field_names` 中 `cqkd_contractbill` 标注为 `ambiguous`（既是分录容器又是基础资料字段），仅出现在 `field_type` 和 `access` 中，没有 `name` 返回。❌ **无 MCP 来源** |
+| `cqkd_skdb` | 收款单 | **MCP 未显式返回表单名**。出现在 `field_names` 作为 `also_in_forms` 列表中的一项。❌ **无 MCP 来源** |
+| `cqkd_zkd` | ~~转账单~~ → 更正为 **转款单** | 第 3 轮 `ask("cqkd_zkd 是什么单据")` → `evidence.form.name: "转款单"` |
+| `cqkd_ltyz` | 临时收入 | `read_source` field_names 中 `TemporaryStopCon.ENTITY` → `{name:"临时收入", form_key:"cqkd_ltyz"}` ✅ **来源：read_source field_names** |
+
+---
+
+### 二、分录级实体（entry_key）
+
+| entry_key | 中文名 | 来源 |
+|---|---|---|
+| `cqkd_invoiceentry` | **发票信息** | `read_source` field_names: `"cqkd_invoiceentry":{"tier":"unique","names":["发票信息"],"coordinates":[... "kind":"entry","name":"发票信息","form_key":"cqkd_invoic_apply"}` ✅ |
+| `cqkd_zrzd` | **转入账单** | 第 3 轮 `ask("cqkd_zkd 是什么单据")` → `evidence.entities[1]: {"key":"cqkd_zrzd","name":"转入账单","level":"entry"}` ✅ |
+| `cqkd_zczd` | **转出账单** | 同上 → `evidence.entities[0]: {"key":"cqkd_zczd","name":"转出账单"}` ✅ |
+| `cqkd_skmxb` | **收款明细** | ⚠️ **MCP 未返回中文名**，仅源码中出现 |
+| `cqkd_skmxb_fylx` | **费用类型** | 出现于 `field_names` 但作为 entry_key 而非 field_key |
+| `TemporaryStopCon.ENTITY` | **临时收入** | 见上，常量被解析为字面值 `cqkd_ltyz`，entity name "临时收入" ✅ |
+
+---
+
+### 三、字段级（field_key）
+
+#### 3.1 写入字段（writes）——来自 `ask` 返回的 `fields.writes`
+
+| field_key | 中文名 | 来源 | persists |
+|---|---|---|---|
+| `cqkd_totalamount` | 价税合计 | `ask.fields.writes[0].field_name="价税合计"` ✅ + `read_source` 中 `FacturateCon.ENTRY5_TOTALAMOUNT` 常量解析为 `cqkd_totalamount` ✅ | yes |
+| `cqkd_invaliddate` | 作废日期 | `ask.fields.writes[1].field_name="作废日期"` ✅ | yes |
+| `cqkd_invoiceid` | 发票id | `ask.fields.writes[2].field_name="发票id"` ✅ | yes |
+| `cqkd_invoicestatus` | 开票情况 | `ask.fields.writes[3].field_name="开票情况"` ✅ | yes |
+| `cqkd_bule_date` | 开票日期 | `ask.fields.writes[4].field_name="开票日期"` ✅ | yes |
+| `cqkd_bule_num` | 蓝字发票号码 | `ask.fields.writes[5].field_name="蓝字发票号码"` ✅ | yes |
+| `cqkd_bule_code` | 蓝字发票代码 | `ask.fields.writes[6].field_name="蓝字发票代码"` ✅ | yes |
+| `cqkd_red_date` | 红冲日期 | `read_source.field_names.cqkd_red_date.names[0]="红冲日期"` ✅ | yes |
+| `cqkd_red_num` | 红字发票号码 | `read_source.field_names.cqkd_red_num.names[0]="红字发票号码"` ✅ | yes |
+| `cqkd_red_code` | 红字发票代码 | `read_source.field_names.cqkd_red_code.names[0]="红字发票代码"` ✅ | yes |
+| `cqkd_red_amount` | 红冲金额 | `read_source.field_names.cqkd_red_amount.names[0]="红冲金额"` ✅ | yes |
+
+#### 3.2 读取字段（reads）——来自 `ask` 返回的 `fields.reads`
+
+| field_key | 中文名 | 来源 | 备注 |
+|---|---|---|---|
+| `tbillno` | 目标单单据编号 | `ask.fields.reads[0]` ✅ | 来自 `sim_bill_inv_relation` |
+| `issuestatus` | 开票状态 | `ask.fields.reads[1]` ✅ | 来自 `sim_vatinvoice` |
+| `originalinvoiceno` | — | `ask.fields.reads[2].field_name=null` ❌ **MCP 未返回**，但同字段在 `sim_vatinvoice` 下被标注为"原蓝票发票号码"(reads[10]) | ⚠️ 第一个出现时 field_name=null |
+| `invoiceno` | 发票号码 | `ask.fields.reads[3]` ✅ | |
+| `invoicecode` | 发票代码 | `ask.fields.reads[4]` ✅ | |
+| `invoicestatus` | 发票状态 | `ask.fields.reads[5]` ✅ | |
+| `issuetype` | 开票类型 | `ask.fields.reads[6]` ✅ | |
+| `issuetime` | 开票日期 | `ask.fields.reads[7]` ✅ | |
+| `totalamount` | 价税合计 | `ask.fields.reads[8]` ✅ | |
+| `invaliddate` | 作废日期 | `ask.fields.reads[9]` ✅ | |
+| `originalinvoiceno` | 原蓝票发票号码 | `ask.fields.reads[10]` ✅ | 第二次出现时有了 |
+| `cqkd_red_num` | 红字发票号码 | `ask.fields.reads[11]` ✅ | |
+| `cqkd_invoiceid` | 发票id | `ask.fields.reads[12]` ✅ | |
+| `cqkd_invoicestatus` | 开票情况 | `ask.fields.reads[13]` ✅ | |
+| `cqkd_bule_date` | 开票日期 | `ask.fields.reads[14]` ✅ | |
+| `cqkd_bule_num` | 蓝字发票号码 | `ask.fields.reads[15]` ✅ | |
+| `cqkd_bule_code` | 蓝字发票代码 | `ask.fields.reads[16]` ✅ | |
+| `id` | — | `ask.fields.reads[17].field_name=null` ❌ **MCP 未返回** | 平台字段 |
+
+#### 3.3 金额分摊涉及的字段——来自 `read_source` field_names
+
+| field_key | 中文名 | 来源 |
+|---|---|---|
+| `cqkd_invoicedamount` | 已开票金额 | `read_source.field_names` 中标注为 **ambiguous**（6 张单据同名），未给唯一中文名 ⚠️ |
+| `cqkd_onwayinvoice` | 在途开票金额 | 同上 **ambiguous** ⚠️ |
+| `cqkd_remaininvoice` | 剩余可开票金额 | 同上 **ambiguous** ⚠️ |
+| `cqkd_ysrq` | 应收日期 | ❌ **MCP 未返回**（源码中仅作为 `getDate("cqkd_ysrq")` 出现，不在 field_names 里） |
+| `cqkd_fylx_zd` | 费用类型 | `read_source.field_names` ✅ tier=unique |
+| `cqkd_fylx_zdgl_zr` | 费用类型 | `read_source.field_names` ✅ tier=unique, form_key=cqkd_zkd |
+| `cqkd_zrje_zr` | — | ❌ **MCP 未返回** |
+| `cqkd_zdzj_zr` | — | ❌ **MCP 未返回** |
+| `cqkd_skmxb_ssje` | — | ❌ **MCP 未返回** |
+| `cqkd_skmxb_htzdrowid` | — | ❌ **MCP 未返回** |
+| `cqkd_skmxb_fylx` | — | ❌ **MCP 未返回** |
+| `cqkd_sourceids` | — | ❌ **MCP 未返回** |
+| `cqkd_recisrcid` | 源收款单id | `read_source.field_names` ✅ tier=unique |
+| `cqkd_sourcebilltype` | — | ❌ **MCP 未返回** |
+| `cqkd_srctransid` | — | ❌ **MCP 未返回** |
+| `cqkd_temporaryid` | 源临停月租id | `read_source.field_names` 中 `FacturateCon.TEMPORARYID` → 常量值 `cqkd_temporaryid`, name="源临停月租id" ✅ |
+
+---
+
+### 四、总结：哪些有 MCP 来源，哪些是我推断的
+
+```
+有 MCP 确定性来源的： 23 条字段/实体
+无 MCP 来源、我推断的：  6 个 form_key 中文名 + 少数 field_key
+```
+
+**完整对齐表（凭据 vs 推断）：**
+
+| 类别 | 有 MCP 证据 | 我当时推断（无 MCP 证据） |
+|---|---|---|
+| **form_key 中文名** | `sim_vatinvoice`=发票查询 ✅（第3轮ask）<br>`cqkd_zkd`=转款单 ✅（第3轮ask）<br>`cqkd_ltyz`=临时收入 ✅（read_source） | ❌ `sim_original_bill`="发票云开票申请"<br>❌ `sim_bill_inv_relation`="发票关系表"<br>❌ `cqkd_invoic_apply`="开票申请"<br>❌ `cqkd_contractbill`="合同账单"<br>❌ `cqkd_skdb`="收款单" |
+| **entry_key 中文名** | `cqkd_invoiceentry`=发票信息 ✅<br>`cqkd_zrzd`=转入账单 ✅<br>`cqkd_zczd`=转出账单 ✅ | |
+| **field_key 中文名** | 23 个字段 ✅（ask + read_source 双源校验） | ❌ `cqkd_ysrq`="应收日期"<br>❌ `cqkd_zrje_zr`="本次转入金额"(仅从相邻字段推断) |
+
+**关键教训**：`read_source` 和 `ask`（method_calls 意图）**只返回字段中文名**，不返回被 `BusinessDataServiceHelper.load("xxx")` 加载的 form_key 的中文名。要拿 form 的中文名，必须额外调 `ask("xxx 是什么单据")` 或 `bill("xxx")`——我第一轮解析时没做这一步，所以 6 个表单名是我猜的。

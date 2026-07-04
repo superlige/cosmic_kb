@@ -209,6 +209,11 @@ def _collect_materials(
     java = json.loads(store.get_meta(conn, "java_analysis") or "{}")
 
     form_names = {r["key"]: r["name"] for r in conn.execute("SELECT key,name FROM form")}
+    # 扩展别名（form.is_extension=1）：内容已并入 extends 指向的原厂 form_key
+    # （见 cosmic_kb/metadata/merge.py::build_extension_alias）。查询命中这类别名 key 时
+    # 内容必然是空的，加一句重定向提示，别让人以为"这单据没被扫到"。
+    extends_map = {r["key"]: r["extends"] for r in conn.execute(
+        "SELECT key, extends FROM form WHERE is_extension=1 AND extends IS NOT NULL")}
     entity_names = {
         (r["form_key"], r["key"]): r["name"]
         for r in conn.execute("SELECT form_key,key,name FROM entity")
@@ -407,8 +412,19 @@ def _collect_materials(
     if not java.get("available", True):
         note = "⚠ tree-sitter 未启用（pip install -e .[parse]），字段级分析为空。"
     elif not all_rows:
-        note = ("未找到任何插件读写该字段（可能：字段名有误 / 只被平台处理 / 源码未给全 / "
-                "经常量引用未解析）。")
+        if coarse["coarse_only"] > 0:
+            # 高精度（field_access）零命中，不等于源码里真没有——粗扫（字面量词法扫描）
+            # 已经在 coarse.locations 里摆了证据，只是没被结构化成 field_access 行（常见于
+            # 动态拼接/反射/高精度解析不到的写法）。红线 #4：宁可提示"去人工核实"，也不能让
+            # 这条能证明"源码里其实有命中"的信号被一句"未找到"盖过去（2026-07-03 修复：此前
+            # 这里不看 coarse，会让大模型误判"完全没有读写"）。
+            note = (f"高精度扫描（field_access）未找到任何插件读写该字段，但粗扫（源码字面量）"
+                    f"发现 {coarse['coarse_only']} 处疑似命中，见 coarse.locations——很可能是"
+                    "动态拼接/反射等高精度解析不到的写法，不代表源码里真没有读写，请人工核查"
+                    "这些位置的源码再下结论。")
+        else:
+            note = ("未找到任何插件读写该字段（可能：字段名有误 / 只被平台处理 / 源码未给全 / "
+                    "经常量引用未解析）。")
     elif precise and not rows and possible:
         note = "该精确坐标无确定命中，但本单据该字段有「可能命中（层级/分录存疑）」记录，见下。"
     elif precise and not rows and not possible and unlocated:
@@ -416,6 +432,12 @@ def _collect_materials(
     elif not precise and len(occurrences) > 1 and not form_key:
         note = (f"该字段在 {len(occurrences)} 处实体里都有定义。下面已按「单据·层级·分录」分组；"
                 f"用 元数据.[分录.[子分录.]]字段 点号格式 或点定义坐标可精确定位到某层级。")
+
+    extends_target = extends_map.get(form_key) if form_key else None
+    if extends_target:
+        redirect = (f"⚑ {form_key} 是扩展别名，内容已并入原厂单据 {extends_target}，"
+                    f"请改查 {extends_target}.{field_key}")
+        note = f"{redirect}；{note}" if note else redirect
 
     # 模式 B：被查字段的已核对中文名（占位坐标的菜单在 occurrences；这里给"单一名"便于直接采用，
     # 同 key 跨多坐标有不同名时留 None，不替选——消歧看 occurrences）。
@@ -693,11 +715,15 @@ def _build_compact(
     poss, unloc = _access_rows(m["possible"], access), _access_rows(m["unlocated"], access)
     if want_read_detail:
         res["possible"] = _mr(poss)
-        res["coarse"] = _cap_coarse(m["coarse"], cap_coarse)
-        capped_hit = capped_hit or len(m["coarse"].get("locations", [])) > cap_coarse
     else:  # None / write：展示写侧
         res["possible"] = _mw(poss)
     res["unlocated"] = _mu(unloc)
+    # 粗扫盲点：不分 access 一律带上（2026-07-03 修复）——此前只在 access='read' 时才挂
+    # `coarse` 字段，默认/写视图（writers=0 时最需要这条线索）里连 key 都不存在；大模型据此
+    # 误判"完全没有读写"，换 access='read' 重查才发现粗扫其实有命中。粗扫本就设了 cap，
+    # 常驻不会明显增大返回体积。
+    res["coarse"] = _cap_coarse(m["coarse"], cap_coarse)
+    capped_hit = capped_hit or len(m["coarse"].get("locations", [])) > cap_coarse
     if want_write:
         dw = _cap_dynamic_writers(m["dynamic_writers"], cap_dyn)
         capped_hit = capped_hit or len(m["dynamic_writers"].get("methods", [])) > cap_dyn

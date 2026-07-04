@@ -125,7 +125,9 @@ def test_compact_default_has_writers_and_reader_overview(tmp_path: Path):
     # readers_overview 只有 class_fqn + total，没有方法明细。
     for c in g["readers_overview"]["classes"]:
         assert set(c) == {"class_fqn", "total"}
-    assert "dynamic_writers" in ft and "coarse" not in ft
+    # coarse（粗扫疑似盲点）不分 access 一律带上（2026-07-03 修复：此前只在 access='read'
+    # 才挂，默认视图里 writers=0 时连这条"高精度没找到≠源码真没有"的线索都看不到）。
+    assert "dynamic_writers" in ft and "coarse" in ft
 
 
 def test_compact_access_read_only_readers(tmp_path: Path):
@@ -215,7 +217,34 @@ def test_compact_access_write_only_writers(tmp_path: Path):
     assert ft["access"] == "write"
     g = ft["groups"][0]
     assert "writers" in g and "readers" not in g and "readers_overview" not in g
-    assert "dynamic_writers" in ft and "coarse" not in ft
+    assert "dynamic_writers" in ft and "coarse" in ft   # coarse 不分 access 一律带上
+
+
+def test_compact_coarse_present_regardless_of_access_and_note_mentions_it(tmp_path: Path):
+    """真实故障复现（2026-07-03）：字段在 field_access 里零命中（writers=readers=0），但粗扫
+    （coarse_field_hit）确实见过字面量命中——此前 `coarse` 只在 access='read' 时才挂进返回值，
+    默认/写视图里连 key 都不存在，`note` 也只会说"未找到任何插件读写该字段"；大模型据此
+    误判"完全无读写"，换 access='read' 重查才看到 coarse 命中。修复后 coarse 不分 access
+    一律带上，且 note 明确提示"高精度未找到、但粗扫见 N 处，不能当作真没有"。"""
+    db = make_kb(tmp_path)
+    raw = sqlite3.connect(str(db))
+    try:
+        raw.execute("INSERT INTO coarse_field_hit VALUES(?,?,?,?)",
+                     ("ghost_only_coarse", "wild/Somewhere.java", 42, "literal"))
+        raw.commit()
+    finally:
+        raw.close()
+    conn = store.open_kb(db)
+    try:
+        for access in (None, "write", "read"):
+            ft = field_trace.trace_compact(conn, "ghost_only_coarse", access=access)
+            assert ft["summary"]["writers"] == 0 and ft["summary"]["readers"] == 0
+            assert "coarse" in ft   # 不分 access 一律带上
+            assert ft["coarse"]["coarse_only"] == 1
+            assert ft["coarse"]["locations"][0]["relpath"] == "wild/Somewhere.java"
+            assert "粗扫" in (ft["note"] or "") and "高精度" in (ft["note"] or "")
+    finally:
+        conn.close()
 
 
 # ── 集成：cap 真实总数 + 字节 governor ────────────────────────────────────────

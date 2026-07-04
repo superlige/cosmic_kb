@@ -124,12 +124,73 @@ def test_open_raises_when_kb_missing(tmp_path: Path, monkeypatch):
 
 
 def test_tools_registry_matches():
-    """TOOLS 注册表收敛到 7 个排障核心工具（防漏注册）。"""
+    """TOOLS 注册表收敛到 6 个排障核心工具（read_source 已于 2026-07-05 退役，防漏注册）。"""
     assert set(mcp_server.TOOLS) == {
         "ask", "trace", "bill", "method_calls",
-        "resolve_fields", "read_source", "cosmic_semantics"}
+        "resolve_fields", "cosmic_semantics"}
     for fn in mcp_server.TOOLS.values():
         assert callable(fn)
+
+
+def test_tool_resolve_fields_qualified_exact_match(kb_env):
+    """`"form_key.field_key"` 复合 key：cqkd_amount 跨 cqkd_assetcard/cqkd_contract 两单同名，
+    带上 cqkd_contract 限定符应精确收敛到那一条，不是不带限定符时的全部候选。"""
+    got = mcp_server.tool_resolve_fields(["cqkd_contract.cqkd_amount", "cqkd_amount"])
+    qualified = got["resolved"]["cqkd_contract.cqkd_amount"]
+    assert qualified is not None
+    assert {it["form_key"] for it in qualified} == {"cqkd_contract"}
+    # 不带限定符仍是老行为：两张单据的候选都摆出，不因为出现过复合 key 调用而变化。
+    assert {it["form_key"] for it in got["resolved"]["cqkd_amount"]} == {
+        "cqkd_assetcard", "cqkd_contract"}
+    assert "mismatched_form" not in got
+
+
+def test_tool_resolve_fields_qualified_mismatch_is_honest(kb_env):
+    """限定符是真实存在的单据，但该单据下没有这个字段：不悄悄回退成全部候选掩盖问题，
+    而是诚实报告 mismatched_form，指出该字段实际所在的单据（红线 #4）。"""
+    got = mcp_server.tool_resolve_fields(["cqkd_contract.cqkd_collateralstatus"])
+    mm = got.get("mismatched_form", {}).get("cqkd_contract.cqkd_collateralstatus")
+    assert mm is not None
+    assert mm["given_form"] == "cqkd_contract"
+    assert mm["available_forms"] == ["cqkd_assetcard"]
+    # 即便限定符不对，仍给出全局候选（不是 null），方便模型看出自己的假设错在哪。
+    resolved = got["resolved"]["cqkd_contract.cqkd_collateralstatus"]
+    assert resolved and resolved[0]["form_key"] == "cqkd_assetcard"
+
+
+def test_tool_resolve_fields_entry_and_three_part_qualifier(kb_env):
+    """真实排障复盘：模型照搬 trace 的点号坐标写法传 `"分录.字段"`/`"单据.分录.字段"`，
+    MCP 工具与 report 层同口径都应精确收敛，不再全部落空返回 null。"""
+    got = mcp_server.tool_resolve_fields(
+        ["cqkd_entry.cqkd_amount", "cqkd_assetcard.cqkd_entry.cqkd_amount"])
+    entry_only = got["resolved"]["cqkd_entry.cqkd_amount"]
+    three_part = got["resolved"]["cqkd_assetcard.cqkd_entry.cqkd_amount"]
+    assert entry_only and len(entry_only) == 1
+    assert entry_only[0]["form_key"] == "cqkd_assetcard" and entry_only[0]["level"] == "entry"
+    assert three_part and len(three_part) == 1
+    assert three_part[0]["form_key"] == "cqkd_assetcard" and three_part[0]["level"] == "entry"
+
+
+def test_tool_resolve_fields_resolves_form_name(kb_env):
+    """纯表单标识（无对应字段/实体记录，如真实排障中的 cqkd_invoic_apply）：kind=form，
+    与 report 层同口径（2026-07-05 复盘：此前模型对这类标识无工具可查，只能凭字面翻译）。"""
+    conn = sqlite3.connect(str(kb_env))
+    conn.execute(
+        "INSERT INTO form(key,name,form_type,model_type,isv,app_key,module,source_dym) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        ("cqkd_invoic_apply", "开票申请单", "bill", "BillFormModel", "cqkd", "cqkd_assets",
+         "cqkd_assets", "i.dym"),
+    )
+    conn.commit()
+    conn.close()
+
+    got = mcp_server.tool_resolve_fields(["cqkd_invoic_apply"])
+    items = got["resolved"]["cqkd_invoic_apply"]
+    assert items and len(items) == 1
+    assert items[0] == {
+        "kind": "form", "name": "开票申请单",
+        "form_key": "cqkd_invoic_apply", "form_type": "bill",
+    }
 
 
 def test_audit_tools_not_exposed_to_mcp():

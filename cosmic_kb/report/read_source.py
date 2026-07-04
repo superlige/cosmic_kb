@@ -1,10 +1,6 @@
-"""模式 A · 读项目源码并自动标注字段中文名（让段二大模型读源码走我们的工具，别用宿主原生 reader）。
+"""CLI 模式 A · 读项目源码并自动标注字段中文名（终端/人工排障用，`cosmic_kb source`）。
 
-起因：模式 B 把已核对字段名焊进 trace/bill/ask/method_calls 的返回值，但只在模型流经这些工具时生效。
-真实样本里模型走的是「method_calls 导航 → 宿主原生 reader 直接读源码 → 字段 key 只在源码正文里出现 → 猜」。
-要堵这条，唯一办法是让"读源码"这一步也走我们的工具。
-
-凭什么模型肯用而非原生 reader？给两个原生 reader 给不了的硬价值（红线 #2 野生码）：
+给两个宿主原生 reader 给不了的硬价值（红线 #2 野生码）：
   ① **正确解码**：GBK/GB2312/UTF-8±BOM 混杂，原生 reader 易乱码；本工具按建库同款编码探测，行号还与 KB 对齐。
   ② **自动标注**：扫文件里出现的字段 key（含 `KEY_X = "cqkd_x"` 的字面值——它就在源码正文里，无需常量表），
      直接打元数据词典回真实中文名+坐标，引用照抄即可，不必再按拼音猜。
@@ -19,40 +15,133 @@
                     列候选 + 指出消歧方向（看接收变量来源 dataEntity / loadSingle / getAllSonList），绝不替选、
                     不默认当前单据（红线 #4 处处置信度 + unknown）。
 
-不替模型"理解代码/复述逻辑"（那是它直接读的本职），只做"正确解码 + 字段名标注 + 归属消歧"。**仍是引导
-非强制**：模型若坚持用原生 reader、连本工具都不调，host-agnostic 拦不住——见 docs/阶段验收.md 天花板记录。
+**限定常量引用解析（2026-07-03）**：真实翻车案例——`TemporaryStopCon.ENTITY` 的字面值 `cqkd_ltyz`
+根本不出现在被分析文件的正文里（只有常量类自己的文件才有），②的"扫正文字面值"救不了，模型转而凭
+`TemporaryStopCon` 的英文语义把它猜成"临停单"（真实是"临时收入"）。现在源码正文里再扫一遍 `类.常量`
+形式的限定引用，查建库期持久化的 `java_constant` 表（`java/constants.py:ConstantTable.records`）解出
+字面值，解出后按同一套三档规则标注、`field_names` 就挂在该表达式本身（如 `"TemporaryStopCon.ENTITY"`），
+附 `resolved_constant`（字面值+定义文件/行号）。解不出（非项目常量，如 `Boolean.TRUE`）静默跳过、不当
+噪音；同名类在工程里被多处定义出不同字面值时标 ambiguous，不擅自选一个。
 
-**防 host 截断（2026-06-27）**：MCP host 对序列化后的 tool result 整体砍尾部。早期 dict 把 `content`
-排在 `field_names` 之前、尾部正好是不可替代的标注——被砍的恰是该留的，模型退回猜名。现在两手：
-① **标注在前、源码垫底**——`content` 排到 dict 最末，被截断时牺牲可重读的源码而非标注；命中 key 超
-`max_keys` 的省略数提到顶层 `keys_omitted`（截断也能从头部看到）。② **坐标瘦身**——每条坐标只留标名/
-消歧必需字段、每个 key 的候选数封顶（`max_coords`），消化 ambiguous 档几十条同名候选平铺的体积大头。
+**表单标识兜底（2026-07-04）**：真实翻车复测——`BusinessDataServiceHelper.load("cqkd_invoic_apply", ...)`
+里的字面量是**表单标识**（`form.key`），当该单据的表头实体 key 不等于表单 key 时（常见——entity 表另有
+自己的 key，不像凑巧同名的样例那样两者相等），老版本 `_known_keys`/分类逻辑只查 `field`/`entity` 两表，
+根本扫不到这个 token，模型只能凭标识片段谐音瞎猜表单中文名（`cqkd_invoic_apply`→"开票申请"、
+`cqkd_contractbill`→"合同账单"，均为臆造）。现在 `_known_keys` 把 `form.key` 也纳入扫描候选，字段/
+容器分类钉不出时再查 `form` 表兜底（`_classify_form_key`），命中标 `coordinates[].kind="form"`；同
+key 多义（罕见）标 ambiguous、不擅自选一个。
 
-延续 report 包约定：dict 在前（供 --json/MCP），`render_*` 文本在后。
+**MCP 层退役（2026-07-05）**：本模块原有一层专供 MCP 的紧凑投影（两步取证协议 + 字节预算分页），
+随 MCP `read_source` 工具一并下线——段二改为宿主自带 reader 读源码 + `resolve_fields` 精确核对
+（见 `docs/read_source字段名解析逻辑.md` 顶部说明、`docs/阶段验收.md` 对应条目）。本文件只保留
+CLI `cosmic_kb source` 用到的富模式（`read_source()`，全文盲扫 + 三档消歧），不再区分 `keys` 档位。
+
+延续 report 包约定：dict 在前（供 --json），`render_*` 文本在后。
 """
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
 
 from . import resolve_fields, source_read
-# 复用 trace 的「host 口径字节度量 + 游标解析 + 预算/哨兵」单一事实源（红线 #6：度量逻辑只此一份）。
-from .field_trace import _wire_len, _parse_cursor, _COMPACT_BUDGET, _BIG_CAP
 from .resolve_fields import _LEVEL_CN
 
 # 字段标识 token：字母开头、含下划线的标识符（cqkd_tzrq / KEY_TZRQ 都会被切出；与 KB 已知 key 取交集才算命中）。
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]+")
 
+# 限定常量引用候选：`Xxx.CONST_NAME`（Java 常量惯例——常量名全大写+下划线；用它把噪音过滤到
+# 可接受范围，真假仍靠查 java_constant 表判定，见 _lookup_constants）。
+_CONST_REF_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_$]*)\.([A-Z][A-Z0-9_]*)\b")
+# 候选对上限（防病态文件把 WHERE IN 参数撑爆——SQLite 单条语句变量数有上限）。
+_MAX_CONST_REFS = 300
+
+
+def _find_constant_refs(body: str) -> set[tuple[str, str]]:
+    """扫源码正文里的 `Xxx.CONST_NAME` 限定引用候选，供查 `java_constant` 表核实。"""
+    pairs = {(m.group(1), m.group(2)) for m in _CONST_REF_RE.finditer(body)}
+    if len(pairs) > _MAX_CONST_REFS:
+        pairs = set(sorted(pairs)[:_MAX_CONST_REFS])
+    return pairs
+
+
+def _lookup_constants(conn, pairs: set[tuple[str, str]]) -> dict[tuple[str, str], dict[str, Any]]:
+    """把候选 `(类, 常量名)` 对里真是项目常量的解析出字面值；不是（平台/枚举/误判）的静默丢弃。
+
+    同一 (类, 常量名) 若工程里有多处定义、字面值不同 → 标 `ambiguous`（不擅自选一个，红线 #4）；
+    否则回 `{value, defined_in, line}`（唯一定义时；多处定义但字面值相同也算唯一，取任一证据）。
+    """
+    if not pairs:
+        return {}
+    classes = sorted({c for c, _ in pairs})
+    names = sorted({n for _, n in pairs})
+    qc = ",".join("?" * len(classes))
+    qn = ",".join("?" * len(names))
+    rows = conn.execute(
+        f"SELECT class_name, const_name, literal, source_relpath, line FROM java_constant "
+        f"WHERE class_name IN ({qc}) AND const_name IN ({qn})",
+        [*classes, *names],
+    ).fetchall()
+    by_pair: dict[tuple[str, str], list[tuple[str, str | None, int | None]]] = {}
+    for r in rows:
+        key = (r["class_name"], r["const_name"])
+        if key in pairs:
+            by_pair.setdefault(key, []).append((r["literal"], r["source_relpath"], r["line"]))
+    out: dict[str, Any] = {}
+    for key, defs in by_pair.items():
+        lits = sorted({d[0] for d in defs})
+        if len(lits) == 1:
+            lit, relpath, line = defs[0]
+            out[key] = {"value": lit, "defined_in": relpath, "line": line, "ambiguous": False}
+        else:
+            out[key] = {"value": None, "ambiguous": True, "candidates": lits}
+    return out
+
 
 def _known_keys(conn) -> set[str]:
-    """KB 里所有字段 key + 实体/分录容器 key（一次性建集合，供扫源码取交集）。"""
+    """KB 里所有字段 key + 实体/分录容器 key + 表单 key（一次性建集合，供扫源码取交集）。
+
+    表单 key（`form.key`）2026-07-04 补入：真实翻车案例——`BusinessDataServiceHelper.load(
+    "cqkd_invoic_apply", ...)` 里的字面量是**表单标识**，当表头实体 key 不等于表单 key（常见，
+    entity 表另有自己的 key）时，老版本只查 field/entity 两表根本扫不到它，模型只能凭标识片段
+    谐音瞎猜表单中文名（`cqkd_invoic_apply`→"开票申请"、`cqkd_contractbill`→"合同账单"）。
+    """
     keys: set[str] = set()
-    for tbl in ("field", "entity"):
+    for tbl in ("field", "entity", "form"):
         keys |= {r[0] for r in conn.execute(
             f"SELECT DISTINCT key FROM {tbl} WHERE key IS NOT NULL") if r[0]}
     return keys
+
+
+def _known_form_rows(conn) -> dict[str, list[Any]]:
+    """表单 key → 该 key 对应的 `form` 表行（一般唯一；同 key 多行且中文名不同则判歧义）。"""
+    out: dict[str, list[Any]] = {}
+    for r in conn.execute("SELECT key, name, form_type FROM form WHERE key IS NOT NULL"):
+        out.setdefault(r["key"], []).append(r)
+    return out
+
+
+def _classify_form_key(key: str, rows: list[Any] | None) -> dict[str, Any] | None:
+    """把一个表单标识的候选行归为 unique/ambiguous（无 resolved 档——表单不像字段那样靠本文件
+    `field_access` 收敛同名候选，同 key 多义本就罕见，钉不出就诚实留歧义，不擅自选一个）。
+    """
+    if not rows:
+        return None   # 非表单 key（token 命中但 form 表查不到）→ 留给字段/常量分支或整体 None
+    names = _distinct(r["name"] for r in rows)
+    coords = [{"kind": "form", "name": r["name"], "form_key": key,
+               "form_type": r["form_type"], "level": None} for r in rows]
+    if len(names) <= 1:
+        return {"tier": "unique", "names": names, "coordinates": coords[:1], "note": None}
+    return {
+        "tier": "ambiguous", "names": [], "coordinates": coords,
+        "note": (f"标识 {key} 在项目内对应多个不同名的表单定义（{', '.join(names)}），"
+                 "无法确定具体是哪一张，勿猜、勿默认某一个。"),
+    }
+
+
+def _looks_form_only(candidates: list[dict[str, Any]] | None) -> bool:
+    """resolve_fields 可能把 form key 作为 kind=form 候选返回；此时用 form 表完整行保留多名歧义。"""
+    return bool(candidates) and all(c.get("kind") == "form" for c in candidates)
 
 
 def _form_ctx_for_file(conn, relpath: str) -> dict[str, dict[str, dict[str, Any]]]:
@@ -107,7 +196,7 @@ def _trim_coord(c: dict[str, Any]) -> dict[str, Any]:
     """
     out = {"kind": c.get("kind"), "name": c.get("name"),
            "form_key": c.get("form_key"), "level": c.get("level")}
-    for opt in ("field_type", "access", "resolved_lines"):
+    for opt in ("field_type", "access", "resolved_lines", "form_type"):
         if c.get(opt):
             out[opt] = c[opt]
     return out
@@ -201,6 +290,11 @@ def read_source(
     `start/end`（1 基，含端点）可只读一段；越界路径（../ 逃逸出源码根）一律拒绝，不读项目外文件。
     `field_names` 形状：`{key: {tier, names, coordinates, note, [also_in_forms]} | None}`——
     tier ∈ unique/resolved/ambiguous，ambiguous 的 `names` 为空（需消歧，勿照抄某一个）。
+    `coordinates[].kind` 除 field/header/entry/subentry 外还有 `"form"`——表单标识本身命中
+    `form` 表时用（如 `.load("xxx")` 里的字面量），是该表单的中文名，不是字段名。
+
+    全文盲扫：正文里所有 token 与 KB 全量已知 key 取交集。量大天然有噪音（常见字段 key 本身是
+    `remark`/`amount`/`org` 这类通用英文词，会撞到无关的局部变量），但胜在人眼浏览方便。
     """
     root = source_read.resolve_source_root(conn, source_root)
     if not root:
@@ -225,22 +319,77 @@ def read_source(
         sliced = [s, e]
         body = "\n".join(all_lines[s - 1:e])
 
-    # 扫本段文本里出现的、KB 已知的字段/容器 key → 喂 resolve_fields 拿真实中文名+坐标（复用，不重写），
-    # 再用本文件 field_access 解析出的来源实体收敛同名候选（三档置信，杜绝平铺误导）。
+    # 全文盲扫：正文 token 与 KB 全量已知 key 取交集，再喂 resolve_fields 拿真实中文名+坐标
+    # （复用，不重写），用本文件 field_access 解析出的来源实体收敛同名候选（三档置信，杜绝平铺误导）。
     known = _known_keys(conn)
     found = sorted({t for t in _TOKEN_RE.findall(body) if t in known})
     capped = max(0, len(found) - max_keys)
-    keys = found[:max_keys]
-    raw = resolve_fields.resolve_fields(conn, keys)["resolved"]
+    scan_keys = found[:max_keys]
+    # 限定常量引用（`TemporaryStopCon.ENTITY` 这类）：字面值不在源码正文里，靠查 java_constant
+    # 表解析回字面值，再和普通 key 走同一套三档分类——堵"字面值扫不到、模型凭常量英文名瞎猜"。
+    const_pairs = _find_constant_refs(body)
+
+    const_lookup = _lookup_constants(conn, const_pairs) if const_pairs else {}
+    const_values = {v["value"] for v in const_lookup.values() if v.get("value")}
+
+    raw = resolve_fields.resolve_fields(conn, sorted(set(scan_keys) | const_values))["resolved"]
     form_ctx = _form_ctx_for_file(conn, relpath)
-    field_names = {k: _classify_key(k, raw.get(k), form_ctx) for k in keys}
+    form_rows = _known_form_rows(conn)
+
+    # 常量引用条目**排在最前**（2026-07-03 真实翻车复盘）：紧凑投影按字节预算裁剪 field_names 时
+    # （`_build_rs_compact` 的 `fn_full[:cap]`），字典迭代顺序=插入顺序——若常量条目排在普通字面量
+    # key 后面，大文件（几十个普通 key）会把预算耗尽在前面，常量条目永远够不到、被静默截断，而
+    # 恰恰是常量引用（字面值不在正文里）模型最需要、最不该丢的标注。常量数量天然少（受
+    # `_MAX_CONST_REFS` 封顶），排最前不会挤占太多预算，却能保证几乎不被截断。
+    const_field_names: dict[str, Any] = {}
+    for (cls, const), info in const_lookup.items():
+        expr = f"{cls}.{const}"
+        if info.get("ambiguous"):
+            const_field_names[expr] = {
+                "tier": "ambiguous", "names": [], "coordinates": [],
+                "note": (f"常量 {expr} 在项目内被多处定义、字面值不同"
+                         f"（{', '.join(info['candidates'])}），无法确定具体取值，勿猜、勿默认某一个。"),
+            }
+            continue
+        candidates = raw.get(info["value"])
+        if _looks_form_only(candidates):
+            classified = _classify_form_key(info["value"], form_rows.get(info["value"]))
+        else:
+            classified = _classify_key(info["value"], candidates, form_ctx)
+        if classified is None:
+            continue   # 常量已解出字面值，但字面值不是 KB 已知字段/实体 key（超出本工具标注范围）
+        classified = dict(classified)
+        classified["resolved_constant"] = {
+            "value": info["value"], "defined_in": info.get("defined_in"), "line": info.get("line"),
+        }
+        const_field_names[expr] = classified
+
+    # 表单标识兜底（2026-07-04）：先按字段/分录容器分类；钉不出（不在 field/entity 表）再查
+    # form 表——`BusinessDataServiceHelper.load("xxx", ...)` 里的字面量常是表单 key 而非字段 key。
+    plain_field_names: dict[str, Any] = {}
+    for k in scan_keys:
+        candidates = raw.get(k)
+        if _looks_form_only(candidates):
+            classified = _classify_form_key(k, form_rows.get(k))
+        else:
+            classified = _classify_key(k, candidates, form_ctx)
+            if classified is None:
+                classified = _classify_form_key(k, form_rows.get(k))
+        plain_field_names[k] = classified
+
+    field_names = {**const_field_names, **plain_field_names}
 
     note = ("字段名按三档置信标注：✅ 直接照抄；⚠️ ambiguous 表示本文件未解析到具体实体、有多张单据同名，"
-            "需顺调用链消歧，勿默认当前单据。未列出的 `<isv>_` 标识用 resolve_fields 核对，勿按命名惯例猜。"
+            "需顺调用链消歧，勿默认当前单据。命中的表单标识（如 `.load(\"xxx\")` 里的字面量）同样标注"
+            "（`coordinates[].kind=\"form\"` 时是该表单本身的中文名，不是字段名）。"
+            " `类.常量`形式的限定引用（如 XxxCon.ENTITY）可直接作为 key 传入，会查项目常量表解析出"
+            "字面值再标注——字段名即挂在该表达式本身（如 `field_names[\"XxxCon.ENTITY\"]`），带"
+            " resolved_constant 标明解出的字面值+定义位置；解不出/歧义的同样不臆造，勿凭常量英文名"
+            "猜中文含义。"
             " getDynamicObjectCollection(key) 取分录行还是多选基础资料集合，取决于 key——看坐标 "
-            "field_type/access，勿凭 API 名断定是分录。"
-            " 注：`content`（源码正文）排在返回末尾——若 host 截断了它，重读更窄的 --lines 区间即可；"
-            "`field_names` 在前不会丢。")
+            "field_type/access，勿凭 API 名断定是分录。")
+    note += (" 注：`content`（源码正文）排在返回末尾——若 host 截断了它，重读更窄的 --lines 区间即可；"
+              "`field_names` 在前不会丢。未列出的 `<isv>_` 标识用 resolve_fields 核对，勿按命名惯例猜。")
     if capped:
         note += f" 另有 {capped} 个命中 key 未标注（超 max_keys），见顶层 keys_omitted，按需 resolve_fields 补。"
 
@@ -260,192 +409,11 @@ def read_source(
     }
 
 
-# ── 紧凑投影（MCP 防截断）：标注在前 + content 按字节预算填充 + 游标分页 ────────────────
-# 富 read_source 把整文件 `content` 整串返回——大文件（或大区间）经 MCP 会被 host 在 32KB 处从
-# 中段**硬切**，被砍的恰是不可重读的尾部。早期靠「标注在前、content 垫底」只能保住标注、源码仍被
-# 静默截断。本投影与 trace_compact/bill_compact 同款治理：
-#   ① 标注优先——`field_names`（高价值、有界）排在前，按档保住；
-#   ② content 弹性填充——按 host 口径 `_wire_len` 把源码行装到预算上限，未读全带 `content_next_cursor`；
-#   ③ 游标分页——`read_source(relpath, cursor='content@120')` 从该行**续读至文件末尾**，逐页取回；
-#      `field_names` 超档同法翻页（红线 #4：被截内容可达，不只报计数）。
-# 富 read_source 不动（CLI/Web 走终端/HTTP 无 32KB 限制，仍用富投影）。
-_RS_PAGE_SECTIONS = ("content", "field_names")
-# field_names 展示档（从宽到窄）：留出 content 最低余量，field_names 是高价值有界部分、优先保住。
-_RS_FIELD_CAPS = (60, 40, 25, 15, 8, 4, 1)
-_RS_MIN_CONTENT_BUDGET = 4000   # 至少给源码正文留这么多字节（否则只见标注不见码）
-
-_RS_COMPACT_NOTE = (
-    "紧凑投影（防 MCP 32KB 截断）：字段名标注 `field_names` 在前（高价值、有界），源码正文 `content` "
-    "按字节预算填充。`content` 未读全时带 `content_next_cursor`（如 `content@120`）——把该值原样作 "
-    "`cursor=` 再调 `read_source(relpath, cursor=该值)` 即从该行**续读至文件末尾**（逐页 `page.content` + "
-    "新 `next_cursor`，到 null 读完）；要限定上界改用 `end_line` 重调。`field_names` 超档时带 "
-    "`field_names_next_cursor`（同法翻页取回全部标注）。字段名按三档置信：✅ unique/resolved 照抄；"
-    "⚠️ ambiguous 多单据同名、本文件未解析到实体，勿默认当前单据，按各 key 的 note 顺调用链消歧。"
-    " getDynamicObjectCollection(key) 取分录行还是多选基础资料集合取决于 key——看坐标 field_type/access，"
-    "勿凭 API 名断定是分录。"
-)
-
-
-def _content_str_bytes(base_bytes: int, content: str) -> int:
-    """已知空 content 时的 base 字节，反推填入 content 后的总字节。
-
-    content 是返回 dict 里**唯一的弹性 scalar**：indent=2 不会缩进字符串值内部、换行在 JSON 里转义为
-    `\\n`，故换 content 值不改其余字段的序列化字节——总字节 = base_bytes - len('""') + len(json.dumps(content))。
-    这样二分行数只需对 content 串做 json.dumps，避免每步整 dict 重新序列化（O(n²)→O(n log n)）。
-    """
-    return base_bytes - 2 + len(json.dumps(content, ensure_ascii=True))
-
-
-def _rs_overview(
-    rich: dict[str, Any], fn_shown: dict[str, Any], *, fn_omitted: int,
-    s: int, e: int, total: int, content: str, shown_to: int, content_more: bool,
-) -> dict[str, Any]:
-    """组装紧凑 overview dict（标注在前、content 垫底；按需补 next_cursor）。"""
-    res: dict[str, Any] = {
-        "found": True,
-        "relpath": rich["relpath"],
-        "source_root": rich.get("source_root"),
-        "encoding": rich.get("encoding"),
-        "total_lines": total,
-        "lines": [s, shown_to] if total else None,
-        "keys_omitted": fn_omitted,
-        "field_names": fn_shown,
-        "note": _RS_COMPACT_NOTE,
-    }
-    if fn_omitted:
-        res["field_names_next_cursor"] = f"field_names@{len(fn_shown)}"
-    if content_more:
-        res["content_capped_lines"] = max(0, e - shown_to)
-        res["content_next_cursor"] = f"content@{shown_to + 1}"
-    res["content"] = content   # 垫底：host 截尾时牺牲可续读的源码，不可替代的标注存活
-    return res
-
-
-def _build_rs_compact(rich: dict[str, Any], start: int | None, end: int | None,
-                      budget: int) -> dict[str, Any]:
-    """一次构建紧凑 overview：先选 field_names 展示档（留 content 余量），再按字节预算二分填 content。"""
-    # 用 splitlines() 与富层 total_lines 同口径切行（split("\n") 会因文件尾换行多出空行、错位）。
-    all_lines = rich["content"].splitlines()
-    total = len(all_lines)
-    s = max(1, start or 1)
-    e = min(total, end or total) if total else 0
-    window = all_lines[s - 1:e] if total else []
-    fn_full = list(rich["field_names"].items())
-
-    # 选 field_names 展示档：阶梯从宽到窄，留出 content 最低余量（标注优先保住）。
-    fn_cap = min(_RS_FIELD_CAPS[-1], len(fn_full))
-    for cap in _RS_FIELD_CAPS:
-        cap = min(cap, len(fn_full))
-        probe = _rs_overview(rich, dict(fn_full[:cap]), fn_omitted=len(fn_full) - cap,
-                             s=s, e=e, total=total, content="", shown_to=e, content_more=True)
-        if _wire_len(probe) <= budget - _RS_MIN_CONTENT_BUDGET:
-            fn_cap = cap
-            break
-    fn_shown = dict(fn_full[:fn_cap])
-    fn_omitted = len(fn_full) - fn_cap
-
-    # content 弹性填充：base（content=""，worst-case 带 cursor）字节定后，二分窗口内最大可容行数。
-    base_bytes = _wire_len(_rs_overview(
-        rich, fn_shown, fn_omitted=fn_omitted, s=s, e=e, total=total,
-        content="", shown_to=e, content_more=True))
-    lo, hi = 0, len(window)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if _content_str_bytes(base_bytes, "\n".join(window[:mid])) <= budget:
-            lo = mid
-        else:
-            hi = mid - 1
-    k = lo if lo or not window else 1   # 至少给一行（单行即便超 budget 也给，仍远小于 32KB host 上限）
-    shown = window[:k]
-    content_more = k < len(window)
-    shown_to = (s + k - 1) if k else e
-    return _rs_overview(rich, fn_shown, fn_omitted=fn_omitted, s=s, e=e, total=total,
-                        content="\n".join(shown), shown_to=shown_to, content_more=content_more)
-
-
-def _rs_page_content(rich: dict[str, Any], offset: int, budget: int) -> dict[str, Any]:
-    """content 续读：从绝对行号 offset 起按预算装入源码行，**续读至文件末尾**（逐页可取全）。"""
-    all_lines = rich["content"].splitlines()   # 与 total_lines 同口径，见 _build_rs_compact
-    total = len(all_lines)
-    start = min(max(1, offset or 1), total + 1)
-    base = {"found": True, "relpath": rich["relpath"], "encoding": rich.get("encoding"),
-            "total_lines": total}
-
-    def _wrap(k: int) -> dict[str, Any]:
-        end_idx = start - 1 + k
-        return {**base, "page": {
-            "section": "content", "from_line": start,
-            "to_line": (start + k - 1) if k else start - 1, "total_lines": total,
-            "content": "\n".join(all_lines[start - 1:end_idx]),
-            "next_cursor": (f"content@{end_idx + 1}" if end_idx < total else None)}}
-
-    avail = max(0, total - (start - 1))
-    base_bytes = _wire_len(_wrap(0))
-    lo, hi = 0, avail
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        body = "\n".join(all_lines[start - 1:start - 1 + mid])
-        if _content_str_bytes(base_bytes, body) <= budget:
-            lo = mid
-        else:
-            hi = mid - 1
-    k = lo if lo or not avail else 1
-    return _wrap(k)
-
-
-def _rs_page_field_names(rich: dict[str, Any], offset: int, budget: int) -> dict[str, Any]:
-    """field_names 翻页：从 offset 起按预算装入已分类的字段标注条目（`{key, info}`）。"""
-    items = [{"key": k, "info": v} for k, v in rich["field_names"].items()]
-    total = len(items)
-    offset = min(max(0, offset), total)
-    base = {"found": True, "relpath": rich["relpath"]}
-
-    def _wrap(page: list[dict[str, Any]], nxt: int) -> dict[str, Any]:
-        return {**base, "page": {"section": "field_names", "offset": offset,
-                "returned": len(page), "total": total, "items": page,
-                "next_cursor": (f"field_names@{nxt}" if nxt < total else None)}}
-
-    page: list[dict[str, Any]] = []
-    for it in items[offset:]:
-        trial = page + [it]
-        if page and _wire_len(_wrap(trial, offset + len(trial))) > budget:
-            break          # 至少装一条（单条即便超 budget 也给，仍远小于 32KB）
-        page = trial
-    return _wrap(page, offset + len(page))
-
-
-def read_source_compact(
-    conn, relpath: str, *,
-    source_root: str | None = None,
-    start: int | None = None, end: int | None = None,
-    cursor: str | None = None, budget: int = _COMPACT_BUDGET,
-) -> dict[str, Any]:
-    """**紧凑投影**（MCP 入口，防 host 32KB 截断）：标注在前 + content 按字节预算填充 + 游标分页。
-
-    - overview：`field_names`（按档保住）+ 窗口 `[start,end]`（默认整文件）内预算填得下的 `content`；
-      未读全带 `content_next_cursor`，`field_names` 超档带 `field_names_next_cursor`。
-    - `cursor`（`"content@120"` / `"field_names@60"`）：把 overview 给出的 next_cursor 原样传回即翻页——
-      content 从该行**续读至文件末尾**，field_names 续取后续标注；循环到 `next_cursor` 为 null 即取全。
-    - governor 按 host 真实序列化口径（`_wire_len` = json.dumps indent=2）度量，保证永不被截断（红线 #4）。
-    """
-    # 取整文件富材料（max_keys 放开 → 全部字段分类，供分页 slice；whole-file 让游标无状态一致）。
-    rich = read_source(conn, relpath, source_root=source_root, max_keys=_BIG_CAP)
-    if not rich.get("found"):
-        return rich   # 错误 dict 很小，直接回
-    if cursor:
-        section, offset = _parse_cursor(cursor)
-        if section == "content":
-            return _rs_page_content(rich, offset, budget)
-        if section == "field_names":
-            return _rs_page_field_names(rich, offset, budget)
-        return {"found": True, "relpath": relpath, "page": {
-            "section": section,
-            "error": f"未知或不可分页的 section: {section}（可分页：{', '.join(_RS_PAGE_SECTIONS)}）"}}
-    return _build_rs_compact(rich, start, end, budget)
-
-
 def _coord_line(key: str, c: dict[str, Any], *, mark: str, suffix: str = "") -> str:
     name = c.get("name") or ""
+    if c.get("kind") == "form":
+        ft = f" [{c['form_type']}]" if c.get("form_type") else ""
+        return f"  {mark} 单据 {key}「{name}」{ft}{suffix}"
     form = c.get("form_key") or "?"
     lvl = _LEVEL_CN.get(c.get("level") or "", c.get("level") or "?")
     kind = "字段" if c.get("kind") == "field" else "容器"
@@ -473,6 +441,10 @@ def render_read_source(data: dict[str, Any], *, max_list: int = 60) -> str:
                 continue
             tier = info["tier"]
             capped = info.get("coordinates_capped")
+            rc = info.get("resolved_constant")
+            if rc:
+                where = f" @ {rc['defined_in']}:{rc['line']}" if rc.get("defined_in") else ""
+                lines.append(f"  【常量引用】{key} = \"{rc['value']}\"{where}")
             if tier in ("unique", "resolved"):
                 for c in info["coordinates"][:max_list]:
                     rl = c.get("resolved_lines")
@@ -480,7 +452,13 @@ def render_read_source(data: dict[str, Any], *, max_list: int = 60) -> str:
                     lines.append(_coord_line(key, c, mark="✅", suffix=suffix))
                 if info.get("also_in_forms"):
                     lines.append(f"      （另有同名字段在 {', '.join(info['also_in_forms'])}，本文件未命中）")
-            else:  # ambiguous
+            elif not info["coordinates"]:  # 常量本身多处定义、字面值不同（无坐标可摆）
+                lines.append(f"  ⚠️ {key}: {info.get('note') or '歧义，勿猜'}")
+            elif info["coordinates"][0].get("kind") == "form":  # 表单标识多义（罕见），用自带 note
+                lines.append(f"  ⚠️ {key}: {info.get('note') or '歧义，勿猜'}")
+                for c in info["coordinates"][:max_list]:
+                    lines.append(_coord_line(key, c, mark="·"))
+            else:  # ambiguous（元数据多单据同名，本文件未解析到实体）
                 forms = ", ".join(sorted({c.get("form_key") for c in info["coordinates"]
                                           if c.get("form_key")}))
                 lines.append(f"  ⚠️ {key}: 歧义 — 元数据有多个同名字段"

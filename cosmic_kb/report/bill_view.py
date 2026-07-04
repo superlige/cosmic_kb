@@ -93,6 +93,14 @@ def bill_view(conn, key: str) -> dict[str, Any] | None:
     plugin_lanes = _build_plugin_lanes(plugins, bindings)
     platform_plugins_excluded = sum(1 for p in plugins if p.get("source") == "platform")
 
+    # 扩展别名（form.is_extension=1）：内容已并入 extends 指向的原厂 form_key（见
+    # cosmic_kb/metadata/merge.py::build_extension_alias）——本行 entities/fields/plugins
+    # 皆空是设计如此，不是没扫到，加一句重定向提示。
+    note = None
+    if form["is_extension"] and form["extends"]:
+        note = (f"⚑ {key} 是扩展别名，内容已并入原厂单据 {form['extends']}，"
+                f"请改查 cosmic_kb bill {form['extends']}")
+
     return {
         "form": dict(form),
         "entities": entities,
@@ -105,6 +113,7 @@ def bill_view(conn, key: str) -> dict[str, Any] | None:
         "field_touch": field_touch,
         "entity_touch": list(entity_touch.values()),
         "risk_bindings": risk_bindings,
+        "note": note,
         "stats": {
             "entity_count": len(entities), "field_count": len(fields),
             "operation_count": len(operations), "plugin_count": len(plugins),
@@ -295,7 +304,10 @@ def _build_bill_compact(
         res["entity_touch_next_cursor"] = f"entity_touch@{len(touch_shown)}"
         capped = True
 
-    note = ("紧凑投影（防 MCP 32KB 截断）：每字段的逐条事件已折叠为「写/落库/读」计数——要看『某字段"
+    note = ""
+    if bv.get("note"):   # 扩展别名重定向提示（见 bill_view），优先摆最前，别被防截断说明淹没
+        note += bv["note"] + " "
+    note += ("紧凑投影（防 MCP 32KB 截断）：每字段的逐条事件已折叠为「写/落库/读」计数——要看『某字段"
             "谁改的/在哪个事件函数/是否落库』逐字段用 `trace 单据.字段`（entity_touch 每行已给 trace 锚点）。"
             "插件按场景车道分流见 `plugin_lanes`（操作/界面/列表/反写/转换，op+form 主力在前，带语义文档路由）；"
             "逐插件明细在平铺 `plugins`（各带 plugin_type，按此归位）——只含单据绑定插件，孤儿类不在此。"
@@ -384,6 +396,10 @@ def render_bill(bv: dict[str, Any], *, max_list: int = 30) -> str:
         f"  实体 {st['entity_count']}  字段 {st['field_count']}  操作 {st['operation_count']}  "
         f"插件 {st['plugin_count']}  有插件触达的字段 {st['touched_fields']}"
     )
+
+    if bv.get("note"):
+        lines.append("")
+        lines.append(bv["note"])
 
     if bv["operations"]:
         lines.append("")

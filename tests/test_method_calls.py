@@ -135,17 +135,17 @@ def test_event_method_project_calls(tmp_path: Path):
         conn.close()
 
 
-# ── 1b) 模式 B 延伸：返回该方法读写字段 + 已核对中文名 + 语义路由（导航到方法就拿真名，不必猜）──
-def test_method_returns_fields_with_names(tmp_path: Path):
+# ── 1b) 返回该方法读写字段 key + 语义路由（导航到方法就拿 key，中文名不再自动标注，需调 resolve_fields）──
+def test_method_returns_fields_without_names(tmp_path: Path):
     db, src = _build(tmp_path)
     conn = store.open_kb(db)
     try:
         rd = method_calls.method_calls(
             conn, "cqspb.am.AmDeepOp", "beforeExecuteOperationTransaction", source_root=src)
         fields = rd["methods"][0]["fields"]
-        # 本方法体里 bill.set("cqkd_head",1) → 写入，带已核对名 + 事件语义路由（op→plugin-operation）。
+        # 本方法体里 bill.set("cqkd_head",1) → 写入，带事件语义路由（op→plugin-operation），不带中文名。
         w = next(w for w in fields["writes"] if w["field_key"] == "cqkd_head")
-        assert w["field_name"] == "cqkd_head"          # 元数据真名（夹具里名=key）
+        assert "field_name" not in w                   # 2026-07-05 起不再自动标注，改走 resolve_fields
         assert w["semantics_topic"] == "plugin-operation"
         assert w["line"]
         # 跨类的 svc.touch 写 cqkd_status 物理在 AmDeepService，不算本方法体内字段。
@@ -271,8 +271,10 @@ def test_builder_method_calls(tmp_path: Path):
         conn.close()
 
 
-# ── 6) MCP 工具：与 report 同口径 ────────────────────────────────────────────────
+# ── 6) MCP 工具：走紧凑投影（防截断），语义与 report 富 dict 一致 ──────────────────────
 def test_mcp_tool_method_calls(tmp_path: Path, monkeypatch):
+    """MCP 出口 2026-07-06 起换成 method_calls_compact（防 32KB 截断），不再与富 dict 逐字节相等——
+    但小结果不该被裁剪，calls/fields 内容需与富 dict 语义一致（同 trace/bill 的 MCP 紧凑投影约定）。"""
     from cosmic_kb.mcp import server as mcp_server
 
     db, _src = _build(tmp_path)
@@ -285,5 +287,10 @@ def test_mcp_tool_method_calls(tmp_path: Path, monkeypatch):
             conn, "cqspb.am.AmDeepOp", "beforeExecuteOperationTransaction")
     finally:
         conn.close()
-    assert got == expected
+    assert got["found"] is expected["found"] is True
+    gm, em = got["methods"][0], expected["methods"][0]
+    assert {c["name"] for c in gm["calls"]} == {c["name"] for c in em["calls"]}
+    assert gm["calls_capped"] == 0                  # 数据量小，不该被裁
+    assert {w["field_key"] for w in gm["fields"]["writes"]} == \
+           {w["field_key"] for w in em["fields"]["writes"]}
     assert "method_calls" in mcp_server.TOOLS

@@ -20,72 +20,23 @@ DEFAULT_DB = "cosmic_kb.db"
 # 段二语义层「下沉进 MCP」：任意 agent 初始化时拿到这段路由+纪律（不再只靠 Claude 私有 SKILL）。
 # 多数 MCP 客户端会把 server instructions 并入系统提示。见 docs/分发与多agent接入方案.md §2。
 INSTRUCTIONS = (
-    "这是苍穹（金蝶 Cosmic）历史项目本地理解工具。问『某字段谁改的 / 某单据有哪些操作和插件 / "
-    "某方法调了什么 / 某插件干嘛的』，先调取证工具再下结论：字段级用 trace，单据钻取用 bill，"
-    "方法出向调用导航用 method_calls。**知道精确字段/单据/方法标识就直接用 trace/bill/method_calls；"
-    "ask 只是判不准意图时的自然语言兜底**（判不准会回 need_clarification 候选，请挑精确标识再问、"
-    "绝不替用户拍板）。\n"
-    "结论纪律：每条都要带 类·方法·行号 等证据，并标注 confirmed / likely / unknown 三态；"
-    "缺保存链路一律判 unknown，**绝不臆造字段名/方法名/插件名**。源码全文请直接读本机源文件，"
-    "取证工具只回最小证据包。\n"
-    "【动态写入】部分代码对运行时/配置决定的动态字段集做泛化读写（循环/拼接/外部常量），静态钉不出"
-    "具体字段。trace 返回值里的 `dynamic_writers` 是**按方法去重的「该读方法」清单**（带 calls 导航 + "
-    "写入位置）：要把『谁改了 X』答全，就对清单里的方法逐个 calls/读本机源码，判定它是否真碰了 X（"
-    "不臆造）。\n"
-    "【未定位来源】trace 返回值里的 `unlocated` 是**「反推来源单据」工作单**（与 dynamic_writers 对称："
-    "那是钉不出『改哪个字段』，这是钉不出『改哪张单据』）——这些读写**确实碰了被查字段**，只是来源"
-    "DynamicObject 来自哪张单据没钉出（form_key=None）。每条按方法去重、带 calls 导航与 `plugin_form_label`"
-    "（该插件注册单据，**只是来源线索非确诊**）：要确认它操作的是哪张单据，顺 calls/读本机源码反推，"
-    "**绝不把 plugin_form_label 当成已确定来源**。每条/每段还带 `null_reason`（成因码）告诉你**该不该追**："
-    "`basedata-ref`（读基础资料自身字段）/`dynamic-entity` 是**正确 None**（无需追）；`basedata-write-suspect`"
-    "（写到基础资料——苍穹不保存基础资料，疑似扫描误绑）**不是**正确 None，应继续追/待修扫描器；"
-    "`helper-caller-unknown`/`local-or-container-source` 值得顺 calls 读源码反推；`model-context` 多为未注册"
-    "表单插件。全量成因分布在 `summary.unlocated_by_reason`（真实总数恒在此）。\n"
-    "【trace 写读拆分 + 按类合并】trace 默认回**写入明细（坐标→类→写入点）+ 读取仅按类计数概览**"
-    "（`readers_overview`）；要读取明细就再调一次 `trace(field, access='read')`（类→方法，顺 `calls` "
-    "去读源码）；只看写入用 `access='write'`。写入/读取都**按类合并**（同一类只出现一次，行号/落库等"
-    "列在该类 `sites`/`methods`），别再把同类逐行展开。**真实总数恒在 `summary`**，被 cap 截掉的数在"
-    "各节点 `capped`/`sites_capped`/`methods_capped`/`groups_capped`（红线 #4 不丢数）。**知道哪张单据"
-    "就带坐标查**——`trace('单据.字段')` 或 `form=`：裸字段会命中全部单据并按坐标组裁剪（真实组数在"
-    "`groups_total`），带坐标既省返回又免二次往返。\n"
-    "【trace 翻页取回被截条目（别只读计数）】某段被 cap 时会带 `next_cursor`（如 `unlocated@4`/"
-    "`readers@20`/`dynamic_writers@4`）。要看被截掉的条目，**把该 `next_cursor` 原样作 `cursor=` 再调一次** "
-    "`trace(field, ..., cursor='unlocated@4')`，返回 `page.items`（该段下一页）+ 新 `page.next_cursor`，"
-    "循环到 `next_cursor` 为 null 即把该段**全部条目取全**（不是只有计数）。可分页：writers/readers/"
-    "unlocated/dynamic_writers/possible/coarse/occurrences（writers/readers 需先用 form/entry/level 收窄到单坐标）。\n"
-    "【bill 紧凑投影 + 翻页】bill 返回为防截断的紧凑投影：每字段被触达的**逐条事件已折叠为「写/落库/读」"
-    "计数**——要看『某字段谁改的/在哪个事件函数/是否落库』，对该字段用 `trace 单据.字段`（entity_touch 每行"
-    "已带 `trace` 锚点）。各列表真实总数在 `*_total`，被 cap 截掉的段带 `*_next_cursor`（如 `fields@60`/"
-    "`entity_touch@80`）；要取回被截条目，把该值原样作 `cursor=` 再调 `bill(form, cursor=该值)`，循环到 "
-    "`next_cursor` 为 null。可分页：fields/operations/plugins/bindings/entities/entity_touch。\n"
-    "【强制】凡需要解释『某插件/事件/操作在做什么』、判断『是否入库』、确认『插件类型或事件触发"
-    "时机』、或读到不认识的 kd.bos.* 等平台符号时，**必须先调 cosmic_semantics(topic) 取苍穹语义"
-    "再下结论**，不得仅凭读源码臆断时机与入库——这类领域语义模型易记错，是幻觉高发区。"
-    "（纯定位字段坐标 trace、纯调用链导航 method_calls 等不涉及语义解释的取证，无需先调"
-    " cosmic_semantics，避免空耗。）不确定该取哪一篇时，先 cosmic_semantics(\"\") 列清单——"
-    "每条都带『何时用』说明，按它挑主题名再取全文。\n"
-    "【字段名纪律】凡在源码中引用 `<isv>_前缀` 字段标识并要陈述其中文名/业务含义，**必须先 "
-    "resolve_fields 批量比对元数据**——命名惯例（`zjjnqk` 是租金还是资金？）不算证据，是幻觉高发区。"
-    "resolve_fields 比 trace 便宜得多（O(1) 打词典，只回名字+坐标），读一段代码就顺手批量核一次；"
-    "回 null 的字段标 unknown，不猜。\n"
-    "【返回值已带证据，直接采用】trace/bill/ask/method_calls 的返回里已**内联**两样东西，请直接用、"
-    "勿覆写：① 字段旁的 `field_name`/中文名是已核对的真名，引用时照抄，不得按命名惯例改写；"
-    "② 事件方法旁的 `semantics_topic`（如 plugin-form/plugin-operation）指明该去哪篇语义文档——"
-    "凡要解释该事件「在干嘛/何时触发/是否入库」，先 cosmic_semantics(该 topic) 再下结论。"
-    "字段无 `field_name`（null）或事件无 `semantics_topic` 时，标 unknown，不臆造。"
-    "method_calls 还回该方法的 `fields`（本方法读写字段+已核对名+是否落库），引用其字段名照抄。\n"
-    "【读源码优先用 read_source】要读项目源文件，**优先调 read_source（不要用宿主原生 reader）**："
-    "野生码（GBK/GB2312/UTF-8±BOM）原生 reader 易乱码、且不标字段名；read_source 正确解码、行号对齐 KB，"
-    "并自动回 `field_names`（本文件出现的字段标识→真实中文名，已按本文件数据包来源做归属消歧）。"
-    "`field_names[key].tier`：unique/resolved 的 `names` 可直接照抄；**tier=ambiguous 表示多张单据有"
-    "同名字段、本文件未解析到具体实体——别默认当前单据，按 note 顺调用链消歧**。"
-    "未列出的 `<isv>_` 标识 resolve_fields 核对，绝不按命名惯例/拼音猜。"
-    "**`getDynamicObjectCollection(key)` 取分录行还是多选基础资料集合，取决于 key 是什么——"
-    "看坐标的 `field_type`/`access`（基础资料字段≠分录），别凭 API 名断定是分录。** "
-    "read_source 为防截断的紧凑投影：标注 `field_names` 在前，源码正文 `content` 按预算填充；"
-    "`content` 未读全时带 `content_next_cursor`（如 `content@120`），把该值原样作 `cursor=` 再调 "
-    "`read_source(relpath, cursor=该值)` 即从该行**续读至文件末尾**，循环到 `next_cursor` 为 null 读完"
-    "（要限定上界改用 `end_line`）；`field_names` 超档同带 `field_names_next_cursor` 可翻页取全。"
+    "苍穹（金蝶 Cosmic）历史项目本地理解工具，供 AI 查 KB 排障。\n"
+    "- 先取证后下结论：字段/单据/方法/插件相关问题一律先调工具查 KB，不凭训练记忆猜；结论带"
+    "类·方法·行号等证据，标 confirmed/likely/unknown，证不到就是 unknown，禁止臆造字段名/方法名/"
+    "插件名。\n"
+    "- 路由：已知精确字段/单据标识用 trace/bill；已知类名+方法名查调用链用 method_calls；标识不"
+    "精确、或问『某插件/操作在干嘛』用 ask。\n"
+    "- 源码用宿主自带的文件读取工具读（本项目开发场景源码已是本地 UTF-8，无需专门解码）。读到的"
+    "字段/实体/单据标识一律用 resolve_fields 核对真实中文名，禁止凭标识片段或命名惯例猜；已从源码"
+    "字面量看到单据/分录归属时，传复合限定符做精确匹配——与 trace 同一套点号坐标写法："
+    "`\"单据.字段\"`/`\"分录.字段\"`/`\"单据.分录.字段\"`，比裸 key 更准；查不到/多候选就是"
+    "unknown，不替你选。**一次批量传入本轮读到的所有陌生标识，"
+    "不得以\"减少工具调用\"为由只核实其中一部分、对其余标识凭字面翻译——单据/表头/分录/子分录标识"
+    "与字段同标准，没有\"次要标识可以不核实\"这回事。**\n"
+    "- 返回值带 next_cursor 说明内容未取全，翻完（变 null）前禁止下『不存在/未覆盖』这类结论。\n"
+    "- 解释插件/事件/操作语义、判断入库时机、或遇到不认识的 kd.bos.* 符号，先调 cosmic_semantics"
+    "(topic) 取苍穹语义再下结论；不确定查哪篇先空参列清单。\n"
+    "- 各工具具体返回结构见其自身描述，此处只讲跨工具全局纪律。"
 )
 
 
@@ -133,25 +84,23 @@ def _open():
     return store.open_kb(db)
 
 
-# ── 五个取证工具的纯逻辑（复用段一取证函数，绝不重写）────────────────────────
+# ── 六个取证工具的纯逻辑（复用段一取证函数，绝不重写）────────────────────────
 def tool_ask(question: str) -> dict[str, Any]:
-    """自然语言提问 → 意图解析 → 查 KB 取确定性证据包。**兜底路由**：已知精确字段/单据/方法标识时
-    优先直接用 trace/bill/method_calls（更稳），ask 只用于意图判不准、需要先消歧的自然语言提问。
-
-    覆盖旗舰意图：字段谁改的 / 单据钻取 / 插件解释 / 操作解释。判不准时返回
-    `status='need_clarification'` + `candidates` 候选——请挑一个精确标识或用
-    `单据.字段` 点号坐标再问，绝不替用户拍板。
+    """自然语言问题 → 意图解析 → 查 KB 返回确定性证据包。标识不精确、或问『某插件/操作在干嘛』这类
+    需要先定位再解释的问题用本工具；已知精确字段/单据/方法标识优先直接用 trace/bill/method_calls。
+    覆盖字段谁改的/单据钻取/插件解释/操作解释/方法调用共 5 类意图。判不准返回
+    `status='need_clarification'` + `candidates`，挑一个精确标识再问，禁止替用户拍板。
     """
     from ..semantic import resolver
     from ..context import builder
-    from ..report import field_trace, bill_view
+    from ..report import field_trace, bill_view, method_calls as mc_report
 
     conn = _open()
     try:
         rq = resolver.resolve(conn, question)
         result = builder.build_context(conn, rq)
-        # 字段/单据意图的 evidence 是完整富 dict，经 MCP 同样会被 host 截断——换成紧凑投影
-        # （cap + 字节 governor + 游标分页）。复用 rq，不动 builder/CLI 路径。
+        # 字段/单据/方法调用意图的 evidence 是完整富 dict，经 MCP 同样会被 host 截断——换成紧凑
+        # 投影（cap + 字节 governor + 游标分页）。复用 rq，不动 builder/CLI 路径。
         if result.get("status") == "ok":
             if rq.intent == "field_who_changed":
                 result["evidence"] = field_trace.trace_compact(
@@ -159,6 +108,9 @@ def tool_ask(question: str) -> dict[str, Any]:
                     form_key=rq.form_key, entry_key=rq.entry_key, level=rq.level)
             elif rq.intent == "bill_drilldown":
                 result["evidence"] = bill_view.bill_compact(conn, rq.form_key)
+            elif rq.intent == "method_calls":
+                result["evidence"] = mc_report.method_calls_compact(
+                    conn, rq.class_fqn, rq.method_name)
         return result
     finally:
         conn.close()
@@ -172,38 +124,19 @@ def tool_trace(
     access: str | None = None,
     cursor: str | None = None,
 ) -> dict[str, Any]:
-    """旗舰直查：字段 → 哪些类的哪个事件函数读/写它、是否落库、行号、源码路径。
+    """字段 → 哪些类的哪个事件函数读/写它、是否落库、行号、源码路径。已知精确字段/单据时用本工具
+    （比 ask 更省）。`field` 支持点号坐标 `单据.字段`/`单据.分录.字段`/`单据.分录.子分录.字段`，
+    裸字段列全部坐标；已知坐标建议带上（`form/entry/level` 可显式覆盖推断），更省且不裁剪。
 
-    `field` 支持点号坐标 `单据.字段` / `单据.分录.字段` / `单据.分录.子分录.字段`（裸字段=
-    列全部定义坐标）；`form/entry/level` 可显式覆盖点号推断。
-    **优先带上坐标（`单据.字段` 或 `form=`）再查**：裸字段会命中该字段的全部单据，返回值会按
-    坐标组（`groups`）裁剪——真实组数在 `groups_total`、被截组数在 `groups_capped`，并不丢数，但
-    要看全某张单据的明细仍需带坐标重查。已知是哪张单据/哪级分录就一次性带上，省一轮往返。
+    `access='write'`（默认含写）按类合并写入点；`access='read'`按类合并读取方法；不传时只给写入
+    明细+读取按类计数概览。`coarse.coarse_only`>0 说明源码字面量有命中但未结构化，禁止当作"确实
+    无人读写"，需读完整个方法核实（保存调用可能在窗口外，窄窗口没读到不等于不保存）。真实总数在
+    `summary`，内容超预算靠 `next_cursor` 翻页，翻完（变 null）前禁止下"某字段无人读写/未覆盖"
+    结论。
 
-    **写/读拆分（`access`）+ 按类合并（防 host 32KB 截断）**：
-    - `access='write'`（或默认含写入）：写入按**坐标 → 类 → 写入点**合并——同一类只出现一次，
-      类级信息（类型/所属单据）只存一份，行号/落库等列在该类的 `sites`。
-    - `access='read'`：读取按**类 → 方法**合并（`{class_fqn, methods:[{method, count, calls}], total}`）；
-      要弄清"谁读了它"就顺 `calls` 去那几个方法读源码。
-    - **默认（不传 access）**：写入明细 + 读取**仅按类计数概览** `readers_overview`（最省）；要读取
-      明细就再调一次 `access='read'`。
-    **真实总数恒在 `summary`**，被 cap 截断的数在各节点 `capped`/`sites_capped`/`methods_capped`/
-    `groups_capped`（红线 #4 不丢数）。
-
-    **游标分页（`cursor`）——被 cap 的内容一条不丢、全部可取回**：某段被截时，它会带一个
-    `next_cursor`（如 `"unlocated@4"` / `"readers@20"` / `"dynamic_writers@4"`）。**要看被截掉的条目，
-    不要只读计数——把该 `next_cursor` 原样作为 `cursor=` 再调一次本工具**，即返回该段从该 offset 起、
-    预算内能装下的下一页 `page.items` + 新的 `page.next_cursor`；循环直到 `next_cursor` 为 `null` 即取完
-    全部。可分页段：writers / readers / unlocated / dynamic_writers / possible / coarse / occurrences
-    （writers/readers 需先用 `form/entry/level` 收窄到单坐标）。也可改用 `form/entry/level` 收窄、
-    或 `access='read'`/`'write'` 单看一侧来减小单次返回。
-
-    返回里 `unlocated` 是**「反推来源单据」工作单**：确实读写该字段、但来源单据未钉出（form_key=None）的
-    读写，按方法去重 + `calls` 导航 + `plugin_form_label`（插件注册单据，仅来源线索非确诊）——顺 calls
-    读源码反推它操作哪张单据，勿把 plugin_form_label 当确定来源。与 `dynamic_writers`（字段钉不出）区分。
-    每段带 `null_reason` 成因码 + `summary.unlocated_by_reason` 直方图：`basedata-ref`（读基础资料自身字段）/
-    `dynamic-entity` 是正确 None（无需追）；`basedata-write-suspect`（写到基础资料，疑似扫描误绑）应继续追；
-    `helper-caller-unknown`/`local-or-container-source` 值得读源码反推。
+    `unlocated`：读写命中但来源单据未钉出（`dynamic_writers` 是字段本身钉不出，二者不同），带
+    `null_reason` 成因码——`basedata-ref`/`dynamic-entity` 是正常 None 无需追；其余成因值得顺
+    `calls` 读源码反推来源。
     """
     from ..report import field_trace
 
@@ -224,22 +157,13 @@ def tool_trace(
 
 
 def tool_bill(form_key: str, cursor: str | None = None) -> dict[str, Any]:
-    """单据钻取：操作集 / 插件清单 / 字段触达（按实体）/ 桥接风险。
+    """单据钻取：操作集/插件清单/字段触达（按实体）/桥接风险。要查某字段谁改的/哪个事件/是否落库，
+    对该字段改用 `trace 单据.字段`（更细，entity_touch 每行已带 trace 锚点）。
 
-    **紧凑投影（防 host 32KB 截断）**：每字段被触达的逐条事件已折叠为「写/落库/读」计数——要看
-    『某字段谁改的/在哪个事件函数/是否落库』，对该字段用 `trace 单据.字段`（entity_touch 每行已带 trace 锚点）。
-    各列表真实总数在 `*_total`；被 cap 截掉的段带 `*_next_cursor`。
-
-    **轴 A · 插件按场景车道分流**：`plugin_lanes` 给「操作/界面/列表/反写/转换」各车道的分流语义、
-    排障优先级（op+form 主力在前）与语义文档路由（`semantics_topic`，判触发时机/是否入库前先查）+ 计数；
-    逐插件明细仍在平铺 `plugins` 段（各带 `plugin_type`，按此归位到对应车道）。**只含单据绑定插件**——
-    孤儿类（调度/报表/校验器等无 form_key）不在此，归后续「孤儿类型目录」入口。
-
-    **游标分页（`cursor`）——被 cap 的条目一条不丢、全部可取回**：某段被截时它带一个
-    `next_cursor`（如 `"fields@60"` / `"entity_touch@80"` / `"plugins@40"`）。要看被截掉的条目，
-    **把该值原样作 `cursor=` 再调一次本工具** `bill(form_key, cursor='fields@60')`，返回 `page.items`
-    （该段下一页）+ 新的 `page.next_cursor`；循环到 `next_cursor` 为 `null` 即把该段取全。
-    可分页段：fields / operations / plugins / bindings / entities / entity_touch。
+    `plugin_lanes` 按场景（操作/界面/列表/反写/转换）分流插件、给排障优先级 + 语义文档路由
+    （`semantics_topic`）；只含单据绑定插件，孤儿类（无 form_key）不在此列。内容超预算靠
+    `next_cursor` 翻页（`cursor=` 原样传回再调），翻完（变 null）前禁止下"某字段/插件未出现"
+    这类结论。
     """
     from ..report import bill_view
 
@@ -250,41 +174,39 @@ def tool_bill(form_key: str, cursor: str | None = None) -> dict[str, Any]:
         conn.close()
 
 
-def tool_method_calls(class_fqn: str, method_name: str) -> dict[str, Any]:
-    """方法出向调用导航：类全限定名 + 方法名 → 该方法调用的**项目内**方法及位置。**只导航不解释**——
-    「这个方法在干嘛」请顺返回的 `target_relpath` 用 read_source 读源码自己判，本工具不复述源码逻辑。
+def tool_method_calls(class_fqn: str, method_name: str, cursor: str | None = None) -> dict[str, Any]:
+    """类全限定名+方法名 → 该方法调用的项目内方法及位置，用于按调用链下钻导航。只回目标类全限定名
+    （`target_fqn`，可再下钻）/源文件相对路径（`target_relpath`）/调用行号，不解释源码逻辑——
+    要懂"在干嘛"自行读源码。只列项目内可下钻调用，平台/外部调用不回；字段落库取证用 `trace`。
+    `fields.reads/writes` 只给字段 key + 行号，不附中文名——输出中文名前必须调 `resolve_fields`
+    核对，不得凭命名惯例猜。
+    类/方法判不准返回 `found=False` + `candidates`。
 
-    给一个能直接读本机源码的大模型：读到方法体里 `xxxService.doX()`，本工具确定性回答
-    「`doX` 定义在项目里哪个类、哪个源文件」（多 ISV 前缀野生码上盲 grep 易命中错类）。
-    每条给 调用名 + 目标类全限定名（`target_fqn`，可再对它 `method_calls` 逐层下钻）+
-    目标源码相对路径（`target_relpath`，去这个文件接着读）+ 调用行号。
-    **只列项目内可下钻调用**——平台/外部调用、`equals`/常量、源码全文与字段落库取证一律不回
-    （源码请大模型直接读源文件做完整理解；字段落库取证用 `trace`）。**本工具只回最小导航包**。
-    类/方法判不准时返回 `found=False` + `candidates`，请挑全限定名/正确方法名再查。
+    返回值经紧凑投影防 host 32KB 截断（方法体调用多/重载方法多时按方法计 cap + 字节 governor）；
+    真实总数在 `methods_total`/各方法 `calls_total`/`fields.*_total`。`next_cursor` 非 null 说明
+    还有被截条目，用 cursor=该值再调一次翻页取回，翻完（变 null）前禁止下"无更多调用/字段"结论。
     """
     from ..report import method_calls
 
     conn = _open()
     try:
-        return method_calls.method_calls(conn, class_fqn, method_name)
+        return method_calls.method_calls_compact(conn, class_fqn, method_name, cursor=cursor)
     finally:
         conn.close()
 
 
 def tool_resolve_fields(keys: list[str]) -> dict[str, Any]:
-    """字段标识 → 真实元数据中文名+实体坐标（比对元数据、防命名惯例臆断）。
-
-    **边界**：手上只有一串字段 key、**并不在读某个源文件**时才用本工具；**已经在读源码**用 read_source
-    即可（它已自动回 `field_names`，无需再调本工具）。批量传 key，回 `{"resolved": {key: [{...}] | null}}`。
-    比 trace 便宜得多（O(1) 打词典，只回名字+坐标，不查谁改了它）——命名惯例（`zjjnqk` 是租金还是
-    资金？）不算证据，必须比对。
-    - 字段命中：`{kind:"field", name, form_key, entity_key, level, field_kind, field_type, access}`。
-      `access` 是派生取值语义：**多选基础资料字段（MulBasedataField）也用 `getDynamicObjectCollection()`
-      取选中的基础资料集合，不是分录行**——取分录还是基础资料取决于 key，别凭 API 名当分录。
-    - 分录容器命中（读到 `getDynamicObjectCollection("cqkd_zdfl")` 这类**分录 key**）：
-      `{kind:"entry"/"subentry"/"header", name, form_key, level, parent_key, access}`（access 标"分录容器"）。
-    同一 key 跨多坐标（多分录各有定义、名字可能不同）→ 回 list 全摆出，**不替你选**，
-    消歧靠你读代码时的实体上下文。**钉不出回 `null`——标 unknown，绝不臆造。**
+    """标识批量核对为元数据真实中文名（比 trace 便宜得多，O(1) 打词典，不查谁改了它）。覆盖字段/
+    表头实体/分录/子分录/单据(表单)五类标识——不是只查字段，读源码见到任何一类标识（如
+    `bill.getString("cqkd_amount")`、`.load("cqkd_invoic_apply", ...)`）都必须先调本工具核对，
+    命名惯例不算证据，禁止凭字面猜中文名。`keys` 支持批量：**一次把本轮读到的所有陌生标识都传
+    进去，不得因为想省调用次数就只核实一部分、对其余的凭字面翻译**——批量参数本身就是为了用一次
+    调用覆盖多个标识，不是"选重要的核实、次要的跳过"的理由。已从源码字面量看到单据/分录归属时，
+    key 支持复合限定符——与 `trace` 同一套点号坐标写法：`"单据.字段"`/`"分录.字段"`/
+    `"单据.分录.字段"`（如 `"cqkd_zkd.cqkd_amount"`/`"cqkd_entry.cqkd_amount"`）——匹配到即唯一
+    答案；限定符不含该字段时，返回值 `mismatched_form` 会给出该字段真实所在的单据/分录，不悄悄
+    回退成全部候选掩盖这个信号。不带限定符时同一 key 跨多坐标（名字可能不同）全部列出、不替你选；
+    钉不出回 `null`，标 unknown。
     """
     from ..report import resolve_fields
 
@@ -295,51 +217,11 @@ def tool_resolve_fields(keys: list[str]) -> dict[str, Any]:
         conn.close()
 
 
-def tool_read_source(
-    relpath: str, start_line: int | None = None, end_line: int | None = None,
-    cursor: str | None = None,
-) -> dict[str, Any]:
-    """读项目源码（野生编码正确解码）+ 自动标注其中字段 key 的真实中文名。**读源码优先用本工具**
-    （而非宿主原生 reader）；它已自动回 `field_names`，读源码时无需再单独调 resolve_fields 核名。
-
-    凭什么用它而非宿主原生 reader：① 野生码（GBK/GB2312/UTF-8±BOM 混杂）原生 reader 易乱码，本工具按
-    建库同款编码探测正确解码、行号还与 KB 对齐；② **自动标注** `field_names`——扫文件里出现的字段标识
-    （含 `KEY_X = "cqkd_x"` 的字面值，它就在源码里），打元数据词典回真实中文名+坐标，并按本文件数据包
-    来源做**归属消歧**（三档：unique/resolved 可照抄 `names`；**ambiguous=多单据同名、本文件未解析到实体，
-    别默认当前单据，按 note 顺调用链消歧**）。引用字段中文名**照抄 `field_names`**，未列出的 `<isv>_` 标识
-    用 resolve_fields 核对，**绝不按命名惯例/拼音猜**。坐标带 `field_type`/`access`：`getDynamicObjectCollection(key)`
-    取分录行还是多选基础资料集合取决于 key——基础资料字段（MulBasedataField）≠分录，**别凭 API 名断定是分录**。
-    `start_line/end_line`（1 基含端点）可只读一段（大文件按区间读）；越界路径（../ 逃逸出源码根）会被拒。
-    本工具只做"正确解码 + 字段名标注"，代码逻辑理解由你直接读返回的 `content`。
-
-    **紧凑投影 + 游标分页（防 host 32KB 截断）**：标注 `field_names` 在前（高价值、有界），源码正文
-    `content` 按字节预算填充。`content` 未读全时带 `content_next_cursor`（如 `"content@120"`）——把该值
-    原样作 `cursor=` 再调一次本工具 `read_source(relpath, cursor='content@120')`，即从该行**续读至文件
-    末尾**（逐页 `page.content` + 新 `next_cursor`，到 `null` 读完）；要限定上界改用 `end_line` 重调。
-    `field_names` 超档时带 `field_names_next_cursor`，同法翻页取回全部标注（红线 #4：被截内容可达、不丢）。
-    """
-    from ..report import read_source
-
-    conn = _open()
-    try:
-        return read_source.read_source_compact(
-            conn, relpath, start=start_line, end=end_line, cursor=cursor)
-    finally:
-        conn.close()
-
-
 def tool_cosmic_semantics(topic: str = "") -> dict[str, Any]:
-    """苍穹领域语义文档查询：插件类型/事件时机/SDK 用法/DynamicObject 路径/入库判断/反模式黑名单。
-    **不确定该取哪一篇时，先空参 `cosmic_semantics("")` 列清单**——返回每个主题名 + 一行『何时用』，
-    照它挑一个 topic 再调取全文。
-
-    随包语义文档（`cosmic_kb/semantics/`，分发改造后下沉进包）按主题取一篇 markdown 全文，
-    让**任意 MCP agent**（不止 Claude）都能拿到苍穹纪律与领域知识。
-    - `topic` 命中（相对路径 / 文件名 stem / 子串，如 `plugin-base`、`anti-patterns`、`sdk-orm-access`）
-      → 返回 `{topic, content}`（单篇全文）。
-    - `topic` 空或未命中 → 返回 `{status:'need_topic', available_topics:[...], grouped:{...}}`，
-      请先在清单里挑一个再调。
-    **本工具只回一篇语义文档**；项目源码全文请大模型直接读本机源文件，字段落库取证用 `trace`。
+    """苍穹领域语义文档查询：插件类型/事件时机/SDK 用法/入库判断/反模式黑名单。解释插件/事件/操作
+    语义、判断入库时机、或遇到不认识的 kd.bos.* 符号前必须先查。不确定查哪篇先空参列清单
+    （`{status:'need_topic', available_topics, grouped}`，每条带『何时用』）；命中返回
+    `{topic, content}` 单篇全文。只回语义文档，源码自行读取，字段落库取证用 `trace`。
     """
     from .. import _assets
 
@@ -369,7 +251,6 @@ TOOLS = {
     "bill": tool_bill,
     "method_calls": tool_method_calls,
     "resolve_fields": tool_resolve_fields,
-    "read_source": tool_read_source,
     "cosmic_semantics": tool_cosmic_semantics,
 }
 

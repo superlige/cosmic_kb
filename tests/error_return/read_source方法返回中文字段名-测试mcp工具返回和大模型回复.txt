@@ -1,0 +1,707 @@
+mcp-return:
+{
+  "found": true,
+  "relpath": "am_business/src/main/java/cqkd/am/sys/task/invoiceapply/InvoiceWriteBackTask.java",
+  "source_root": "D:\\kingdee\\asset_management_sys",
+  "encoding": "utf-8",
+  "total_lines": 394,
+  "lines": [
+    1,
+    129
+  ],
+  "keys_omitted": 33,
+  "field_names": {
+    "auditdate": {
+      "tier": "ambiguous",
+      "names": [],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "审核时间",
+          "form_key": "cqkd_htjczl",
+          "level": "header",
+          "field_type": "DateField"
+        },
+        {
+          "kind": "field",
+          "name": "审核日期",
+          "form_key": "sim_vatinvoice",
+          "level": "header",
+          "field_type": "DateTimeField"
+        },
+        {
+          "kind": "field",
+          "name": "审核日期",
+          "form_key": "sim_original_bill",
+          "level": "header",
+          "field_type": "DateTimeField"
+        }
+      ],
+      "note": "歧义：元数据有多个同名字段，本文件静态分析未把此标识解析到具体实体。归属取决于接收变量来源（当前 dataEntity / loadSingle 加载的别的实体 / getAllSonList 等），请顺调用链消歧，勿默认当前单据。"
+    },
+    "billno": {
+      "tier": "ambiguous",
+      "names": [],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "单据编号",
+          "form_key": "cqkd_assetcollateralbd",
+          "level": "header",
+          "field_type": "TextField"
+        },
+        {
+          "kind": "field",
+          "name": "单据编号",
+          "form_key": "sim_vatinvoice",
+          "level": "header",
+          "field_type": "BillNoField"
+        },
+        {
+          "kind": "field",
+          "name": "业务单据编号",
+          "form_key": "sim_original_bill",
+          "level": "header",
+          "field_type": "BillNoField"
+        }
+      ],
+      "note": "歧义：元数据有多个同名字段，本文件静态分析未把此标识解析到具体实体。归属取决于接收变量来源（当前 dataEntity / loadSingle 加载的别的实体 / getAllSonList 等），请顺调用链消歧，勿默认当前单据。"
+    },
+    "cqkd_bule_code": {
+      "tier": "unique",
+      "names": [
+        "蓝字发票代码"
+      ],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "蓝字发票代码",
+          "form_key": "cqkd_invoic_apply",
+          "level": "entry",
+          "field_type": "TextField"
+        }
+      ],
+      "note": null
+    },
+    "cqkd_bule_date": {
+      "tier": "unique",
+      "names": [
+        "开票日期"
+      ],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "开票日期",
+          "form_key": "cqkd_invoic_apply",
+          "level": "entry",
+          "field_type": "DateField"
+        }
+      ],
+      "note": null
+    },
+    "cqkd_bule_num": {
+      "tier": "unique",
+      "names": [
+        "蓝字发票号码"
+      ],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "蓝字发票号码",
+          "form_key": "cqkd_invoic_apply",
+          "level": "entry",
+          "field_type": "TextField"
+        }
+      ],
+      "note": null
+    },
+    "cqkd_contractbill": {
+      "tier": "ambiguous",
+      "names": [],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "合同账单",
+          "form_key": "cqkd_rent_reduction",
+          "level": "entry",
+          "field_type": "BasedataField",
+          "access": "基础资料字段——getDynamicObject() 取关联的基础资料对象，不是分录"
+        },
+        {
+          "kind": "header",
+          "name": "合同账单",
+          "form_key": "cqkd_contractbill",
+          "level": "header",
+          "access": "分录容器——getDynamicObjectCollection() 取的是分录行集合（逐行 get(i)）"
+        }
+      ],
+      "note": "歧义：元数据有多个同名字段，本文件静态分析未把此标识解析到具体实体。归属取决于接收变量来源（当前 dataEntity / loadSingle 加载的别的实体 / getAllSonList 等），请顺调用链消歧，勿默认当前单据。"
+    },
+    "cqkd_fylx_zd": {
+      "tier": "unique",
+      "names": [
+        "费用类型"
+      ],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "费用类型",
+          "form_key": "cqkd_fylx",
+          "level": "header",
+          "field_type": "TextField"
+        }
+      ],
+      "note": null
+    },
+    "cqkd_fylx_zdgl_zr": {
+      "tier": "unique",
+      "names": [
+        "费用类型"
+      ],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "费用类型",
+          "form_key": "cqkd_zkd",
+          "level": "entry",
+          "field_type": "BasedataField",
+          "access": "基础资料字段——getDynamicObject() 取关联的基础资料对象，不是分录"
+        }
+      ],
+      "note": null
+    },
+    "cqkd_invaliddate": {
+      "tier": "unique",
+      "names": [
+        "作废日期"
+      ],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "作废日期",
+          "form_key": "cqkd_invoic_apply",
+          "level": "entry",
+          "field_type": "DateField"
+        }
+      ],
+      "note": null
+    },
+    "cqkd_invoic_apply": {
+      "tier": "ambiguous",
+      "names": [],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "开票申请",
+          "form_key": "cqkd_skdb",
+          "level": "entry",
+          "field_type": "BasedataField",
+          "access": "基础资料字段——getDynamicObject() 取关联的基础资料对象，不是分录"
+        },
+        {
+          "kind": "header",
+          "name": "开票申请",
+          "form_key": "cqkd_invoic_apply",
+          "level": "header",
+          "access": "分录容器——getDynamicObjectCollection() 取的是分录行集合（逐行 get(i)）"
+        }
+      ],
+      "note": "歧义：元数据有多个同名字段，本文件静态分析未把此标识解析到具体实体。归属取决于接收变量来源（当前 dataEntity / loadSingle 加载的别的实体 / getAllSonList 等），请顺调用链消歧，勿默认当前单据。"
+    },
+    "cqkd_invoicedamount": {
+      "tier": "ambiguous",
+      "names": [],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "已开票金额",
+          "form_key": "cqkd_contractperformance",
+          "level": "entry",
+          "field_type": "DecimalField"
+        },
+        {
+          "kind": "field",
+          "name": "已开票金额",
+          "form_key": "cqkd_ht",
+          "level": "entry",
+          "field_type": "DecimalField"
+        },
+        {
+          "kind": "field",
+          "name": "已开票金额",
+          "form_key": "cqkd_contractbill",
+          "level": "header",
+          "field_type": "DecimalField"
+        },
+        {
+          "kind": "field",
+          "name": "已开票金额",
+          "form_key": "cqkd_skdb",
+          "level": "header",
+          "field_type": "DecimalField"
+        },
+        {
+          "kind": "field",
+          "name": "已开票金额",
+          "form_key": "cqkd_ltyz",
+          "level": "header",
+          "field_type": "DecimalField"
+        },
+        {
+          "kind": "field",
+          "name": "已开票金额",
+          "form_key": "cqkd_zkd",
+          "level": "header",
+          "field_type": "DecimalField"
+        }
+      ],
+      "note": "歧义：元数据有多个同名字段，本文件静态分析未把此标识解析到具体实体。归属取决于接收变量来源（当前 dataEntity / loadSingle 加载的别的实体 / getAllSonList 等），请顺调用链消歧，勿默认当前单据。"
+    },
+    "cqkd_invoiceentry": {
+      "tier": "unique",
+      "names": [
+        "发票信息"
+      ],
+      "coordinates": [
+        {
+          "kind": "entry",
+          "name": "发票信息",
+          "form_key": "cqkd_invoic_apply",
+          "level": "entry",
+          "access": "分录容器——getDynamicObjectCollection() 取的是分录行集合（逐行 get(i)）"
+        }
+      ],
+      "note": null
+    },
+    "cqkd_invoiceid": {
+      "tier": "unique",
+      "names": [
+        "发票id"
+      ],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "发票id",
+          "form_key": "cqkd_invoic_apply",
+          "level": "entry",
+          "field_type": "TextField"
+        }
+      ],
+      "note": null
+    },
+    "cqkd_invoicestatus": {
+      "tier": "resolved",
+      "names": [
+        "开票情况"
+      ],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "开票情况",
+          "form_key": "cqkd_invoic_apply",
+          "level": "entry",
+          "field_type": "ComboField",
+          "resolved_lines": [
+            130,
+            144,
+            147,
+            164,
+            178,
+            182,
+            188,
+            384
+          ]
+        }
+      ],
+      "also_in_forms": [
+        "cqkd_skdb"
+      ],
+      "note": "本文件 field_access 按数据包来源把此标识解析到上述单据；其余同名字段未在本文件命中。另有同名字段在：cqkd_skdb。"
+    },
+    "cqkd_onwayinvoice": {
+      "tier": "ambiguous",
+      "names": [],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "在途开票金额",
+          "form_key": "cqkd_contractperformance",
+          "level": "entry",
+          "field_type": "DecimalField"
+        },
+        {
+          "kind": "field",
+          "name": "在途开票金额",
+          "form_key": "cqkd_ht",
+          "level": "entry",
+          "field_type": "DecimalField"
+        },
+        {
+          "kind": "field",
+          "name": "在途开票金额",
+          "form_key": "cqkd_contractbill",
+          "level": "header",
+          "field_type": "DecimalField"
+        },
+        {
+          "kind": "field",
+          "name": "在途开票金额",
+          "form_key": "cqkd_skdb",
+          "level": "header",
+          "field_type": "DecimalField"
+        },
+        {
+          "kind": "field",
+          "name": "在途开票金额",
+          "form_key": "cqkd_ltyz",
+          "level": "header",
+          "field_type": "DecimalField"
+        },
+        {
+          "kind": "field",
+          "name": "在途开票金额",
+          "form_key": "cqkd_zkd",
+          "level": "header",
+          "field_type": "DecimalField"
+        }
+      ],
+      "note": "歧义：元数据有多个同名字段，本文件静态分析未把此标识解析到具体实体。归属取决于接收变量来源（当前 dataEntity / loadSingle 加载的别的实体 / getAllSonList 等），请顺调用链消歧，勿默认当前单据。"
+    },
+    "cqkd_recisrcid": {
+      "tier": "unique",
+      "names": [
+        "源收款单id"
+      ],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "源收款单id",
+          "form_key": "cqkd_invoic_apply",
+          "level": "header",
+          "field_type": "TextField"
+        }
+      ],
+      "note": null
+    },
+    "cqkd_red_amount": {
+      "tier": "resolved",
+      "names": [
+        "红冲金额"
+      ],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "红冲金额",
+          "form_key": "cqkd_invoic_apply",
+          "level": "entry",
+          "field_type": "AmountField",
+          "resolved_lines": [
+            388
+          ]
+        }
+      ],
+      "also_in_forms": [
+        "cqkd_invoic_apply_base",
+        "cqkd_skdb"
+      ],
+      "note": "本文件 field_access 按数据包来源把此标识解析到上述单据；其余同名字段未在本文件命中。另有同名字段在：cqkd_invoic_apply_base, cqkd_skdb。"
+    },
+    "cqkd_red_code": {
+      "tier": "unique",
+      "names": [
+        "红字发票代码"
+      ],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "红字发票代码",
+          "form_key": "cqkd_invoic_apply",
+          "level": "entry",
+          "field_type": "TextField"
+        }
+      ],
+      "note": null
+    },
+    "cqkd_red_date": {
+      "tier": "unique",
+      "names": [
+        "红冲日期"
+      ],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "红冲日期",
+          "form_key": "cqkd_invoic_apply",
+          "level": "entry",
+          "field_type": "DateField"
+        }
+      ],
+      "note": null
+    },
+    "cqkd_red_num": {
+      "tier": "resolved",
+      "names": [
+        "红字发票号码"
+      ],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "红字发票号码",
+          "form_key": "cqkd_invoic_apply",
+          "level": "entry",
+          "field_type": "TextField",
+          "resolved_lines": [
+            183,
+            386
+          ]
+        }
+      ],
+      "also_in_forms": [
+        "cqkd_invoic_apply_base",
+        "cqkd_skdb"
+      ],
+      "note": "本文件 field_access 按数据包来源把此标识解析到上述单据；其余同名字段未在本文件命中。另有同名字段在：cqkd_invoic_apply_base, cqkd_skdb。"
+    },
+    "cqkd_remaininvoice": {
+      "tier": "ambiguous",
+      "names": [],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "剩余可开票金额",
+          "form_key": "cqkd_contractperformance",
+          "level": "entry",
+          "field_type": "DecimalField"
+        },
+        {
+          "kind": "field",
+          "name": "剩余可开票金额",
+          "form_key": "cqkd_ht",
+          "level": "entry",
+          "field_type": "DecimalField"
+        },
+        {
+          "kind": "field",
+          "name": "剩余可开票金额",
+          "form_key": "cqkd_contractbill",
+          "level": "header",
+          "field_type": "DecimalField"
+        },
+        {
+          "kind": "field",
+          "name": "剩余可开票金额",
+          "form_key": "cqkd_skdb",
+          "level": "header",
+          "field_type": "DecimalField"
+        },
+        {
+          "kind": "field",
+          "name": "剩余可开票金额",
+          "form_key": "cqkd_ltyz",
+          "level": "header",
+          "field_type": "DecimalField"
+        },
+        {
+          "kind": "field",
+          "name": "剩余可开票金额",
+          "form_key": "cqkd_zkd",
+          "level": "header",
+          "field_type": "DecimalField"
+        }
+      ],
+      "note": "歧义：元数据有多个同名字段，本文件静态分析未把此标识解析到具体实体。归属取决于接收变量来源（当前 dataEntity / loadSingle 加载的别的实体 / getAllSonList 等），请顺调用链消歧，勿默认当前单据。"
+    },
+    "cqkd_skdb": {
+      "tier": "unique",
+      "names": [
+        "收款单"
+      ],
+      "coordinates": [
+        {
+          "kind": "header",
+          "name": "收款单",
+          "form_key": "cqkd_skdb",
+          "level": "header",
+          "access": "分录容器——getDynamicObjectCollection() 取的是分录行集合（逐行 get(i)）"
+        }
+      ],
+      "note": null
+    },
+    "cqkd_skmxb": {
+      "tier": "unique",
+      "names": [
+        "收款单表"
+      ],
+      "coordinates": [
+        {
+          "kind": "entry",
+          "name": "收款单表",
+          "form_key": "cqkd_skdb",
+          "level": "entry",
+          "access": "分录容器——getDynamicObjectCollection() 取的是分录行集合（逐行 get(i)）"
+        }
+      ],
+      "note": null
+    },
+    "cqkd_skmxb_fylx": {
+      "tier": "ambiguous",
+      "names": [],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "费用类型",
+          "form_key": "cqkd_skdb",
+          "level": "entry",
+          "field_type": "BasedataField",
+          "access": "基础资料字段——getDynamicObject() 取关联的基础资料对象，不是分录"
+        },
+        {
+          "kind": "field",
+          "name": "费用类型",
+          "form_key": "cqkd_ppzd",
+          "level": "entry",
+          "field_type": "BasedataField",
+          "access": "基础资料字段——getDynamicObject() 取关联的基础资料对象，不是分录"
+        }
+      ],
+      "note": "歧义：元数据有多个同名字段，本文件静态分析未把此标识解析到具体实体。归属取决于接收变量来源（当前 dataEntity / loadSingle 加载的别的实体 / getAllSonList 等），请顺调用链消歧，勿默认当前单据。"
+    },
+    "cqkd_skmxb_htzdrowid": {
+      "tier": "ambiguous",
+      "names": [],
+      "coordinates": [
+        {
+          "kind": "field",
+          "name": "合同账单分录id",
+          "form_key": "cqkd_skdb",
+          "level": "entry",
+          "field_type": "TextField"
+        },
+        {
+          "kind": "field",
+          "name": "合同账单分录id",
+          "form_key": "cqkd_ppzd",
+          "level": "entry",
+          "field_type": "TextField"
+        }
+      ],
+      "note": "歧义：元数据有多个同名字段，本文件静态分析未把此标识解析到具体实体。归属取决于接收变量来源（当前 dataEntity / loadSingle 加载的别的实体 / getAllSonList 等），请顺调用链消歧，勿默认当前单据。"
+    }
+  },
+  "note": "紧凑投影（防 MCP 32KB 截断）：字段名标注 `field_names` 在前（高价值、有界），源码正文 `content` 按字节预算填充。`content` 未读全时带 `content_next_cursor`（如 `content@120`）——把该值原样作 `cursor=` 再调 `read_source(relpath, cursor=该值)` 即从该行**续读至文件末尾**（逐页 `page.content` + 新 `next_cursor`，到 null 读完）；要限定上界改用 `end_line` 重调。`field_names` 超档时带 `field_names_next_cursor`（同法翻页取回全部标注）。字段名按三档置信：✅ unique/resolved 照抄；⚠️ ambiguous 多单据同名、本文件未解析到实体，勿默认当前单据，按各 key 的 note 顺调用链消歧。 `类.常量`限定引用（如 XxxCon.ENTITY）已查项目常量表解析出字面值再标注，key 即该表达式本身、带 resolved_constant 标明字面值+定义位置；解不出/歧义不臆造，勿凭常量英文名猜中文含义。 getDynamicObjectCollection(key) 取分录行还是多选基础资料集合取决于 key——看坐标 field_type/access，勿凭 API 名断定是分录。",
+  "field_names_next_cursor": "field_names@25",
+  "content_capped_lines": 265,
+  "content_next_cursor": "content@130",
+  "content": "package cqkd.am.sys.task.invoiceapply;\n\nimport cqkd.bd.common.cons.BaseCon;\nimport cqspb.bd.common.cons.TemporaryStopCon;\nimport cqspb.bd.common.cons.asset.facturate.FacturateCon;\nimport kd.bos.bill.BillShowParameter;\nimport kd.bos.context.RequestContext;\nimport kd.bos.dataentity.entity.DynamicObject;\nimport kd.bos.dataentity.entity.DynamicObjectCollection;\nimport kd.bos.exception.KDBizException;\nimport kd.bos.exception.KDException;\nimport kd.bos.logging.BizLog;\nimport kd.bos.orm.query.QCP;\nimport kd.bos.orm.query.QFilter;\nimport kd.bos.report.ReportShowParameter;\nimport kd.bos.schedule.executor.AbstractTask;\nimport kd.bos.servicehelper.BusinessDataServiceHelper;\nimport kd.bos.servicehelper.MetadataServiceHelper;\nimport kd.bos.servicehelper.operation.SaveServiceHelper;\n\nimport java.math.BigDecimal;\nimport java.util.*;\nimport java.util.stream.Collectors;\n\n/**\n * 后台任务插件\n */\npublic class InvoiceWriteBackTask extends AbstractTask {\n\n    @Override\n    public void execute(RequestContext requestContext, Map<String, Object> map) throws KDException {\n\n        //发票云开票申请\n        QFilter qFilter = new QFilter(\"textfield1\", QCP.not_equals, \" \");\n        DynamicObject[] invoiceApplies = BusinessDataServiceHelper.load(\"sim_original_bill\", \"textfield1,id\", qFilter.toArray());\n        List<Long> ids = Arrays.stream(invoiceApplies).map(o -> o.getLong(\"id\")).collect(Collectors.toList());\n        Map<Long, String> applyIdToAssetApplyNum = Arrays.stream(invoiceApplies).collect(\n                Collectors.toMap(k -> k.getLong(\"id\"), v -> v.getString(\"textfield1\"))\n        );\n\n\n        //发票关系\n        QFilter qFilter1 = new QFilter(\"sbillid\", QCP.in, ids);\n        DynamicObject[] simBillInvRelations = BusinessDataServiceHelper.load(\"sim_bill_inv_relation\", \"sbillid,tbillid,tbillno\", qFilter1.toArray());\n        List<String> tBillNos = Arrays.stream(simBillInvRelations).map(o -> o.getString(\"tbillno\")).collect(Collectors.toList());\n\n\n        //关联发票-正常/作废/红冲 通过单据编码查询\n        String invoiceFields = String.join(\",\", \"invoiceno\", \"invoicecode\", \"totalamount\", \"invoicestatus\", \"issuetime\",\n                \"issuetype\", \"originalinvoiceno\", \"cqkd_issyncasset\",\"invaliddate\",\"issuestatus\");\n        QFilter qFilter2 = new QFilter(\"billno\", QCP.in, tBillNos);\n        DynamicObject[] simInvoices = BusinessDataServiceHelper.load(\"sim_vatinvoice\", invoiceFields, new QFilter[]{qFilter2});\n\n        //所有发票号码-id\n        Map<String, Long> invoiceNoToId = Arrays.stream(simInvoices)\n                //开票失败的发票不处理\n                .filter(o->!o.getString(\"issuestatus\").equals(\"3\"))\n                .collect(Collectors.toMap(k -> k.getString(\"invoiceno\"), v -> v.getLong(\"id\")));\n\n\n        //所有发票id-发票云开票申请id\n        //当前只有蓝票\n        Map<Long, Long> invoiceIdToApply = Arrays.stream(simBillInvRelations).collect(\n                Collectors.toMap((k -> k.getLong(\"tbillid\")), v -> v.getLong(\"sbillid\"))\n        );\n\n        //红票发票id-发票云开票申请id  红字发票id不存在关联表中 手动构建\n        Arrays.stream(simInvoices).filter(o -> !invoiceIdToApply.containsKey(o.getLong(\"id\")))\n                .forEach(o -> {\n                    String blueInvoiceNo = o.getString(\"originalinvoiceno\");\n                    Long blueId = invoiceNoToId.get(blueInvoiceNo);\n                    Long blueApplyId = invoiceIdToApply.get(blueId);\n                    invoiceIdToApply.put(o.getLong(\"id\"), blueApplyId);\n                    BizLog.log(\"红票id:\"+o.getLong(\"id\")+'\\n'\n                            +\"蓝票id:\"+blueId+'\\n'\n                            +\"蓝票号码:\"+blueInvoiceNo+'\\n'\n                            +\"对应蓝票的开票申请id:\"+blueApplyId);\n                });\n\n\n        //资产开票申请\n        String fields = String.join(\",\", \"cqkd_invoiceentry.cqkd_invoiceid\", \"cqkd_invoiceentry.cqkd_invoicestatus\",\n                \"cqkd_invoiceentry.cqkd_bule_date\", \"cqkd_invoiceentry.cqkd_bule_num\", \"cqkd_invoiceentry.cqkd_bule_code\",\n                \"cqkd_invoiceentry.cqkd_red_date\", \"cqkd_invoiceentry.cqkd_red_num\", \"cqkd_invoiceentry.cqkd_red_code\",\n                \"cqkd_invoiceentry.cqkd_red_amount\", \"cqkd_sourceids\", \"cqkd_recisrcid\", \"cqkd_sourcebilltype\", \"billno\",\"cqkd_invaliddate\",\"cqkd_srctransid\",\n                FacturateCon.TEMPORARYID,FacturateCon.ENTRY5_TOTALAMOUNT);\n        QFilter qFilter3 = new QFilter(\"billno\", QCP.in, applyIdToAssetApplyNum.values());\n        DynamicObject[] assetApplies = BusinessDataServiceHelper.load(\"cqkd_invoic_apply\", fields, qFilter3.toArray());\n        Map<String, DynamicObject> billNoToAssetApplies = Arrays.stream(assetApplies).collect(\n                Collectors.toMap(k -> k.getString(\"billno\"), v -> v)\n        );\n        //需要保存的资产开票申请\n        List<UpdateRuleDTO> needUpdateAssetApplies = new ArrayList<>();\n\n\n        for (DynamicObject simInvoice : simInvoices) {\n            long id = simInvoice.getLong(\"id\");\n\n            String invoiceNo = simInvoice.getString(\"invoiceno\");//发票号码\n            String originalInvoiceNo = simInvoice.getString(\"originalinvoiceno\");//原发票号码\n            String invoiceCode = simInvoice.getString(\"invoicecode\");//发票代码\n            String invoiceStatus = simInvoice.getString(\"invoicestatus\");//发票状态\n            String issueType = simInvoice.getString(\"issuetype\");//开票类型\n            Date issueTime = simInvoice.getDate(\"issuetime\");//开票日期\n            BigDecimal totalAmount = simInvoice.getBigDecimal(\"totalamount\");//价税合计\n            Date invaliddate = simInvoice.getDate(\"invaliddate\");//作废日期\n\n\n\n            Long applyId = invoiceIdToApply.get(id);\n            String assetApplyNum = applyIdToAssetApplyNum.get(applyId);\n            DynamicObject assetApply = billNoToAssetApplies.get(assetApplyNum);\n\n            DynamicObjectCollection invoiceEntry = assetApply.getDynamicObjectCollection(\"cqkd_invoiceentry\");\n\n\n            //开票类型\n            //蓝票\n            if (\"0\".equals(issueType)) {\n                //发票状态\n                //正常\n                if (\"0\".equals(invoiceStatus)||\"3\".equals(invoiceStatus)) {\n                    DynamicObject row = invoiceEntry.stream()\n                            .filter(o -> o.getString(\"cqkd_bule_num\").equals(invoiceNo))\n//                            .filter(o -> o.getString(\"cqkd_invoicestatus\").equals(\"0\"))\n                            .findFirst().orElse(null);\n                    if (row==null){\n                        DynamicObject addNew = invoiceEntry.addNew();\n                        addNew.set(\"cqkd_invoiceid\", String.valueOf(id));"
+}
+{
+  "found": true,
+  "relpath": "am_business/src/main/java/cqkd/am/sys/task/invoiceapply/InvoiceWriteBackTask.java",
+  "encoding": "utf-8",
+  "total_lines": 394,
+  "page": {
+    "section": "content",
+    "from_line": 130,
+    "to_line": 394,
+    "total_lines": 394,
+    "content": "                        addNew.set(\"cqkd_invoicestatus\", \"0\");\n                        addNew.set(\"cqkd_bule_date\", issueTime);\n                        addNew.set(\"cqkd_bule_num\", invoiceNo);\n                        addNew.set(\"cqkd_bule_code\", invoiceCode);\n                        addNew.set(FacturateCon.ENTRY5_TOTALAMOUNT,totalAmount);\n                        UpdateRuleDTO ruleDTO = new UpdateRuleDTO(1, assetApply, totalAmount);\n                        needUpdateAssetApplies.add(ruleDTO);\n                    }\n                }\n                //作废\n                else if (\"6\".equals(invoiceStatus)) {\n                    //资产开票申请-对应发票行\n                    DynamicObject row = invoiceEntry.stream()\n                            .filter(o -> o.getString(\"cqkd_bule_num\").equals(invoiceNo))\n                            .filter(o -> o.getString(\"cqkd_invoicestatus\").equals(\"0\"))\n                            .findFirst().orElse(null);\n                    if (row != null) {\n                        row.set(\"cqkd_invoicestatus\", invoiceStatus);\n                        row.set(\"cqkd_invaliddate\", invaliddate);\n                        UpdateRuleDTO ruleDTO = new UpdateRuleDTO(-1, assetApply, totalAmount.abs());\n                        needUpdateAssetApplies.add(ruleDTO);\n                    } else {\n                        throw new KDBizException(\"资产开票申请作废发票反写异常\" + '\\n' + \"资产开票申请:\" + assetApplyNum + \"蓝字发票号码为\" + invoiceNo + \"的发票行不存在\");\n                    }\n                }\n            }\n            //红票\n            else if (\"1\".equals(issueType)) {\n                //发票状态\n                //正常\n                if (\"0\".equals(invoiceStatus)) {\n                    //资产开票申请-对应未红冲发票行-更新原蓝票行\n                    Optional<DynamicObject> first = invoiceEntry.stream()\n                            .filter(o -> o.getString(\"cqkd_bule_num\").equals(originalInvoiceNo))\n                            .filter(o -> o.getString(\"cqkd_invoicestatus\").equals(\"0\"))\n                            .findFirst();\n                    BizLog.log(\"资产开票申请发票反写日志查询原蓝票行:\" + first);\n                    if (first.isPresent()) {\n                        BizLog.log(\"资产开票申请发票反写日志进入红票反写:\" + '\\n' +\n                                \"蓝票=\" + first.get().getString(\"cqkd_bule_num\") + \",\" + originalInvoiceNo + '\\n'\n                                + \"红票=\" + invoiceNo);\n                        setSameInvoiceFields(needUpdateAssetApplies, simInvoice, invoiceNo,\n                                invoiceCode, issueTime, totalAmount, assetApply, first.get());\n                        continue;\n                    }\n                    //资产开票申请-对应已经红冲发票行且不存在相同红字行-新增一行\n                    DynamicObject alreadyRedRow = invoiceEntry.stream()\n                            .filter(o -> o.getString(\"cqkd_bule_num\").equals(originalInvoiceNo))\n                            .filter(o -> o.getString(\"cqkd_invoicestatus\").equals(\"3\"))\n                            .findFirst().orElse(null);\n                    DynamicObject sameInvoiceNoRow = invoiceEntry.stream()\n                            .filter(o -> o.getString(\"cqkd_bule_num\").equals(originalInvoiceNo))\n                            .filter(o -> o.getString(\"cqkd_invoicestatus\").equals(\"3\"))\n                            .filter(o->o.getString(\"cqkd_red_num\").equals(invoiceNo))\n                            .findFirst().orElse(null);\n                    if (alreadyRedRow!=null&&sameInvoiceNoRow==null){\n                        DynamicObject addNew = invoiceEntry.addNew();\n                        addNew.set(\"cqkd_invoiceid\", alreadyRedRow.getString(\"cqkd_invoiceid\"));\n                        addNew.set(\"cqkd_invoicestatus\", alreadyRedRow.getString(\"cqkd_invoicestatus\"));\n                        addNew.set(\"cqkd_bule_date\", alreadyRedRow.getDate(\"cqkd_bule_date\"));\n                        addNew.set(\"cqkd_bule_num\", alreadyRedRow.getString(\"cqkd_bule_num\"));\n                        addNew.set(\"cqkd_bule_code\", alreadyRedRow.getString(\"cqkd_bule_code\"));\n                        setSameInvoiceFields(needUpdateAssetApplies, simInvoice, invoiceNo,\n                                invoiceCode, issueTime, totalAmount, assetApply, addNew);\n                    }\n                }\n            }\n        }\n\n        //分配发票开票金额到合同账单、收款单、转账单\n        writeBackInvoiceAmtToSrcBills(needUpdateAssetApplies);\n        DynamicObject[] needUpdateApplies = needUpdateAssetApplies.stream().map(UpdateRuleDTO::getAssetApply).toArray(DynamicObject[]::new);\n        List<DynamicObject> distinctApplies=new ArrayList<>();\n        for (DynamicObject needUpdateApplier : needUpdateApplies) {\n            long id = needUpdateApplier.getLong(BaseCon.ID);\n                if (distinctApplies.stream().noneMatch(o -> o.getLong(BaseCon.ID) == id)) {\n                    distinctApplies.add(needUpdateApplier);\n                }\n        }\n        SaveServiceHelper.save(distinctApplies.toArray(new DynamicObject[0]));\n    }\n    public static void writeBackInvoiceAmtToSrcBills(List<UpdateRuleDTO> needUpdateAssetApplies){\n        List<DynamicObject> needUpdateReceipts = new ArrayList<>();\n        List<DynamicObject> needUpdateTrans= new ArrayList<>();\n        String billFields = String.join(\",\", \"cqkd_invoicedamount\", \"cqkd_onwayinvoice\", \"cqkd_remaininvoice\");\n        for (UpdateRuleDTO needUpdateAssetApply : needUpdateAssetApplies) {\n            DynamicObject assetApply = needUpdateAssetApply.getAssetApply();\n            String type = assetApply.getString(\"cqkd_sourcebilltype\");\n            if (\"1\".equals(type)) {\n                BigDecimal invoiceAmount = needUpdateAssetApply.getInvoiceAmount();\n                int calType = needUpdateAssetApply.getCalType();\n                String srcBillIds = assetApply.getString(\"cqkd_sourceids\");\n                List<Long> longBillIds = Arrays.stream(srcBillIds.split(\",\")).map(Long::valueOf).collect(Collectors.toList());\n                QFilter qFilter4 = new QFilter(\"id\", QCP.in, longBillIds);\n                DynamicObject[] srcBills = BusinessDataServiceHelper.load(\"cqkd_contractbill\", billFields + \",cqkd_ysrq\", qFilter4.toArray());\n                DynamicObject[] sorted = Arrays.stream(srcBills)\n                        .sorted(Comparator.comparing(o -> o.getDate(\"cqkd_ysrq\")))\n                        .toArray(DynamicObject[]::new);\n                if (calType == 1) {\n                    setAssignmentAmount(sorted, invoiceAmount, 1, \"cqkd_onwayinvoice\", \"cqkd_invoicedamount\");\n                } else {\n                    setAssignmentAmount(sorted, invoiceAmount, -1, \"cqkd_remaininvoice\", \"cqkd_invoicedamount\");\n                }\n                SaveServiceHelper.save(srcBills);\n            } else if (\"2\".equals(type)) {\n                writeBackTransOrReceipt(needUpdateReceipts,needUpdateAssetApply,billFields,\n                        \"cqkd_recisrcid\",\"cqkd_skdb\",\"cqkd_skmxb\",\"cqkd_skmxb_fylx\",\n                        \"cqkd_skmxb_htzdrowid\",\"cqkd_skmxb_ssje\");\n            } else if (\"3\".equals(type)) {\n                writeBackTransOrReceipt(needUpdateTrans,needUpdateAssetApply,billFields,\n                        \"cqkd_srctransid\",\"cqkd_zkd\",\"cqkd_zrzd\",\"cqkd_fylx_zdgl_zr\",\n                        \"cqkd_zdzj_zr\",\"cqkd_zrje_zr\");\n            } else if (\"4\".equals(type)) {\n                BigDecimal invoiceAmount = needUpdateAssetApply.getInvoiceAmount();\n                int calType = needUpdateAssetApply.getCalType();\n                String srcBillIds = assetApply.getString(FacturateCon.TEMPORARYID);\n                QFilter qFilter4 = new QFilter(BaseCon.ID, QCP.in, Long.valueOf(srcBillIds));\n                DynamicObject temporaryBill = BusinessDataServiceHelper.loadSingle(TemporaryStopCon.ENTITY, billFields, qFilter4.toArray());\n                if (calType == 1){\n                    setAssignmentAmount(new DynamicObject[]{temporaryBill}, invoiceAmount, 1, \"cqkd_onwayinvoice\",\n                            \"cqkd_invoicedamount\");\n                }else {\n                    setAssignmentAmount(new DynamicObject[]{temporaryBill}, invoiceAmount, -1, \"cqkd_remaininvoice\",\n                            \"cqkd_invoicedamount\");\n                }\n                SaveServiceHelper.save(new DynamicObject[]{temporaryBill});\n            }\n\n        }\n\n        //保存资产开票申请、合同账单、收款单\n\n        SaveServiceHelper.save(needUpdateReceipts.toArray(new DynamicObject[0]));\n        SaveServiceHelper.save(needUpdateTrans.toArray(new DynamicObject[0]));\n    }\n\n    public static void writeBackTransOrReceipt(List<DynamicObject> needUpdateBills,UpdateRuleDTO needUpdateAssetApply,String billFields\n    ,String srcIdKey,String entityKey,String entryKey,String entryExpenseKey,String entrySrcIdKey,String entryAmtKey){\n        DynamicObject assetApply = needUpdateAssetApply.getAssetApply();\n        int calType = needUpdateAssetApply.getCalType();\n        BigDecimal invoiceAmount = needUpdateAssetApply.getInvoiceAmount();\n        String srcReceiptIds = assetApply.getString(srcIdKey);\n        List<Long> longReceiptIds = Arrays.stream(srcReceiptIds.split(\",\")).map(Long::valueOf).collect(Collectors.toList());\n        QFilter qFilter4 = new QFilter(\"id\", QCP.in, longReceiptIds);\n        String fields= String.join(\",\", billFields, \"auditdate\",entrySrcIdKey,entryAmtKey,entryExpenseKey);\n        DynamicObject[] receipts = BusinessDataServiceHelper.load(entityKey, fields,\n                qFilter4.toArray(),\"auditdate\");\n\n        Long[] allBillIds = Arrays.stream(receipts)\n                .map(o -> o.getDynamicObjectCollection(entryKey))\n                .map(o -> o.stream()\n                        .filter(o1->!o1.getDynamicObject(entryExpenseKey).getString(\"cqkd_fylx_zd\").equals(\"保证金\"))\n                        .filter(o1->o1.getBigDecimal(entryAmtKey).compareTo(BigDecimal.ZERO)>0)\n                        .map(o1 -> o1.getString(entrySrcIdKey))\n                        .collect(Collectors.toList()))\n                .flatMap(List::stream)\n                .map(Long::valueOf)\n                .toArray(Long[]::new);\n\n        DynamicObject[] allReceiptBills = Arrays\n                .stream(BusinessDataServiceHelper.load(allBillIds, MetadataServiceHelper.getDataEntityType(\"cqkd_contractbill\")))\n                .toArray(DynamicObject[]::new);\n\n        Map<Long, List<DynamicObject>> receiptIdToBills = new HashMap<>();\n        for (DynamicObject sortedReceipt : receipts) {\n            List<Long> billIds = sortedReceipt.getDynamicObjectCollection(entryKey).stream()\n                    .filter(o -> !o.getDynamicObject(entryExpenseKey).getString(\"cqkd_fylx_zd\").equals(\"保证金\"))\n                    .filter(o->o.getBigDecimal(entryAmtKey).compareTo(BigDecimal.ZERO)>0)\n                    .map(o -> o.getString(entrySrcIdKey))\n                    .map(Long::valueOf)\n                    .collect(Collectors.toList());\n            List<DynamicObject> receiptBills = Arrays.stream(allReceiptBills)\n                    .filter(o -> billIds.contains(o.getLong(\"id\")))\n                    .collect(Collectors.toList());\n            receiptIdToBills.put(sortedReceipt.getLong(\"id\"), receiptBills);\n        }\n\n\n        Map<Long, BigDecimal> map1;\n        if (calType == 1) {\n            map1 = setAssignmentAmount(receipts, invoiceAmount, 1, \"cqkd_onwayinvoice\",\n                    \"cqkd_invoicedamount\");\n            for (DynamicObject sortedReceipt : receipts) {\n                long id = sortedReceipt.getLong(\"id\");\n                BigDecimal toBillAmount = map1.get(id);\n                DynamicObject[] sorted = getSortedBills(id, receiptIdToBills);\n                setAssignmentAmount(sorted, toBillAmount, 1, \"cqkd_onwayinvoice\", \"cqkd_invoicedamount\");\n                SaveServiceHelper.save(sorted);\n            }\n\n\n        } else {\n            map1 = setAssignmentAmount(receipts, invoiceAmount, -1, \"cqkd_remaininvoice\",\n                    \"cqkd_invoicedamount\");\n            for (DynamicObject sortedReceipt : receipts) {\n                long id = sortedReceipt.getLong(\"id\");\n                BigDecimal toBillAmount = map1.get(id);\n                DynamicObject[] sorted = getSortedBills(id, receiptIdToBills);\n                setAssignmentAmount(sorted, toBillAmount, -1, \"cqkd_remaininvoice\", \"cqkd_invoicedamount\");\n                SaveServiceHelper.save(sorted);\n            }\n        }\n        needUpdateBills.addAll(Arrays.stream(receipts).collect(Collectors.toList()));\n    }\n\n    public static DynamicObject[] getSortedBills(long id, Map<Long, List<DynamicObject>> receiptIdToBills) {\n        List<DynamicObject> bills = receiptIdToBills.get(id);\n        DynamicObject[] billsArray = bills.toArray(new DynamicObject[0]);\n        return Arrays.stream(billsArray)\n                .sorted(Comparator.comparing(o -> o.getDate(\"cqkd_ysrq\")))\n                .toArray(DynamicObject[]::new);\n    }\n\n    public static Map<Long, BigDecimal> setAssignmentAmount(DynamicObject[] bills, BigDecimal invoiceAmount, int way, String subField, String addField) {\n        BigDecimal tolRemain = invoiceAmount;\n        Map<Long, BigDecimal> billIdToAssignmentAmount = new HashMap<>();\n        for (DynamicObject bill : bills) {\n            BigDecimal remainInvoiceAmount = bill.getBigDecimal(subField);\n            BigDecimal onWayInvoiceAmount = bill.getBigDecimal(addField);\n            long id = bill.getLong(\"id\");\n            if (way == 1) {\n                if (tolRemain.compareTo(remainInvoiceAmount) > 0) {\n                    bill.set(subField, BigDecimal.ZERO);\n                    bill.set(addField, onWayInvoiceAmount.add(remainInvoiceAmount));\n                    tolRemain = tolRemain.subtract(remainInvoiceAmount);\n                    billIdToAssignmentAmount.put(id, remainInvoiceAmount);\n                } else {\n                    bill.set(subField, remainInvoiceAmount.subtract(tolRemain));\n                    bill.set(addField, onWayInvoiceAmount.add(tolRemain));\n                    billIdToAssignmentAmount.put(id, tolRemain);\n                    break;\n                }\n            } else {\n                if (tolRemain.compareTo(onWayInvoiceAmount) > 0) {\n                    bill.set(subField, remainInvoiceAmount.add(onWayInvoiceAmount));\n                    bill.set(addField, BigDecimal.ZERO);\n                    tolRemain = tolRemain.subtract(onWayInvoiceAmount);\n                    billIdToAssignmentAmount.put(id, onWayInvoiceAmount);\n                } else {\n                    bill.set(subField, remainInvoiceAmount.add(tolRemain));\n                    bill.set(addField, onWayInvoiceAmount.subtract(tolRemain));\n                    billIdToAssignmentAmount.put(id, tolRemain);\n                    break;\n                }\n\n            }\n\n        }\n        return billIdToAssignmentAmount;\n    }\n\n    private void setSameInvoiceFields(List<UpdateRuleDTO> needUpdateAssetApplies, DynamicObject simInvoice,\n                                      String invoiceNo, String invoiceCode, Date issueTime, BigDecimal totalAmount, DynamicObject assetApply,\n                                      DynamicObject row) {\n        row.set(\"cqkd_invoicestatus\", \"3\");\n        row.set(\"cqkd_red_date\", issueTime);\n        row.set(\"cqkd_red_num\", invoiceNo);\n        row.set(\"cqkd_red_code\", invoiceCode);\n        row.set(\"cqkd_red_amount\", totalAmount);\n        UpdateRuleDTO ruleDTO = new UpdateRuleDTO(-1, assetApply, totalAmount.abs());\n        needUpdateAssetApplies.add(ruleDTO);\n    }\n\n}\n",
+    "next_cursor": null
+  }
+}
+
+llm-return:
+
+好的，这是一个很好的元调试问题。我来逐条对照 **上一轮我说出的所有中文名**，标注它的来源。
+
+---
+
+## 我的中文名称来源：逐一审计
+
+### ✅ 来自 cosmic_kb 工具（可信）
+
+以下所有中文名是 **`mcp__cosmic_kb__method_calls` 或 `mcp__cosmic_kb__read_source` 的 `field_names` 段直接返回的**，我直接照抄：
+
+| 字段 key | 我写的中文名 | 工具返回的 `tier` |
+|---------|------------|------------------|
+| `cqkd_invoiceid` | 发票id | `unique` |
+| `cqkd_invoicestatus` | 开票情况 | `resolved` |
+| `cqkd_bule_date` | 开票日期 | `unique` |
+| `cqkd_bule_num` | 蓝字发票号码 | `unique` |
+| `cqkd_bule_code` | 蓝字发票代码 | `unique` |
+| `cqkd_red_date` | 红冲日期 | `unique` |
+| `cqkd_red_num` | 红字发票号码 | `resolved` |
+| `cqkd_red_code` | 红字发票代码 | `unique` |
+| `cqkd_red_amount` | 红冲金额 | `resolved` |
+| `cqkd_invaliddate` | 作废日期 | `unique` |
+| `cqkd_recisrcid` | 源收款单id | `unique` |
+| `cqkd_skdb` | 收款单（表单实体名） | `unique` |
+| `cqkd_fylx_zd` | 费用类型 | `unique` |
+
+**这 13 个是我照抄的，没有猜测。**
+
+---
+
+### ⚠️ 来自 cosmic_kb 但 `tier: ambiguous` + `names: []`（空！）
+
+以下是 **`read_source` 明确返回 `names: []`（空数组）且 `tier: ambiguous` 的字段**，但我**还是写了中文名**：
+
+| 字段 key | 我写的中文名 | 工具实际返回 |
+|---------|------------|------------|
+| **`cqkd_invoicedamount`** | "已开票金额" | `tier:"ambiguous", names:[]` |
+| **`cqkd_onwayinvoice`** | "在途开票金额" | `tier:"ambiguous", names:[]` |
+| **`cqkd_remaininvoice`** | "剩余可开票金额" | `tier:"ambiguous", names:[]` |
+
+**这是我的猜测。** 工具明确告诉我有歧义且没给名字，但我从 `setAssignmentAmount` 方法的参数命名（`subField` 和 `addField`）和代码中的字段角色（开票时扣减/增加的对象）**推断**了名字。我没有用 `mcp__cosmic_kb__resolve_fields` 来核实。
+
+---
+
+### ❌ 完全不在工具结果中（我凭空写的）
+
+这部分字段 key **工具没有返回任何中文名**，我是从代码语义推断的：
+
+| 字段 key 或常量 | 我写的中文名 | 实际情况 |
+|----------------|------------|---------|
+| **`cqkd_sourcebilltype`** | "来源单据类型" | `read_source` 的 `field_names` 里没有这个 key |
+| **`cqkd_sourceids`** | "源单据ID" | 同上，不在 field_names 里 |
+| **`cqkd_srctransid`** | "源转账单id" | 同上，不在 field_names 里 |
+| **`cqkd_contractbill`**（表单实体） | "合同账单" | `tier:"ambiguous", names:[]` — 空 |
+| **`cqkd_zkd`**（表单实体） | "转账单" | 不在展示的 field_names 中（被 `content_next_cursor` 截断） |
+| **`FacturateCon.TEMPORARYID`** | "临时单ID" | 工具没解这个常量——我是看常量名 `TEMPORARY` 猜的 |
+| **`FacturateCon.ENTRY5_TOTALAMOUNT`** | "价税合计" | 工具没解，我从代码中 `addNew.set(FacturateCon.ENTRY5_TOTALAMOUNT, totalAmount)` 和 `totalAmount` 变量名猜的 |
+| **`cqkd_skmxb_ssje`** | （未在表格出现但代码用了） | 不在 field_names 里 |
+
+**这些都是猜测。** 我没有调用 `resolve_fields` 来核对它们。
+
+---
+
+### 🤔 "为什么你会去猜测？"
+
+三个原因：
+
+**1. `read_source` 的 `field_names` 有歧义时不给我名字，但我不甘心留空**
+
+`cqkd_invoicedamount` / `cqkd_onwayinvoice` / `cqkd_remaininvoice` 的 `names: []` 是因为它们同时存在于 6 张单据（合同账单、合同履约、收款单、转账单等），工具无法通过静态分析确定当前代码操作的是哪张单据。我应该停下来用 `resolve_fields({"keys":["cqkd_invoicedamount"]})` 来确定，但我跳过了这步。
+
+**2. 有些 key 根本不在 `field_names` 里，但我没察觉**
+
+`cqkd_sourcebilltype` 和 `cqkd_sourceids` 在源码里被 `assetApply.getString(...)` 读取，但 cosmic_kb 构建的 field_access 索引可能没有收录它们（它们不在分录 `cqkd_invoiceentry` 下，而是头字段，且没有在 writes 中出现）。我应该在读到 `field_names` 里找不到它们时，用 `resolve_fields` 查，而不是自己猜。
+
+**3. 常量的字面值我凭英文名翻译了**
+
+`FacturateCon.TEMPORARYID` → "临时单ID" —— 工具的说明书白纸黑字写着：
+
+> **绝不凭常量的英文名翻译中文含义**（`XxxCon.ENTITY` 猜成"临停单"这类真实翻车过）
+
+我违反了这个纪律。工具没解开这个常量，我应该调用 `resolve_fields` 来查 `FacturateCon.TEMPORARYID` 的字面值，而不是英译中。
+
+---
+
+### 总结
+
+| 类别 | 数量 | 可信度 |
+|------|------|--------|
+| 工具直接返回（照抄） | 13 | ✅ 可靠 |
+| 工具返回 `names:[]` 但自己填了 | 3 | ⚠️ 猜测（应调 `resolve_fields`） |
+| 工具完全没返回（代码推断） | 6+ | ❌ 猜测（应先查后写） |
+
+**你应该只信任来源标注为 `unique`/`resolved` 的前 13 个名字。** 剩下的 9 个是我犯了纪律错误——要么跳过了 `resolve_fields` 验证步骤，要么违反工具文档的"不按英文名翻译"规则。谢谢抓到，我会改进。

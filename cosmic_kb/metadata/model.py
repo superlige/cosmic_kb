@@ -212,6 +212,13 @@ class MetaModel:
     source_file: str | None = None  # 来源 dym 路径（相对/绝对，便于追溯）
     warnings: list[str] = field(default_factory=list)  # 解析过程中的存疑提示
     convert: "ConvertInfo | None" = None  # 仅 form_type=='convert' 时有值（单据上下游关系）
+    # 原厂/扩展关系（2026-07 起，接原厂底层库元数据用）：
+    #   is_extension=True 且 extends 非空 —— 本模型是"扩展别名"，真实内容已并入 extends 指向的原厂 key
+    #   （见 cosmic_kb/metadata/extension.py::detect_extension + merge.py::build_extension_alias）。
+    #   合并后的主模型（原厂 key 下）is_extension 固定 False，extends 固定 None ——
+    #   它本身就是"最终权威内容"，不是别名，不向下游暴露"它曾经是合并产物"这个实现细节。
+    is_extension: bool = False
+    extends: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -228,6 +235,8 @@ class MetaModel:
             "operations": [o.to_dict() for o in self.operations],
             "plugins": [p.to_dict() for p in self.plugins],
             "warnings": self.warnings,
+            "is_extension": self.is_extension,
+            "extends": self.extends,
         }
         if self.convert is not None:
             d["convert"] = self.convert.to_dict()

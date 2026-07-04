@@ -138,6 +138,20 @@ def test_field_form_index():
     assert None not in idx and len(idx) == 2
 
 
+def test_field_form_index_excludes_platform_kind():
+    """kind='platform' 的通用系统字段（如原厂 name/number/id）不进反查索引——只并入少量原厂
+    实体就会让这类字段"看似唯一"，其实只是没并入其它同样带这个字段的实体（红线 #4，见
+    docs/阶段验收.md「原厂元数据并入 KB」）。"""
+    m = MetaModel(key="bd_customer", name="客户", model_type="BaseFormModel", form_type="basedata",
+                  isv=None, fields=[
+                      MetaField("TextField", "name", "名称", "fname", "i1", None, "platform", "header", "bd_customer"),
+                      MetaField("TextField", "cqkd_a", "甲", "fa", "i2", None, "entity", "header", "bd_customer"),
+                  ])
+    idx = _field_form_index([m])
+    assert "name" not in idx           # 平台通用字段被排除
+    assert idx["cqkd_a"] == [("bd_customer", "bd_customer", "header")]  # 业务字段仍正常入索引
+
+
 # ── 端到端（需 tree-sitter）：待办二习语 + 反查回填经 store 落库 ───────────────
 
 def _e2e(tmp_path):

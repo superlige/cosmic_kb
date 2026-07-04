@@ -172,7 +172,7 @@ def build_project_graph(scan_result: "ScanResult", index: "SourceIndex") -> Proj
         root = ax.parse_tree(sf.text)
         if root is None:
             continue
-        const_mod.collect_into(root, pg.const)       # 复用本棵树灌常量，避免重复解析
+        const_mod.collect_into(root, pg.const, sf.relpath)  # 复用本棵树灌常量，避免重复解析
         package = ax.package_name(root)
         for td in ax.iter_type_declarations(root):
             fqn = f"{package}.{td.name}" if package else td.name

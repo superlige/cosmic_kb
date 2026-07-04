@@ -7,6 +7,13 @@
 
 处处置信度：字面量直解=1.0；`类.常量`精确命中=0.95；裸常量名唯一命中=0.85；同名常量
 多个不同字面值=ambiguous(标 unknown 留证据)；查不到=unknown。
+
+`records`（2026-07-03 补）：本表原只在建库这一次性进程内存活（供 field_access/粗扫复用），
+查询期（`read_source` 读源码）拿不到——遇到 `TemporaryStopCon.ENTITY` 这类限定常量引用，
+字面值 `cqkd_ltyz` 根本没出现在源码正文里，只能让大模型凭常量英文名去猜中文单据名（真实
+翻车案例）。故把逐条定义（含源文件+行号）持久化进 KB 的 `java_constant` 表（见
+`graph/schema.sql` / `graph/store.py:_populate_java_constants`），`read_source` 建库后
+仍可查表把源码里的 `类.常量` 引用解析回字面值再标注中文名，见 `report/read_source.py`。
 """
 
 from __future__ import annotations
@@ -39,11 +46,19 @@ class ConstantTable:
         self.by_class: dict[str, dict[str, str]] = {}
         # 常量名 → 出现过的字面值集合（供裸常量名/跨类解析与歧义判定）。
         self.by_field: dict[str, set[str]] = {}
+        # 逐条定义记录（类, 常量名, 字面值, 源文件, 行号）：供持久化进 KB（java_constant 表），
+        # 让查询期（read_source）也能把源码里的 `类.常量` 引用解析回字面值——不去重、
+        # 同名类在不同文件重复定义时全都留证据，查询侧按此判「多处定义、字面值不同」的歧义。
+        self.records: list[tuple[str | None, str, str, str | None, int | None]] = []
 
-    def _add(self, cls: str | None, name: str, literal: str) -> None:
+    def _add(
+        self, cls: str | None, name: str, literal: str,
+        relpath: str | None = None, line: int | None = None,
+    ) -> None:
         if cls:
             self.by_class.setdefault(cls, {})[name] = literal
         self.by_field.setdefault(name, set()).add(literal)
+        self.records.append((cls, name, literal, relpath, line))
 
     def resolve(self, expr: str) -> KeyResolution:
         """解析一个常量引用表达式（`F_AMT` / `Const.F_AMT` / `a.b.Const.F_AMT`）。"""
@@ -88,24 +103,24 @@ def build_constant_table(scan_result: "ScanResult") -> ConstantTable:
         root = ax.parse_tree(sf.text)
         if root is None:
             continue
-        _collect(root, table)
+        _collect(root, table, sf.relpath)
     return table
 
 
-def collect_into(root: "Node", table: ConstantTable) -> None:
+def collect_into(root: "Node", table: ConstantTable, relpath: str | None = None) -> None:
     """把一棵已解析的语法树里的常量灌进现有表（供 project_graph 复用解析、避免重复解析）。"""
-    _collect(root, table)
+    _collect(root, table, relpath)
 
 
-def _collect(root: "Node", table: ConstantTable) -> None:
+def _collect(root: "Node", table: ConstantTable, relpath: str | None = None) -> None:
     """DFS 跟踪最近的「enclosing 类型简单名」，把常量归属到它（支持嵌套常量类）。"""
     stack: list[tuple["Node", str | None]] = [(root, None)]
     while stack:
         node, enclosing = stack.pop()
         if node.type in ("constant_declaration", "field_declaration"):
             in_iface = node.type == "constant_declaration"
-            for name, literal in ax._const_from_field(node, in_iface):
-                table._add(enclosing, name, literal)
+            for name, literal, line in ax._const_from_field(node, in_iface):
+                table._add(enclosing, name, literal, relpath, line)
             continue
         nxt = enclosing
         if node.type in ax._TYPE_DECL:

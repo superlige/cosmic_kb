@@ -1,0 +1,200 @@
+好的，让我回到当时的现场，把整个交互的**完整时序**还原出来，然后从 MCP 工具描述设计的角度给出优化建议。
+
+---
+
+## 一、当时的完整调用时序
+
+### 第 1 次调用：`read_source(relpath, start_line=1, end_line=220)`
+
+**返回的内容结构（简化后）：**
+
+```
+┌─────────────────────────────────────────────────────┐
+│ field_names (前 25 条)                          │
+│  ... cqkd_remaininvoice ... ← 第 25 条，截断    │
+│ field_names_next_cursor: "field_names@25"  ← 非 null │
+├─────────────────────────────────────────────────────┤
+│ content (第 1-87 行)                              │
+│  ... load("cqkd_zkd", ...) ← 源码中出现           │
+│ content_next_cursor: "content@88"          ← 非 null │
+├─────────────────────────────────────────────────────┤
+│ 附注：大段说明文字（紧凑投影+游标分页+注意事项）     │
+└─────────────────────────────────────────────────────┘
+```
+
+### 第 2 次调用（我做的）：`read_source(cursor="content@88")`
+
+**只处理了 content，取回第 88-394 行全文。**
+
+### ❌ 没做的调用：`read_source(cursor="field_names@25")`
+
+**丢失的返回：**
+```json
+"cqkd_zkd": { "kind": "header", "name": "转款单", ... }
+"cqkd_skdb": { "kind": "header", "name": "收款单", ... }
+... 以及更多被截断的标注
+```
+
+### 结果
+
+我根据源码中的 `"cqkd_zkd"` 字符串和 `srctransid` 谐音，**猜**了"转账单"→ 正确是"转款单"。
+
+---
+
+## 二、问题诊断：工具描述为什么没能阻止这个错误
+
+### 问题 1：双游标共用一段描述，content 游标「劫持」了注意力
+
+当前描述的结构（原文）：
+
+```
+**紧凑投影 + 游标分页（防 host 32KB 截断）**：
+  1. content 未读全时带 content_next_cursor → 把该值原样作 cursor= 再调 → 续读至末尾
+  2. field_names 超档时带 field_names_next_cursor → 同法翻页
+  ⚠️ field_names_next_cursor 非 null 时不能下覆盖性结论
+```
+
+**问题**：步骤 1 给了**完整的「因果链」**（游标值 → 怎么传 → 返回什么），步骤 2 只给了**「同法」**二字。LLM 在处理返回结果时，看到 `content_next_cursor: "content@88"` 会激活步骤 1 的记忆并执行；看到 `field_names_next_cursor: "field_names@25"` 时没有等价的因果链被激活。
+
+### 问题 2：「field_names」这个名字引起 schema 盲区
+
+LLM 对 `field_names` 的语义理解是 **"DataObject 字段 key → 中文名"** 的映射。当我在源码中看到：
+
+```java
+BusinessDataServiceHelper.load("cqkd_zkd", ...)
+```
+
+`"cqkd_zkd"` 出现在 `load()` 的第一个参数位置——这是一个**表单标识**，不是字段 key。我的认知模型里不认为它会出现在 `field_names` 里。虽然工具描述说了"`BusinessDataServiceHelper.load('xxx')` 里的表单标识字面量同样会标注"，但那句话位于描述末尾的另一个段落，离游标分页说明很远，**没有在游标警戒处重复这一信息**。
+
+### 问题 3：警戒措辞是「否定式条件」，不是「肯定式行动指令」
+
+原文：
+> `field_names_next_cursor` 非 null 时**不能下覆盖性结论**
+
+这对 LLM 来说是一个**约束条件**（什么不能做），不是一个**行动指令**（必须做什么）。约束条件容易被 LLM 的「节省调用」bias 覆盖——特别是当 planner IR 反复提示 "tool call count exceeded plan shape; prefer tighter execution steps" 时。
+
+### 问题 4：两个游标的信息层级没有视觉区分
+
+`content` 和 `field_names` 并列在同一个段落后，但：
+- `content` 未读全 → 续读是**强制的**（否则看不到完整逻辑）
+- `field_names` 未读全 → 只有在需要查某个 key 时才需要翻页
+
+工具描述没有帮 LLM 区分这两种「重要性层级」。LLM 可能认为两者优先级相同，而 content 因为代码逻辑理解的需要被优先处理了。
+
+---
+
+## 三、MCP 工具描述优化建议
+
+### 建议 1：把 field_names 游标警告提升为独立段落 + 行动指令
+
+**当前**（游标警告藏在长段落末尾）→ **改为**：
+
+```
+## ⚠️ 游标分页强制规则
+
+返回结果中可能包含两个游标：
+- `content_next_cursor` → 源码正文未完整，需续读
+- `field_names_next_cursor` → 字段标注未完整，需续读
+
+**任何游标非 null 时，必须先翻页取全，才能下「不存在/未覆盖」的结论。**
+
+### 行动清单（每次 read_source 返回后执行）：
+□ content_next_cursor 非 null？ → 调 read_source(cursor=该值) 续读 content
+□ field_names_next_cursor 非 null？ → 调 read_source(cursor=该值) 续读 field_names
+□ 以上两者都 null？ → 信息完整，可以下结论
+
+**常见的错误模式（已发生多次）：**
+- 只翻了 content，没翻 field_names → 漏掉表单中文名，凭谐音猜测 → 翻车
+```
+
+### 建议 2：在 field_names 游标处重复「表单标识也在 field_names 里」
+
+**当前**（表单标识的说明在文末独立段落）→ **改为在游标描述旁加注**：
+
+```
+`field_names` 超档时带 `field_names_next_cursor`（同法翻页）。
+注意：`field_names` 不仅包含字段 key，还包含：
+  - BusinessDataServiceHelper.load("表单key", ...) 中的表单标识 → 标注 `kind="form"`
+  - 常量引用（如 XxxCon.ENTITY）→ 标注 `resolved_constant`
+  - 分录容器 key → 标注 `kind="entry"/"subentry"`
+  
+所以当你看到源码中有 load("xxx", ...) 而想在 field_names 里找 xxx 的中文名时，
+必须把 field_names 翻到 next_cursor=null，才能确认它是否已被标注。
+```
+
+### 建议 3：在返回值本体中嵌入显式提醒（而非仅在注释中）
+
+**当前**：`field_names_next_cursor` 只是一个 JSON 字段，LLM 需要自己解析它的语义。
+
+**改为在 page 结构体内嵌提醒字段**：
+
+```json
+{
+  "page": {
+    "section": "field_names",
+    "from_line": 1,
+    "to_line": 25,
+    "total_lines": 45,
+    "next_cursor": "field_names@25",
+    // [!] 新增提醒字段
+    "reminder": "field_names 未取全。需要查某个字段/表单的中文名时，请用 cursor='field_names@25' 翻页。"
+  }
+}
+```
+
+这样 LLM 在处理返回结果时，**不需要从描述文本中检索规则**，直接在返回值中看到行动指令。
+
+### 建议 4：为 field_names 翻页提供更具体的「触发条件」示例
+
+**当前**：只说"同法翻页"。
+
+**改为**：
+
+```
+什么情况下必须翻 field_names？
+  ① 你想引用某字段的中文名，但该字段 key 不在当前 field_names 列表中
+  ② 代码中有 BusinessDataServiceHelper.load("某个key", ...) 而你想知道该表单的中文名
+  ③ 代码中有 set("某个key", val) / getString("某个key") 而你想确认其含义
+  ④ 你要下「该文件没有引用/写入某字段」的否定结论
+
+  以上任意一条成立 + field_names_next_cursor 非 null → 必须先翻页。
+```
+
+### 建议 5：降低「少调用」bias 的负面影响
+
+planner IR 中的 "tool call count exceeded plan shape; prefer tighter execution steps" 与翻页需求存在根本冲突。工具描述可以**主动反制**这个 bias：
+
+```
+重要：翻 field_names 页是「必做动作」而非「可选优化」。
+在 field_names_next_cursor 非 null 的情况下少调一次 read_source 省下的 token，
+远少于因猜测字段中文名而犯错后反复纠错消耗的 token。
+```
+
+---
+
+## 四、优化效果对比
+
+| 场景 | 当前描述 | 优化后描述 | 预期效果 |
+|---|---|---|---|
+| 看到 `content@88` + `field_names@25` | 会翻 content，忽略 field_names | 会先检查行动清单，两个都翻 | ✅ |
+| 看到 `load("cqkd_zkd", ...)` 想查中文名 | 去 content 里找，找不到就猜 | 去 field_names 翻页，找到 `kind="header"` + `"转款单"` | ✅ |
+| planner IR 说少调工具 | 被 bias 影响，犹豫是否翻页 | 工具描述明确说翻页是必做动作，反制 bias | ✅ |
+| `field_names` 是否包含表单 key | 另起一段说明，容易漏读 | 在游标处重复加注，关联度更高 | ✅ |
+
+---
+
+## 五、总结
+
+这次翻车的根本链条是：
+
+```
+工具描述中的游标规则（正确但分散）
+  → LLM 处理时 content 游标「劫持」注意力
+    → 忽略了 field_names 游标
+      → 没意识到 `cqkd_zkd` 的中文名在不翻页就能拿到
+        → 凭谐音猜了「转账单」
+```
+
+**核心矛盾**：工具描述的**信息架构**把两个游标并列描述，但 LLM 的**注意力分配**天然倾向于 content（因为要读代码逻辑），而 field_names 翻页所需的关键信息（表单标识也在 field_names 里 + 必须翻页才能下结论）散布在长文本的不同位置，没有在 LLM 做决策的那个瞬间被激活。
+
+**最优解不是加更多文字，而是把「行动指令」嵌入返回值本身（page.reminder），并提供一个简短、可执行的事后检查清单——让 LLM 每次拿到 read_source 的返回后都能自动「过一遍」清单，而不是去长文本里检索规则。**

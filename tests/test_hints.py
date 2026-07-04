@@ -1,10 +1,15 @@
-"""模式 B 验收测试 —— 把"已核对字段名"与"事件→语义文档路由"焊进取证工具返回值。
+"""事件→语义文档路由验收测试 —— 把 semantics_topic 焊进取证工具返回值。
 
-起因：段二大模型读源码按命名惯例猜字段名、凭训练知识臆断事件触发时机/入库，软约束压不住。
-模式 B 在导航工具（trace/bill/ask/method_calls）的返回里内联核对名 + semantics_topic，
-让模型必定读到、想猜都没机会。本测覆盖：
-  ① hints 纯映射（事件→主题、字段名索引、歧义留 None 不替选）；
-  ② 四个工具返回值确实带上了 field_name / semantics_topic。
+起因：段二大模型读源码凭训练知识臆断事件触发时机/入库，软约束压不住。导航工具
+（trace/bill/ask/method_calls）返回里内联 semantics_topic，让模型必定读到、想猜都没机会。
+
+字段中文名自动标注（原 hints.FieldNames/build_field_names，曾一并焊进这些工具返回值）已于
+2026-07-05 随 MCP `read_source` 工具退役一起砍掉——那是全局候选盲扫，非精确定位，与本文件覆盖
+的 semantics_topic（确定性映射，无歧义风险）是两个不同问题。`trace`/`bill` 的 `field_name`
+是按精确坐标查出的，风险类别不同，予以保留，仍在本测覆盖范围。字段名核对统一改走
+`resolve_fields`（`test_resolve_fields.py` 覆盖），`ask` 的 plugin/operation 证据不再附带
+`field_name`，见 `test_ask_plugin_explain_no_longer_carries_name`/
+`test_ask_operation_explain_no_longer_carries_name`。
 """
 
 from __future__ import annotations
@@ -45,27 +50,7 @@ def test_semantics_pointer_text():
     assert hints.semantics_pointer("noSuchEvent") is None
 
 
-def test_build_field_names_covers_field_and_entity(tmp_path: Path):
-    """字段名索引覆盖 field 表 + entity 表（分录容器 key 也能解析）。"""
-    conn = _conn(tmp_path)
-    try:
-        names = hints.build_field_names(conn)
-        assert names.get("cqkd_collateralstatus") == "抵押状态"   # field 表
-        assert names.get("cqkd_entry") == "资产明细"               # entity 表分录容器
-        assert names.get("cqkd_nope") is None                      # 钉不出留 None
-    finally:
-        conn.close()
-
-
-def test_field_names_ambiguous_returns_none():
-    """同 key 跨单据多个不同名 → 无单据上下文时回 None（诚实留白，不替选）；给 form_key 则精确。"""
-    fn = hints.FieldNames(by_form={("f1", "k"): "甲名", ("f2", "k"): "乙名"}, by_key={})
-    assert fn.get("k") is None              # 全局歧义不替选
-    assert fn.get("k", "f1") == "甲名"      # 给单据上下文则精确
-    assert fn.get("k", "f9") is None        # 未知单据回落全局（无）→ None
-
-
-# ── ② 四个工具返回值确实带 field_name / semantics_topic ─────────────────────────
+# ── ② 工具返回值带 semantics_topic；trace/bill 仍带 field_name，ask 的 plugin/operation 已不带 ──
 def test_field_trace_carries_name_and_topic(tmp_path: Path):
     """trace：顶层 field_name 已核对名；写入行带事件语义路由。"""
     conn = _conn(tmp_path)
@@ -96,28 +81,29 @@ def test_bill_view_field_touch_carries_name_and_topic(tmp_path: Path):
         conn.close()
 
 
-def test_ask_plugin_explain_carries_name_and_topic(tmp_path: Path):
-    """ask 插件解释：跨类写入行带字段名 + 事件语义路由。"""
+def test_ask_plugin_explain_no_longer_carries_name(tmp_path: Path):
+    """ask 插件解释：跨类写入行仍带事件语义路由，但不再自动标注字段中文名
+    （2026-07-05 起改走 resolve_fields 精确核对，防全局候选盲扫误导）。"""
     conn = _conn(tmp_path)
     try:
         rq = resolver.resolve(conn, "CollateralService 这个类干嘛的？")
         ctx = builder.build_context(conn, rq)
         w = next(w for w in ctx["evidence"]["writes"] if w["field_key"] == "cqkd_collateralstatus")
-        assert w["field_name"] == "抵押状态"
+        assert "field_name" not in w
         assert w["semantics_topic"] == "plugin-operation"
     finally:
         conn.close()
 
 
-def test_ask_operation_explain_carries_name(tmp_path: Path):
-    """ask 操作解释：字段触达行带真实中文名。"""
+def test_ask_operation_explain_no_longer_carries_name(tmp_path: Path):
+    """ask 操作解释：字段触达行仍带语义路由，不再自动标注字段中文名。"""
     conn = _conn(tmp_path)
     try:
         rq = resolver.resolve(conn, "cqkd_assetcard 这个 audit 操作按钮影响哪些字段？")
         ctx = builder.build_context(conn, rq)
         touched = ctx["evidence"]["field_access"]
         cs = next(t for t in touched if t["field_key"] == "cqkd_collateralstatus")
-        assert cs["field_name"] == "抵押状态"
+        assert "field_name" not in cs
         assert cs["semantics_topic"] == "plugin-operation"
     finally:
         conn.close()

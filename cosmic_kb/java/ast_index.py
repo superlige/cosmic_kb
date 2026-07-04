@@ -472,11 +472,11 @@ def arg_identifier(invocation: Invocation, idx: int) -> str | None:
 
 # ── static final String 常量 + 局部变量声明 ───────────────────────
 
-def iter_const_strings(root: "Node") -> Iterator[tuple[str, str]]:
+def iter_const_strings(root: "Node") -> Iterator[tuple[str, str, int]]:
     """遍历**所有层级**的 `static final String NAME = "literal"`（含接口字段）。
 
     接口字段默认 public static final，无显式 modifiers 也算；类字段要求含 static+final。
-    返回 (常量名, 字面值)。仅收 String 类型且初值为字符串字面量的。
+    返回 (常量名, 字面值, 声明所在行)。仅收 String 类型且初值为字符串字面量的。
     """
     # field_declaration（类字段，需 static final）；constant_declaration（接口字段，天然常量）。
     stack = [root]
@@ -489,7 +489,7 @@ def iter_const_strings(root: "Node") -> Iterator[tuple[str, str]]:
         stack.extend(n.children)
 
 
-def _const_from_field(decl: "Node", in_iface: bool) -> Iterator[tuple[str, str]]:
+def _const_from_field(decl: "Node", in_iface: bool) -> Iterator[tuple[str, str, int]]:
     # modifiers 是子节点类型、不是命名字段，按 type 取。
     mod_text = next((_text(c) for c in decl.children if c.type == "modifiers"), "")
     is_const = in_iface or ("static" in mod_text and "final" in mod_text)
@@ -505,7 +505,7 @@ def _const_from_field(decl: "Node", in_iface: bool) -> Iterator[tuple[str, str]]
         value_node = vd.child_by_field_name("value")
         lit = string_value(value_node)
         if name_node is not None and lit is not None:
-            yield _text(name_node), lit
+            yield _text(name_node), lit, _line(name_node)
 
 
 @dataclass

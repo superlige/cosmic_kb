@@ -28,14 +28,16 @@ CREATE TABLE module (
 
 -- ── 表单（dym → MetaModel）──────────────────────────────────────────────────
 CREATE TABLE form (
-    key         TEXT,                     -- 表单标识（cqkd_assetcard）；可能为 NULL
-    name        TEXT,                     -- 中文名
-    form_type   TEXT,                     -- 归一类型 bill/basedata/dynamic/...
-    model_type  TEXT,                     -- 原始 ModelType
-    isv         TEXT,                     -- 元数据 ISV（仅报告产物）
-    app_key     TEXT,                     -- 所属应用（模块主锚）
-    module      TEXT,                     -- 归属模块名（→ module.name）
-    source_dym  TEXT                      -- 来源 dym 路径/成员
+    key           TEXT,                   -- 表单标识（cqkd_assetcard）；可能为 NULL
+    name          TEXT,                   -- 中文名
+    form_type     TEXT,                   -- 归一类型 bill/basedata/dynamic/...
+    model_type    TEXT,                   -- 原始 ModelType
+    isv           TEXT,                   -- 元数据 ISV（仅报告产物）
+    app_key       TEXT,                   -- 所属应用（模块主锚）
+    module        TEXT,                   -- 归属模块名（→ module.name）
+    source_dym    TEXT,                   -- 来源 dym 路径/成员（原厂 DB 来源为 db://<fnumber>）
+    is_extension  INTEGER DEFAULT 0,      -- 1=本行是扩展别名（内容已并入 extends 指向的原厂 key）
+    extends       TEXT                    -- 非空=扩展别名指向的原厂 form_key（见 dbmeta/integrate.py）
 );
 
 -- ── 实体（表头 / 分录 / 子分录）──────────────────────────────────────────────
@@ -169,6 +171,21 @@ CREATE TABLE field_access (
                                            -- 单一真源 java/null_reason.py，供 trace/coverage/web 导航。
 );
 
+-- ── Java 全局常量值表（类.常量 → 字面值；供 read_source 解析源码里的常量引用）───────
+--   起因：`TemporaryStopCon.ENTITY` 这类限定常量引用，字面值（如 cqkd_ltyz）根本不出现
+--   在源码正文里，read_source 按文本扫已知 key 的老办法扫不到，逼大模型凭常量英文名去猜
+--   中文单据名（真实翻车案例）。本表持久化全工程 `static final String` 常量定义（含接口
+--   常量），查询期把源码里的 `类.常量` 引用查表解析回字面值，再按常规字段/实体词典标注中文
+--   名，杜绝瞎猜。同一 (class_name, const_name) 若在工程里被不同类重复定义出不同字面值，
+--   查询侧按歧义处理、不擅自选一个（红线 #4）。
+CREATE TABLE java_constant (
+    class_name      TEXT,               -- 常量所属类/接口简单名（非全限定名，同名类需靠歧义兜底）
+    const_name      TEXT,               -- 常量名（如 ENTITY / KEY_AMOUNT）
+    literal         TEXT,               -- 常量字面值
+    source_relpath  TEXT,               -- 定义所在源文件（相对源码根）
+    line            INTEGER             -- 定义所在行号
+);
+
 -- ── 粗精度扫描命中（信任「手段二」：粗扫 vs 高精度对比的粗扫侧）──────────────
 --   高精度侧 = field_access（AST + 跨类 + 数据流 + 落库）。粗扫侧 = 单遍 Java 词法扫描
 --   （跳过注释/字符串内部），把业务字段标识当**字符串字面量**或**唯一映射的常量名引用**
@@ -225,6 +242,8 @@ CREATE INDEX idx_facc_aclass      ON field_access(access_class);
 CREATE INDEX idx_facc_coord       ON field_access(field_key, form_key, level, entry_key);
 CREATE INDEX idx_facc_nullreason  ON field_access(null_reason);
 CREATE INDEX idx_coarse_field     ON coarse_field_hit(field_key);
+CREATE INDEX idx_javaconst_class  ON java_constant(class_name, const_name);
+CREATE INDEX idx_javaconst_name   ON java_constant(const_name);
 
 -- ── FTS5 全文检索（为阶段 9 NL 查询打底：中文名↔标识 / 字段 / 类名）──────────
 --   kind: form/entity/field/plugin/class —— 统一检索面，extra 放归属上下文（模块/表单）。

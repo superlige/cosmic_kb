@@ -137,10 +137,8 @@ def _ctx_plugin(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, Any]
         "via,line,source_relpath,plugin_fqn,access_class FROM field_access "
         "WHERE plugin_fqn=? OR access_class=? ORDER BY access,field_key",
         (fqn, fqn)).fetchall()]
-    # 模式 B：字段名 + 事件语义路由焊进返回值（段二勿按命名惯例臆断字段名 / 勿凭训练知识断时机入库）。
-    names = hints.build_field_names(conn)
+    # 事件语义路由焊进返回值（勿凭训练知识断时机入库）；字段中文名不再自动标注，需要调 resolve_fields。
     for a in accesses:
-        a["field_name"] = names.get(a["field_key"], a["form_key"]) if a["field_key"] else None
         a["semantics_topic"] = hints.event_topic(a.get("event_method"), a.get("plugin_type"))
     for e in events:
         e["semantics_topic"] = hints.event_topic(e.get("method_name"))
@@ -223,7 +221,7 @@ def _ctx_method(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, Any]
         advice.append("逐层下钻：对每条调用的 target_fqn 再 method_calls，可顺着调用链往下读源码。")
     if any((m.get("fields") or {}).get("writes") or (m.get("fields") or {}).get("reads")
            for m in rd["methods"]):
-        advice.append("已列该方法读写的字段及已核对中文名（见 fields），引用字段名照抄勿猜。")
+        advice.append("已列该方法读写的字段 key（见 fields），中文名请调 resolve_fields 核对，勿凭命名惯例猜。")
     base["advice"] = advice
     return base
 
@@ -246,10 +244,8 @@ def _ctx_operation(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, A
             f"event_method,line,source_relpath FROM field_access "
             f"WHERE form_key=? AND plugin_fqn IN ({ph}) ORDER BY access,field_key",
             (form_key, *sorted(fqns))).fetchall()]
-        # 模式 B：字段名 + 事件语义路由焊进返回值。
-        names = hints.build_field_names(conn)
+        # 事件语义路由焊进返回值；字段中文名不再自动标注，需要调 resolve_fields。
         for t in touched:
-            t["field_name"] = names.get(t["field_key"], form_key) if t["field_key"] else None
             t["semantics_topic"] = hints.event_topic(t.get("event_method"), t.get("plugin_type"))
     writers = [t for t in touched if t["access"] == "write"]
     base["status"] = "ok" if op or plugins else "not_found"
@@ -336,11 +332,10 @@ def _render_plugin(ev: dict[str, Any], max_list: int) -> list[str]:
             out.append(f"  {e['method_name']} [{e['event_kind']}/{e['event_phase']}] "
                        f"{e['source_relpath']}:{e['start_line']}{topic}")
     if ev["writes"]:
-        out.append(f"【写入字段】（前 {min(max_list, len(ev['writes']))}）")
+        out.append(f"【写入字段】（前 {min(max_list, len(ev['writes']))}，中文名请调 resolve_fields 核对）")
         for w in ev["writes"][:max_list]:
             pf = {"yes": "✅落库", "no": "—内存", "unknown": "❓存疑"}.get(w["persists"], "")
-            nm = f"「{w['field_name']}」" if w.get("field_name") else ""
-            out.append(f"  {w['field_key']:<26}{nm} {pf}  事件 {w['event_method']}  "
+            out.append(f"  {w['field_key']:<26} {pf}  事件 {w['event_method']}  "
                        f"{w['source_relpath']}:{w['line']}")
     return out
 
@@ -354,11 +349,10 @@ def _render_operation(ev: dict[str, Any], max_list: int) -> list[str]:
         for p in ev["plugins"][:max_list]:
             out.append(f"  [{p['plugin_type']}] {p['class_name']}")
     if ev["field_access"]:
-        out.append(f"【字段触达】（前 {min(max_list, len(ev['field_access']))}）")
+        out.append(f"【字段触达】（前 {min(max_list, len(ev['field_access']))}，中文名请调 resolve_fields 核对）")
         for a in ev["field_access"][:max_list]:
             pf = {"yes": "✅落库", "no": "—内存", "unknown": "❓存疑", "na": ""}.get(a["persists"], "")
-            nm = f"「{a['field_name']}」" if a.get("field_name") else ""
-            out.append(f"  {a['access']:<5} {a['field_key']:<26}{nm} {pf}  "
+            out.append(f"  {a['access']:<5} {a['field_key']:<26} {pf}  "
                        f"{a['source_relpath']}:{a['line']}")
     return out
 

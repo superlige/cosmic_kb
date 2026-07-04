@@ -1,12 +1,16 @@
 """底层库元数据源（dbmeta）验收测试。
 
-三块：
+四块：
     1. assemble —— 两段 fdata XML（form+entity）合成 MetaModel，用真实样例
        samples/db_xml/bd_customer_*.txt 对齐（这正是扩展单据扫不出的原厂标准单据）。
     2. 只读防线 —— assert_readonly_sql 白名单，拒绝任何写/DDL/多语句。
     3. 配置 —— DbConfig 装载、密码环境变量覆盖、read_database 回落、模板生成。
+    4. reader —— 按本地扩展自身 fnumber 走 fmasterid 关联回溯原厂母体
+       （`read_model_via_local_ext`，2026-07-03 修复候选 fnumber 因平台标识长度限制
+       被截断导致查不到原厂元数据的问题），用假驱动验证 SQL 形状与参数，不连真库。
 
-不连真库：assemble 与配置纯本地可测；连接层只测 SQL 白名单，不起 psycopg2。
+不连真库：assemble 与配置纯本地可测；连接层只测 SQL 白名单，不起 psycopg2；
+reader 用假驱动（monkeypatch `get_driver`）验证 SQL 拼装，同样不连真库。
 """
 
 from __future__ import annotations
@@ -212,3 +216,180 @@ def test_load_config_malformed_json_raises_valueerror(tmp_path):
     p.write_text("{ not valid json ", encoding="utf-8")
     with pytest.raises(ValueError):
         load_config(str(p))
+
+
+# ── 4. reader：本地扩展自身 fnumber → fmasterid 关联回溯原厂母体 ─────────────
+class _FakeDriver:
+    """假驱动：记录收到的 (sql, params)，按调用顺序弹出预置结果行，不连真库。"""
+
+    def __init__(self, responses: list[list[tuple]]):
+        self._responses = list(responses)
+        self.calls: list[tuple[str, tuple]] = []
+
+    def connect(self) -> None:
+        pass
+
+    def query(self, sql: str, params: tuple = ()) -> list[tuple]:
+        self.calls.append((sql, params))
+        return self._responses.pop(0) if self._responses else []
+
+    def close(self) -> None:
+        pass
+
+
+def _fake_open_reader(monkeypatch, responses: list[list[tuple]]):
+    """monkeypatch reader.get_driver，返回预置结果的假驱动；回传 (reader, fake_driver)。"""
+    from cosmic_kb.dbmeta import reader as reader_mod
+
+    fake = _FakeDriver(responses)
+    monkeypatch.setattr(reader_mod, "get_driver", lambda config: fake)
+    r = reader_mod.DbMetaReader(DbConfig())
+    r.open()
+    return r, fake
+
+
+def test_reader_read_model_via_local_ext_builds_fmasterid_self_join(monkeypatch):
+    """真实故障复现：本地扩展 key 'cqkd_cas_bankjournalf_ext'——SQL 必须用它自己的精确
+    值做 WHERE（不猜候选原厂 fnumber），且是 fmasterid=fid 的自关联，取回母体真实 fnumber。"""
+    form_xml = b"<FormMetadata><Key>cas_bankjournalformrpt</Key><Name>Bank Journal</Name></FormMetadata>"
+    entity_xml = (
+        b"<EntityMetadata><Items><BillEntity><Id>1</Id></BillEntity></Items></EntityMetadata>"
+    )
+    responses = [
+        [(form_xml, "cas_bankjournalformrpt")],     # form 表自关联查询结果
+        [(entity_xml, "cas_bankjournalformrpt")],   # entity 表自关联查询结果
+    ]
+    r, fake = _fake_open_reader(monkeypatch, responses)
+    try:
+        model = r.read_model_via_local_ext("cqkd_cas_bankjournalf_ext")
+    finally:
+        r.close()
+
+    assert model.key == "cas_bankjournalformrpt"    # 母体真实标识，非猜出来的候选
+    assert len(fake.calls) == 2
+    for sql, params in fake.calls:
+        assert params == ("cqkd_cas_bankjournalf_ext",)  # WHERE 用扩展自身精确 key
+        assert "fmasterid" in sql and "fid" in sql
+        assert "INNER JOIN" in sql
+        assert sql.strip().upper().startswith("SELECT")
+
+
+def test_reader_read_model_via_local_ext_not_found_raises_lookuperror(monkeypatch):
+    """本地行不存在 / fmasterid 未指向有效母体（两张表都查不到）→ 抛错，不臆造。"""
+    r, _fake = _fake_open_reader(monkeypatch, [[], []])
+    try:
+        with pytest.raises(LookupError):
+            r.read_model_via_local_ext("cqkd_unknown_ext")
+    finally:
+        r.close()
+
+
+def test_reader_fetch_fdata_via_local_ext_prefers_form_master_fnumber(monkeypatch):
+    """两表都命中时，master_fnumber 取 form 侧优先（form_fn or entity_fn 短路求值）。"""
+    responses = [
+        [(b"<x/>", "master_from_form")],
+        [(b"<y/>", "master_from_entity")],
+    ]
+    r, _fake = _fake_open_reader(monkeypatch, responses)
+    try:
+        _form, _entity, master_fnumber = r.fetch_fdata_via_local_ext("cqkd_x_ext")
+    finally:
+        r.close()
+    assert master_fnumber == "master_from_form"
+
+
+# ── 5. reader：批量取数（一批 key 固定 2 条 SQL，不逐个循环查库）──────────────
+# 背景：用户反馈真实项目自动摄取（几十个候选）"执行速度很慢，是不是循环查库了"——
+# 排查确认此前 apply_vendor_metadata 确实是逐个候选调 read_model/read_model_via_local_ext，
+# 一个候选就是一次网络往返；批量方法把同一批候选各自的两张表查询合并成一条
+# `WHERE fnumber = ANY(%s)`，不管候选多少个都固定 2 次往返。
+
+def test_reader_fetch_fdata_bulk_issues_two_any_queries_not_one_per_key(monkeypatch):
+    """3 个 fnumber 一起查：应该只发 2 条 SQL（form 表一条、entity 表一条），不是 6 条。"""
+    responses = [
+        [("bd_customer", b"<f1/>"), ("bd_supplier", b"<f2/>")],   # form 表批量结果（bd_taxrate 缺记录）
+        [("bd_customer", b"<e1/>"), ("bd_taxrate", b"<e3/>")],    # entity 表批量结果（bd_supplier 缺记录）
+    ]
+    r, fake = _fake_open_reader(monkeypatch, responses)
+    try:
+        data = r.fetch_fdata_bulk(["bd_customer", "bd_supplier", "bd_taxrate"])
+    finally:
+        r.close()
+
+    assert len(fake.calls) == 2   # 不是 3 个 key × 2 张表 = 6 条
+    for sql, params in fake.calls:
+        assert "= ANY(" in sql
+        assert sql.strip().upper().startswith("SELECT")
+        assert set(params[0]) == {"bd_customer", "bd_supplier", "bd_taxrate"}
+
+    assert data["bd_customer"] == (b"<f1/>", b"<e1/>")
+    assert data["bd_supplier"] == (b"<f2/>", None)     # entity 表缺记录 → None，不报错
+    assert data["bd_taxrate"] == (None, b"<e3/>")       # form 表缺记录 → None
+
+
+def test_reader_read_models_bulk_skips_keys_with_no_record_in_either_table(monkeypatch):
+    """两表都没有的 fnumber 不出现在返回值里（调用方按 key 是否存在判断"查到/查不到"）。"""
+    form_xml = b"<FormMetadata><Key>bd_customer</Key></FormMetadata>"
+    responses = [
+        [("bd_customer", form_xml)],   # form 表只有 bd_customer
+        [],                              # entity 表两个都没有
+    ]
+    r, _fake = _fake_open_reader(monkeypatch, responses)
+    try:
+        models = r.read_models_bulk(["bd_customer", "bd_ghost"])
+    finally:
+        r.close()
+
+    assert set(models) == {"bd_customer"}
+    assert models["bd_customer"].key == "bd_customer"
+
+
+def test_reader_fetch_fdata_via_local_ext_bulk_issues_two_any_queries(monkeypatch):
+    """N 个本地扩展 key 一起走 fmasterid 关联批量查：固定 2 条 SQL，不随 N 增长。"""
+    responses = [
+        [("cqkd_a_ext", b"<fa/>", "vendor_a"), ("cqkd_b_ext", b"<fb/>", "vendor_b")],
+        [("cqkd_a_ext", b"<ea/>", "vendor_a")],   # entity 侧只有 a 命中
+    ]
+    r, fake = _fake_open_reader(monkeypatch, responses)
+    try:
+        data = r.fetch_fdata_via_local_ext_bulk(["cqkd_a_ext", "cqkd_b_ext"])
+    finally:
+        r.close()
+
+    assert len(fake.calls) == 2
+    for sql, params in fake.calls:
+        assert "fmasterid" in sql and "fid" in sql and "= ANY(" in sql
+        assert set(params[0]) == {"cqkd_a_ext", "cqkd_b_ext"}
+
+    assert data["cqkd_a_ext"] == (b"<fa/>", b"<ea/>", "vendor_a")
+    assert data["cqkd_b_ext"] == (b"<fb/>", None, "vendor_b")
+
+
+def test_reader_read_models_via_local_ext_bulk_keys_by_local_key(monkeypatch):
+    """批量合成结果按本地扩展 key 索引；两表都没关联到母体的 key 不出现在结果里。"""
+    form_xml = b"<FormMetadata><Key>cas_bankjournalformrpt</Key></FormMetadata>"
+    responses = [
+        [("cqkd_cas_bankjournalf_ext", form_xml, "cas_bankjournalformrpt")],
+        [],
+    ]
+    r, _fake = _fake_open_reader(monkeypatch, responses)
+    try:
+        models = r.read_models_via_local_ext_bulk(["cqkd_cas_bankjournalf_ext", "cqkd_ghost_ext"])
+    finally:
+        r.close()
+
+    assert set(models) == {"cqkd_cas_bankjournalf_ext"}
+    assert models["cqkd_cas_bankjournalf_ext"].key == "cas_bankjournalformrpt"
+
+
+def test_reader_bulk_methods_empty_input_short_circuits_no_query(monkeypatch):
+    """空输入直接返回空字典，不发一条 SQL（`apply_vendor_metadata` 两组分组后可能有一组为空）。"""
+    r, fake = _fake_open_reader(monkeypatch, [])
+    try:
+        assert r.fetch_fdata_bulk([]) == {}
+        assert r.read_models_bulk([]) == {}
+        assert r.fetch_fdata_via_local_ext_bulk([]) == {}
+        assert r.read_models_via_local_ext_bulk([]) == {}
+    finally:
+        r.close()
+    assert fake.calls == []

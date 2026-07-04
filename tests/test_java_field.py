@@ -507,6 +507,24 @@ def test_constant_resolution(tmp_path: Path):
         conn.close()
 
 
+def test_java_constant_table_persisted(tmp_path: Path):
+    """常量定义持久化进 java_constant 表（供 read_source 查询期解析 `类.常量` 引用，见其测试）。"""
+    db, counts = _build(tmp_path)
+    assert counts["java_constant"] > 0
+    conn = store.open_kb(db)
+    try:
+        row = conn.execute(
+            "SELECT literal, source_relpath, line FROM java_constant "
+            "WHERE class_name='AmConst' AND const_name='F_AMT'"
+        ).fetchone()
+        assert row is not None
+        assert row["literal"] == "cqkd_amount"
+        assert row["source_relpath"] == "AmConst.java"
+        assert row["line"] == 3
+    finally:
+        conn.close()
+
+
 def test_call_chain_path(tmp_path: Path):
     """事件→本类 helper 的调用链路径记入 field_access.path。"""
     db, _ = _build(tmp_path)

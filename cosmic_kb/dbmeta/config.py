@@ -30,6 +30,11 @@ ENTITY_TABLE = "t_meta_entitydesign"
 # 元数据标识列 / XML 正文列（用户确认）。
 NUMBER_COLUMN = "fnumber"
 DATA_COLUMN = "fdata"
+# 主键列 / 继承母体外键列（2026-07-03 拍板新增：本地扩展的 fnumber 可能因平台标识
+# 长度限制被截断，按"截断字符串猜原厂 fnumber"不可靠；改按 fmasterid→fid 的库内
+# 关系直接回溯母体行，不受命名截断影响，见 reader.py::_fetch_master_fdata）。
+ID_COLUMN = "fid"
+MASTER_ID_COLUMN = "fmasterid"
 
 
 @dataclass
@@ -50,6 +55,8 @@ class DbConfig:
     entity_table: str = ENTITY_TABLE
     number_column: str = NUMBER_COLUMN
     data_column: str = DATA_COLUMN
+    id_column: str = ID_COLUMN
+    master_id_column: str = MASTER_ID_COLUMN
 
     @property
     def read_database(self) -> str:
@@ -71,6 +78,8 @@ class DbConfig:
             "entity_table": self.entity_table,
             "number_column": self.number_column,
             "data_column": self.data_column,
+            "id_column": self.id_column,
+            "master_id_column": self.master_id_column,
         }
 
 

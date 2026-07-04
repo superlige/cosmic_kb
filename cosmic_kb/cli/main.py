@@ -210,6 +210,62 @@ def _collect_models(paths: list[str], registry) -> tuple[list, int]:
     return models, 0
 
 
+def _apply_vendor_metadata_cli(args: argparse.Namespace, models: list, scan_result):
+    """build/bridge 共用：给了 --db-config 就自动按三信号（扩展/ORM查询/操作执行）发现
+    并拉取原厂元数据；`--vendor` 仍可手动追加（并集，去重）。
+
+    两者都不给 → 原样返回 models（零改动，纯 opt-in）；只给 --vendor 不给 --db-config
+    → 报错（拉取需要连接配置）。出错时返回非零 rc（int），调用方按
+    `isinstance(结果, int)` 判断是否要直接返回。
+    """
+    vendor_fnumbers = list(getattr(args, "vendor", None) or [])
+    db_config_path = getattr(args, "db_config", None)
+    if not vendor_fnumbers and not db_config_path:
+        return models
+    if not db_config_path:
+        print("错误: 给了 --vendor 需配合 --db-config 才能连库拉取", file=sys.stderr)
+        return 2
+
+    from ..bridge import namespace
+    from ..dbmeta import apply_vendor_metadata, discover_candidates
+    from ..dbmeta.config import load_config
+    from ..dbmeta.discover import known_keys_from_models
+
+    known_keys = known_keys_from_models(models)
+    isv_prefixes = set(namespace.discover_meta_prefixes(models))
+    candidates = discover_candidates(
+        models=models, scan_result=scan_result,
+        known_keys=known_keys, isv_prefixes=isv_prefixes,
+    )
+    manual_set = set(vendor_fnumbers)
+    auto_candidates = [c for c in candidates if c.key not in known_keys and c.key not in manual_set]
+    fnumbers = vendor_fnumbers + [c.key for c in auto_candidates]
+    if not fnumbers:
+        return models
+
+    try:
+        db_cfg = load_config(db_config_path)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return 2
+    try:
+        models, notices = apply_vendor_metadata(models, fnumbers, db_cfg)
+    except Exception as exc:
+        print(f"错误: 原厂元数据合并失败: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+
+    if auto_candidates:
+        print(f"自动摄取（{len(auto_candidates)} 个，三信号发现）:", file=sys.stderr)
+        for c in auto_candidates:
+            ev = f"  证据: {c.evidence[0]}" if c.evidence else ""
+            print(f"  {c.key}（信号={'+'.join(c.sources) or '?'}）{ev}", file=sys.stderr)
+    if vendor_fnumbers:
+        print(f"手动指定: {', '.join(vendor_fnumbers)}", file=sys.stderr)
+    for note in notices:
+        print(f"提示: {note}", file=sys.stderr)
+    return models
+
+
 def _cmd_bridge(args: argparse.Namespace) -> int:
     """阶段3：把元数据插件 ClassName 桥接到源码 .java，产出桥接可信度报告。"""
     from ..ingest import scanner
@@ -232,6 +288,11 @@ def _cmd_bridge(args: argparse.Namespace) -> int:
     if not models:
         print("错误: 未解析出任何元数据表单（检查 dym/zip 输入）", file=sys.stderr)
         return 2
+
+    rc = _apply_vendor_metadata_cli(args, models, scan_result)
+    if isinstance(rc, int):
+        return rc
+    models = rc
 
     # 3) 桥接。
     result = linker.link(scan_result, models)
@@ -312,12 +373,21 @@ def _build_kb(args: argparse.Namespace, db_path: str) -> tuple[dict | None, int]
         print("错误: 未解析出任何元数据表单（检查 dym/zip 输入）", file=sys.stderr)
         return None, 2
 
+    vendor_fnumbers = getattr(args, "vendor", None)
+    result = _apply_vendor_metadata_cli(args, models, scan_result)
+    if isinstance(result, int):
+        return None, result
+    models = result
+
     index = namespace.build_index(scan_result)
     bridge = linker.link(scan_result, models, index=index)
     mm = project_map.module_map(scan_result, models, bridge, index=index)
+    source_args = {"source_root": str(args.source_root), "meta": list(args.meta)}
+    if vendor_fnumbers:
+        source_args["vendor_fnumbers"] = list(vendor_fnumbers)
     counts = store.build_kb(
         scan_result, models, bridge, mm, db_path, index=index,
-        source_args={"source_root": str(args.source_root), "meta": list(args.meta)},
+        source_args=source_args,
     )
     return counts, 0
 
@@ -644,6 +714,71 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
     return mcp_server.serve()
 
 
+def _cmd_db_meta_discover(args: argparse.Namespace) -> int:
+    """三类确定性信号预览（不连 DB、不摄取）：扩展母体 / ORM 查询 / 操作执行，分列 + 证据行号。
+
+    `build`/`bridge` 给了 `--db-config` 会自动跑同一套发现并直接摄取；本命令是它的干跑版，
+    供人工先看一眼会摄取哪些 key、依据是什么（红线 #4：证据先摆出来）。
+    """
+    from ..bridge import namespace
+    from ..dbmeta import discover_candidates
+    from ..dbmeta.discover import isv_prefixes_from_db, known_keys_from_db, known_keys_from_models
+    from ..ingest import scanner
+    from ..metadata.template_loader import TemplateRegistry
+
+    try:
+        scan_result = scanner.scan(args.discover, follow_symlinks=args.follow_symlinks)
+    except FileNotFoundError as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return 2
+
+    db_path = args.db if args.db and Path(args.db).is_file() else None
+
+    # 已知 key 全集 + ISV 前缀：--meta 给了才有信号①（ext 检测需 inherit_path，KB 里没存）；
+    # --db 只用于补 known_keys（含 field 表）与 ISV 前缀（KB 建过一次就是权威来源）。
+    known_keys: set[str] = set()
+    isv_prefixes: set[str] = set()
+    models: list = []
+    if args.meta:
+        registry = TemplateRegistry(args.template_dir) if args.template_dir else TemplateRegistry()
+        models, rc = _collect_models(args.meta, registry)
+        if rc:
+            return rc
+        known_keys = known_keys_from_models(models)
+        isv_prefixes = set(namespace.discover_meta_prefixes(models))
+    if db_path:
+        known_keys |= known_keys_from_db(db_path)
+        if not isv_prefixes:
+            isv_prefixes = set(isv_prefixes_from_db(db_path))
+    if not args.meta and not db_path:
+        print("提示: 未给 --meta 也未找到可用 KB，信号①(扩展母体)不可用，"
+              "信号②③(ORM查询/操作执行)未按本项目已知 key/ISV 前缀过滤，噪声会更多", file=sys.stderr)
+
+    candidates = discover_candidates(
+        models=models, scan_result=scan_result,
+        known_keys=known_keys, isv_prefixes=isv_prefixes,
+    )
+
+    if args.json:
+        print(json.dumps([c.to_dict() for c in candidates], ensure_ascii=False, indent=2))
+        return 0
+
+    if not candidates:
+        print("未发现候选原厂 key（三类确定性信号均未命中：扩展母体/ORM 查询/操作执行）")
+        return 0
+    print(f"候选原厂 key（{len(candidates)} 个必摄取候选，按 ext 优先 / orm+op 命中数降序）：")
+    for c in candidates[:50]:
+        ext = f"  ext←{c.ext_source}" if c.ext_source else ""
+        ev = f"  证据: {c.evidence[0]}" if c.evidence else ""
+        print(f"  {c.key:<28} 信号={'+'.join(c.sources) or '?':<10} "
+              f"orm={c.orm_hits:<3} op={c.op_hits:<3}{ext}{ev}")
+    if len(candidates) > 50:
+        print(f"  …其余 {len(candidates) - 50} 个见 --json")
+    print("下一步: cosmic_kb build <源码根> <meta...> --db-config <配置>  会自动摄取以上全部"
+          "（--vendor 可再手动追加其他 fnumber）")
+    return 0
+
+
 def _cmd_db_meta(args: argparse.Namespace) -> int:
     """从苍穹底层库（只读）按 fnumber 取 form+entity 元数据，合成 MetaModel。
 
@@ -651,6 +786,9 @@ def _cmd_db_meta(args: argparse.Namespace) -> int:
     """
     from ..dbmeta import DbMetaReader, load_config, sample_config_text
     from ..dbmeta.config import find_config_file, DEFAULT_CONFIG_NAMES
+
+    if getattr(args, "discover", None):
+        return _cmd_db_meta_discover(args)
 
     # --init-config：生成配置模板后退出（不连库）。
     if getattr(args, "init_config", False):
@@ -787,6 +925,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-list", type=int, default=30,
         help="文本报告中每类清单最多列出条数（默认 30；全部见 --json）",
     )
+    bridge.add_argument(
+        "--vendor", nargs="+", default=None, metavar="FNUMBER",
+        help="手动追加拉取的原厂 fnumber（如 bd_customer），需配合 --db-config；"
+             "三类确定性信号（扩展/ORM查询/操作执行）命中的 key 给了 --db-config 就自动拉取，"
+             "本项只补充自动发现漏掉的（见 cosmic_kb db-meta --discover 预览）",
+    )
+    bridge.add_argument(
+        "--db-config", default=None,
+        help="dbmeta 连接配置文件路径（默认就近找 cosmic_db.json，同 db-meta --config）；"
+             "给了即自动按三信号发现并摄取代码库引用到的原厂实体",
+    )
     bridge.set_defaults(func=_cmd_bridge)
 
     # ── 阶段4：build（建 KB）+ report（map / overview）──────────────────────
@@ -809,6 +958,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build.add_argument(
         "--follow-symlinks", action="store_true", help="扫源码时跟随符号链接（默认不跟随）"
+    )
+    build.add_argument(
+        "--vendor", nargs="+", default=None, metavar="FNUMBER",
+        help="手动追加拉取的原厂 fnumber（如 bd_customer），需配合 --db-config；"
+             "三类确定性信号（扩展/ORM查询/操作执行）命中的 key 给了 --db-config 就自动拉取，"
+             "本项只补充自动发现漏掉的（见 cosmic_kb db-meta --discover 预览）",
+    )
+    build.add_argument(
+        "--db-config", default=None,
+        help="dbmeta 连接配置文件路径（默认就近找 cosmic_db.json，同 db-meta --config）；"
+             "给了即自动按三信号发现并摄取代码库引用到的原厂实体",
     )
     build.set_defaults(func=_cmd_build, creating=True)
 
@@ -864,11 +1024,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     resolve = sub.add_parser(
         "resolve",
-        help="字段名核对：标识→真实元数据中文名+坐标（比 trace 便宜，防命名惯例臆断，钉不出回 null）",
+        help="标识核对：字段/表头实体/分录/子分录/单据(表单)标识→真实元数据中文名+坐标"
+             "（比 trace 便宜，防命名惯例臆断，钉不出回 null）",
     )
     resolve.add_argument(
         "keys", nargs="+",
-        help="一个或多个字段/分录容器标识，如 cqkd_zjjnqk cqkd_zdfl（可批量核对）")
+        help="一个或多个字段/分录容器/单据标识，如 cqkd_zjjnqk cqkd_zdfl cqkd_invoic_apply"
+             "（可批量核对；支持复合限定符精确匹配，与 trace 同一套点号坐标写法："
+             "单据.字段 / 分录.字段 / 单据.分录.字段）")
     _add_report_common(resolve)
     resolve.set_defaults(func=_cmd_resolve)
 
@@ -975,6 +1138,29 @@ def build_parser() -> argparse.ArgumentParser:
     db_meta.add_argument("--check", action="store_true", help="仅测只读连接 + 两表可读性，不取具体元数据")
     db_meta.add_argument("--init-config", dest="init_config", action="store_true", help="生成配置模板后退出")
     db_meta.add_argument("--json", action="store_true", help="输出 MetaModel 完整 JSON 快照")
+    db_meta.add_argument(
+        "--discover", metavar="SOURCE_ROOT", default=None,
+        help="候选原厂 key 发现（干跑，不连 DB、不摄取）：扫该源码根，按三类确定性信号"
+             "（扩展母体/ORM查询/操作执行）列出必摄取候选 + 证据行号；"
+             "build/bridge 给 --db-config 会自动跑同一套发现并直接摄取",
+    )
+    db_meta.add_argument(
+        "--db", default=None,
+        help="--discover 用：已建好的 KB 路径（推荐必给）——已知 key（含 field 表）/ISV 前缀"
+             "直接从 KB 现算，通常不必再另给 --meta",
+    )
+    db_meta.add_argument(
+        "--meta", nargs="+", default=None,
+        help="--discover 用：本地 .dym/整包 .zip/含 zip 的目录——信号①(扩展母体)必须靠它"
+             "（ext 检测需 InheritPath，KB 里没存），也可在 KB 之外补充已知 key/ISV 前缀",
+    )
+    db_meta.add_argument(
+        "--template-dir", default=None,
+        help="--discover --meta 用：继承根模板目录（含 bos_billtpl/bos_basetpl）；默认 samples/bos_temp",
+    )
+    db_meta.add_argument(
+        "--follow-symlinks", action="store_true", help="--discover 用：扫源码时跟随符号链接"
+    )
     db_meta.set_defaults(func=_cmd_db_meta)
 
     return parser
