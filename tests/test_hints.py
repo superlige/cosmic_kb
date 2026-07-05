@@ -1,7 +1,7 @@
 """事件→语义文档路由验收测试 —— 把 semantics_topic 焊进取证工具返回值。
 
 起因：段二大模型读源码凭训练知识臆断事件触发时机/入库，软约束压不住。导航工具
-（trace/bill/ask/method_calls）返回里内联 semantics_topic，让模型必定读到、想猜都没机会。
+（trace/bill/ask）返回里内联 semantics_topic，让模型必定读到、想猜都没机会。
 
 字段中文名自动标注（原 hints.FieldNames/build_field_names，曾一并焊进这些工具返回值）已于
 2026-07-05 随 MCP `read_source` 工具退役一起砍掉——那是全局候选盲扫，非精确定位，与本文件覆盖
@@ -18,7 +18,7 @@ from pathlib import Path
 
 from cosmic_kb.context import builder
 from cosmic_kb.graph import store
-from cosmic_kb.report import bill_view, field_trace, method_calls
+from cosmic_kb.report import bill_view, field_trace
 from cosmic_kb.semantic import hints, resolver
 
 from _synthkb import make_kb
@@ -105,17 +105,5 @@ def test_ask_operation_explain_no_longer_carries_name(tmp_path: Path):
         cs = next(t for t in touched if t["field_key"] == "cqkd_collateralstatus")
         assert "field_name" not in cs
         assert cs["semantics_topic"] == "plugin-operation"
-    finally:
-        conn.close()
-
-
-def test_method_calls_event_method_carries_topic(tmp_path: Path):
-    """method_calls：被导航的方法若是事件回调，返回带 semantics_topic（解释它在干嘛前先核语义）。"""
-    conn = _conn(tmp_path)
-    try:
-        rd = method_calls.method_calls(
-            conn, "cqspb.assets.CollateralOp", "beforeExecuteOperationTransaction")
-        # 该方法 KB 无源码（synth 不带真实 java），但 found=True 且语义路由仍应焊上。
-        assert rd.get("semantics_topic") == "plugin-operation"
     finally:
         conn.close()

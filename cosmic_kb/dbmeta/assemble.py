@@ -87,6 +87,76 @@ def build_deploy_root(
     return root
 
 
+def build_convert_rule_root(
+    rule_root: ET.Element,
+    *,
+    fid: str,
+    isv: str | None,
+    enabled: bool | None,
+    source_entity: str | None,
+    target_entity: str | None,
+) -> ET.Element:
+    """把 t_botp_convertrule 一行的 fdata（`<ConvertRuleMetadata>` 裸片段）+ 关系本体
+    列套回 `DeployMetadata/DesignMetas/DesignConvertRuleMeta` 骨架（parse_element 输入形态）。
+
+    `_parse_convert_rule` 的 `_wrap_text` 优先读 `DesignConvertRuleMeta` 直接子文本节点
+    （`dym_parser.py:343-355`），`Enabled`/`ModelType` 更是只读这一层不下探——所以
+    `Id`/`Isv`/`Enabled`/`SourceEntityNumber`/`TargetEntityNumber` 必须写成这里的直接子节点，
+    而不是指望内层 `ConvertRuleMetadata` 片段本身携带（DB 行的这几列本就是关系列，不在
+    fdata 正文里）。某项传 None 就不写子节点（不写空标签），让 `_wrap_text`/`_parse_bool`
+    按"确实没有"处理，不伪造出一个空字符串顶掉合理的 fallback/None 语义。
+    """
+    meta = ET.Element("DesignConvertRuleMeta")
+    ET.SubElement(meta, "Id").text = fid
+    if isv is not None:
+        ET.SubElement(meta, "Isv").text = isv
+    if enabled is not None:
+        ET.SubElement(meta, "Enabled").text = "true" if enabled else "false"
+    if source_entity is not None:
+        ET.SubElement(meta, "SourceEntityNumber").text = source_entity
+    if target_entity is not None:
+        ET.SubElement(meta, "TargetEntityNumber").text = target_entity
+    ET.SubElement(meta, "DataXml").append(rule_root)
+
+    root = ET.Element("DeployMetadata")
+    metas = ET.SubElement(root, "DesignMetas")
+    metas.append(meta)
+    return root
+
+
+def assemble_convert_rule(
+    fdata: bytes | str,
+    *,
+    fid: str,
+    isv: str | None = None,
+    enabled: bool | None = None,
+    source_entity: str | None = None,
+    target_entity: str | None = None,
+    template_registry: TemplateRegistry | None = None,
+) -> MetaModel:
+    """把 `t_botp_convertrule` 一行合成一个 `MetaModel`（`form_type="convert"`）。
+
+    `fdata` 为空（无正文可解析）则抛错，同 `assemble_model` 对"两段都空"的处理。
+    """
+    rule_root = _to_root(fdata)
+    if rule_root is None:
+        raise ValueError(f"转换规则 fdata 为空，无法解析（fid={fid!r}）")
+
+    deploy_root = build_convert_rule_root(
+        rule_root,
+        fid=fid,
+        isv=isv,
+        enabled=enabled,
+        source_entity=source_entity,
+        target_entity=target_entity,
+    )
+    return parse_element(
+        deploy_root,
+        template_registry=template_registry,
+        source_file=f"db://convertrule/{fid}",
+    )
+
+
 def assemble_model(
     form_fdata: bytes | str | None,
     entity_fdata: bytes | str | None,

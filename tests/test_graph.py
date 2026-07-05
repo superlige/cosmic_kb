@@ -129,6 +129,32 @@ def test_kb_meta_and_version(tmp_path: Path):
         conn.close()
 
 
+def test_read_meta_tolerant_missing_file_returns_none(tmp_path: Path):
+    assert store.read_meta_tolerant(tmp_path / "no-such.db", "schema_version") is None
+
+
+def test_read_meta_tolerant_missing_table_returns_none(tmp_path: Path):
+    """旧 schema/非 KB 文件（没有 kb_meta 表）：容错返回 None，不抛错。"""
+    import sqlite3
+
+    p = tmp_path / "old.db"
+    conn = sqlite3.connect(str(p))
+    conn.execute("CREATE TABLE dummy(x)")
+    conn.commit()
+    conn.close()
+    assert store.read_meta_tolerant(p, "schema_version") is None
+
+
+def test_read_meta_tolerant_missing_key_returns_none(tmp_path: Path):
+    db, _ = _build(tmp_path)
+    assert store.read_meta_tolerant(db, "no_such_key") is None
+
+
+def test_read_meta_tolerant_returns_value_when_present(tmp_path: Path):
+    db, _ = _build(tmp_path)
+    assert store.read_meta_tolerant(db, "schema_version") == store.KB_SCHEMA_VERSION
+
+
 def test_source_class_orphan_flag(tmp_path: Path):
     db, _ = _build(tmp_path)
     conn = store.open_kb(db)

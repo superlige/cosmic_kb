@@ -135,6 +135,15 @@
     `given_entry`（可同时出现），纯两段式既有行为/测试不变。详见 `docs/阶段验收.md`
     "resolve_fields 补齐'分录.字段'/'单据.分录.字段'复合限定符"条目。**验收待定：Claude 未自跑
     `pytest -q`，交 codex 执行确认零回归。**
+  - **dbmeta · 增量二开元数据同步**（2026-07-05）：真正频繁变动的是项目自己的二开元数据（非
+    原厂），实测确认 `t_meta_formdesign`/`t_meta_entitydesign` 有 `fisv`/`fmodifydate` 列、
+    转换规则另在独立表 `t_botp_convertrule`、一个平台库唯一二开 ISV；`build --db-config` 自动
+    按 ISV+`fmodifydate` 增量拉取自己的 form/entity/转换规则变更，同 key 整条替换（非 vendor
+    合并语义），水位存 `kb_meta`；纯 DB 零 zip 首次建库亦可（`meta` 位置参数改 `nargs="*"`）；
+    新增 `--isv`/`--full-refresh`；新增 `dbmeta/sync.py`；schema 未变（仍 v13）。详见
+    `docs/阶段验收.md`"dbmeta · 增量二开元数据同步（build-only）"条目。**验收待定：Claude 未
+    自跑 `pytest -q`，交 codex 执行确认零回归；另有 `server_now_iso()` 真库时区行为需用户手动
+    验证一次。**
 
 > ⚠️ MCP server 常驻，改 MCP/取证源码后需**重连/重启 MCP** 才生效；改 schema 后需 `cosmic_kb build` 重建 KB。
 
@@ -148,7 +157,7 @@ cosmic_kb doctor                         # 资产体检（需 skill_assets/ok-co
 cosmic_kb ingest "<项目源码根>"          # 阶段1：摄取 + 覆盖率/可信度报告（--json 可留档）
 cosmic_kb meta "<dym|cr 或整包 zip>"     # 阶段2：解析元数据(含转换规则 .cr)，分类计数/JSON 快照
 cosmic_kb bridge "<项目源码根>" "<dym|zip|目录>"  # 阶段3：ClassName↔源码桥接报告（--json）
-cosmic_kb build "<项目源码根>" "<dym|zip|目录>"   # 阶段4+5：建 KB（含字段级分析）
+cosmic_kb build "<项目源码根>" ["<dym|zip|目录> ..."] [--db-config <配置> [--isv <ISV>] [--full-refresh]]  # 阶段4+5：建 KB（含字段级分析）；给了 --db-config 自动增量同步本项目二开 form/entity/转换规则变更（纯 DB 冷启动可省略 dym/zip 参数）
 cosmic_kb trace "单据.字段|单据.分录.字段|单据.分录.子分录.字段"  # 旗舰：按层级精确定位字段→谁改了它/事件函数/是否落库（裸字段=列全部坐标）
 cosmic_kb bill "<单据标识>"              # 单据钻取：操作集/插件/字段触达/风险
 cosmic_kb calls "<类全限定名>" "<方法名>"        # 方法出向调用导航：该方法调了项目内哪些方法→目标类/源文件/行；并附该方法读写字段 key + 语义路由（中文名不再自动标注，需要调 resolve_fields 核对）；源码全文与"方法在干嘛"交给大模型直接读+苍穹 skill

@@ -52,8 +52,6 @@ def build_context(conn, rq: ResolvedQuery) -> dict[str, Any]:
         return _ctx_bill(conn, rq, base)
     if rq.intent == "plugin_explain":
         return _ctx_plugin(conn, rq, base)
-    if rq.intent == "method_calls":
-        return _ctx_method(conn, rq, base)
     if rq.intent == "operation_explain":
         return _ctx_operation(conn, rq, base)
 
@@ -186,46 +184,6 @@ def _ctx_plugin(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, Any]
     return base
 
 
-# ── 方法：出向调用导航（该方法调了项目内哪些方法、各在哪个文件；复用 report.method_calls）──
-#   方法在干嘛由段二大模型直接读源码解释，工具只给它读不到/猜不准的下钻坐标。
-def _ctx_method(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, Any]:
-    from ..report import method_calls as mc_mod
-
-    rd = mc_mod.method_calls(conn, rq.class_fqn, rq.method_name)
-    base["evidence"] = rd
-    if not rd.get("found"):
-        cands = rd.get("candidates") or []
-        if cands:                                  # 类/方法歧义 → 候选菜单反问
-            base["status"] = "need_clarification"
-            base["candidates"] = [
-                {"kind": "method", "score": 100.0,
-                 "label": (c["fqn"] if isinstance(c, dict) else f"{rd.get('class_fqn')}#{c}")}
-                for c in cands
-            ]
-        else:
-            base["status"] = "not_found"
-        base["advice"] = [rd.get("note") or "未找到该方法。"]
-        return base
-
-    base["status"] = "ok"
-    advice: list[str] = [
-        f"方法源码请直接读 {rd['relpath']}（行号见下），本工具只给确定性的项目内调用坐标。"]
-    for m in rd["methods"]:
-        n = m["summary"]["project_calls"]
-        loc = f"行 {m['start_line']}–{m['end_line']}" if m["start_line"] else "（行号未知）"
-        advice.append(f"方法 {rd['class_simple']}.{m['method_name']} {loc}：解析出 {n} 处项目内调用"
-                      + ("（可逐层下钻）。" if n else "（无或接收者类型解不出，未臆造）。"))
-    if rd.get("note"):
-        advice.append(rd["note"])
-    if any(m["calls"] for m in rd["methods"]):
-        advice.append("逐层下钻：对每条调用的 target_fqn 再 method_calls，可顺着调用链往下读源码。")
-    if any((m.get("fields") or {}).get("writes") or (m.get("fields") or {}).get("reads")
-           for m in rd["methods"]):
-        advice.append("已列该方法读写的字段 key（见 fields），中文名请调 resolve_fields 核对，勿凭命名惯例猜。")
-    base["advice"] = advice
-    return base
-
-
 # ── 操作：解释（该单据下某操作绑定的插件 + 字段触达）──────────────────────────
 def _ctx_operation(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, Any]:
     form_key, op_key = rq.form_key, rq.operation_key
@@ -299,9 +257,6 @@ def render_context(ctx: dict[str, Any], *, max_list: int = 50) -> str:
         lines.append(bv_mod.render_bill(ev, max_list=max_list))
     elif ctx["intent"] == "plugin_explain" and ev is not None:
         lines.extend(_render_plugin(ev, max_list))
-    elif ctx["intent"] == "method_calls" and ev is not None:
-        from ..report import method_calls as mc_mod
-        lines.append(mc_mod.render_method_calls(ev, max_list=max_list))
     elif ctx["intent"] == "operation_explain" and ev is not None:
         lines.extend(_render_operation(ev, max_list))
 

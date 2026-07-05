@@ -70,7 +70,6 @@ def test_collapse_readers_dedups_by_method_and_keeps_total():
     assert len(out["methods"]) == 3          # 去重成 3 个 (类,方法)
     top = out["methods"][0]                  # 按 count 降序
     assert top["count"] == 5 and top["method"] == "m1"
-    assert top["calls"] == "calls p.A m1"
     assert len(top["locations"]) <= 3        # 物理位置至多 3 处
     assert out["capped"] == 0
 
@@ -103,7 +102,7 @@ def test_collapse_unlocated_dedups_and_splits_write_read():
     assert len(out["methods"]) == 2
     top = out["methods"][0]                       # 写多者排前
     assert top["method"] == "m1" and top["writes"] == 3 and top["reads"] == 1
-    assert top["count"] == 4 and top["calls"] == "calls p.A m1"
+    assert top["count"] == 4
     assert len(top["locations"]) <= 3
     # 来源线索（plugin 注册单据）透传，作只读提示——不写进 form_key。
     assert top["plugin_form_label"] == "cqkd_ht「合同」"

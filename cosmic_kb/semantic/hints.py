@@ -4,7 +4,7 @@
 不查苍穹语义文档（`propertyChanged` 没核 plugin-form）。靠 MCP `INSTRUCTIONS` 软约束压不住
 模型的自信先验——规则在场、模型知道、还是绕过去。
 
-改法：**在模型本来就要走的导航工具（trace / bill / ask / method_calls）的返回里内联语义
+改法：**在模型本来就要走的导航工具（trace / bill / ask）的返回里内联语义
 路由**——模型必定读到，被提示"断触发时机/入库前先 cosmic_semantics"。host-agnostic：不依赖
 任何宿主钩子，只焊在我们自己工具的返回值（唯一所有 MCP host 都一定读的硬信息）。
 

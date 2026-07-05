@@ -485,6 +485,29 @@ def kb_exists(db_path: str | Path) -> bool:
         return False
 
 
+def read_meta_tolerant(db_path: str | Path, key: str) -> str | None:
+    """容错读一个**旧** KB 文件的 kb_meta 单键；文件不存在、非法文件、旧 schema 缺表
+    都返回 None，不抛错（同 `dbmeta/discover.py::known_keys_from_db` 的容错风格）。
+
+    专给"build 前读旧 KB 上次同步水位"用——`build_kb` 会先 DROP 掉 `kb_meta` 再重建
+    （见 `_OBJECTS`），这个函数必须在调 `build_kb` 之前对**旧**文件读，读到的是上一轮
+    build 留下的值。
+    """
+    p = Path(db_path)
+    if not p.is_file():
+        return None
+    try:
+        conn = open_kb(p)
+    except sqlite3.DatabaseError:
+        return None
+    try:
+        return get_meta(conn, key)
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        conn.close()
+
+
 def search(conn: sqlite3.Connection, query: str, *, limit: int = 50) -> list[sqlite3.Row]:
     """FTS5 全文检索（中文名↔标识 / 字段 / 类名）。为阶段 9 NL 查询预留。"""
     return conn.execute(

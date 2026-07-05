@@ -35,6 +35,11 @@ DATA_COLUMN = "fdata"
 # 关系直接回溯母体行，不受命名截断影响，见 reader.py::_fetch_master_fdata）。
 ID_COLUMN = "fid"
 MASTER_ID_COLUMN = "fmasterid"
+# 转换规则表（2026-07-05 用户实测确认，不在上面两张设计表里）。
+CONVERT_RULE_TABLE = "t_botp_convertrule"
+# 二开标识列 / 最后修改时间列（2026-07-05 用户实测确认三张表都有，用于增量同步判定）。
+ISV_COLUMN = "fisv"
+MODIFY_TIME_COLUMN = "fmodifydate"
 
 
 @dataclass
@@ -57,6 +62,9 @@ class DbConfig:
     data_column: str = DATA_COLUMN
     id_column: str = ID_COLUMN
     master_id_column: str = MASTER_ID_COLUMN
+    convert_rule_table: str = CONVERT_RULE_TABLE
+    isv_column: str = ISV_COLUMN
+    modify_time_column: str = MODIFY_TIME_COLUMN
 
     @property
     def read_database(self) -> str:
@@ -80,6 +88,9 @@ class DbConfig:
             "data_column": self.data_column,
             "id_column": self.id_column,
             "master_id_column": self.master_id_column,
+            "convert_rule_table": self.convert_rule_table,
+            "isv_column": self.isv_column,
+            "modify_time_column": self.modify_time_column,
         }
 
 

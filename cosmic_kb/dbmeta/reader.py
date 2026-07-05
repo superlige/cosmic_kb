@@ -22,7 +22,7 @@ from typing import Iterable
 
 from ..metadata.model import MetaModel
 from ..metadata.template_loader import TemplateRegistry
-from .assemble import assemble_model
+from .assemble import assemble_convert_rule, assemble_model
 from .config import DbConfig
 from .connection import MetaDbDriver, get_driver
 
@@ -42,6 +42,20 @@ def _to_bytes(value: object) -> bytes:
     if isinstance(value, str):
         return value.encode("utf-8")
     return bytes(value)  # type: ignore[arg-type]
+
+
+def _to_optional_bool(value: object) -> bool | None:
+    """把 DB 回来的 fenabled 归一成 bool|None：可能是原生 bool、0/1、或
+    "true"/"false"/"1"/"0" 字符串，驱动不同实现回来的 Python 类型不保证一致。"""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "t", "yes")
+    return bool(value)
 
 
 class DbMetaReader:
@@ -235,6 +249,131 @@ class DbMetaReader:
                 form, entity, fnumber=master_fnumber or lk, template_registry=self._registry
             )
         return out
+
+    # ── 增量二开元数据同步（2026-07-05 拍板，见 dbmeta/sync.py）─────────────
+    def list_isv_form_counts(self) -> dict[str, int]:
+        """按 fisv 分组统计表单表里的表单数（只查 form_table，够消歧提示用）。
+
+        不在这里排除 kingdee 等平台内建 ISV——排除策略是业务决策，属于
+        `sync.py::resolve_isv`，这里只如实取数。
+        """
+        assert self._driver is not None, "请先 open()"
+        cfg = self.config
+        rel = _qualified(cfg.schema, cfg.form_table)
+        sql = (
+            f"SELECT {cfg.isv_column}, count(*) FROM {rel} "
+            f"WHERE {cfg.isv_column} IS NOT NULL AND {cfg.isv_column} != '' "
+            f"GROUP BY {cfg.isv_column}"
+        )
+        rows = self._driver.query(sql)
+        return {isv: count for isv, count in rows}
+
+    def list_changed_keys(self, table: str, isv: str, since_ts: str | None) -> list[str]:
+        """某表按 isv（+ 可选 since_ts）圈定"变更/全量"key 列表。
+
+        `since_ts=None` 不追加时间过滤，天然退化成"该 isv 下全量"——首次同步/
+        `--full-refresh`/纯 DB 冷启动建库都走这同一条查询，不需要另外的全量枚举逻辑。
+        """
+        assert self._driver is not None, "请先 open()"
+        cfg = self.config
+        rel = _qualified(cfg.schema, table)
+        sql = f"SELECT {cfg.number_column} FROM {rel} WHERE {cfg.isv_column} = %s"
+        params: tuple = (isv,)
+        if since_ts is not None:
+            sql += f" AND {cfg.modify_time_column} > %s"
+            params = (isv, since_ts)
+        rows = self._driver.query(sql, params)
+        return [r[0] for r in rows if r[0] is not None]
+
+    def list_changed_form_and_entity_keys(self, isv: str, since_ts: str | None) -> list[str]:
+        """form_table/entity_table 各自变更 key 的并集（去重保序）。"""
+        form_keys = self.list_changed_keys(self.config.form_table, isv, since_ts)
+        entity_keys = self.list_changed_keys(self.config.entity_table, isv, since_ts)
+        return list(dict.fromkeys([*form_keys, *entity_keys]))
+
+    def list_changed_convert_rule_ids(self, isv: str, since_ts: str | None) -> list[str]:
+        """同 `list_changed_keys`，但固定查 `convert_rule_table`、取 `id_column`
+        （这张表没有 `fnumber`，标识是 `fid`）。"""
+        assert self._driver is not None, "请先 open()"
+        cfg = self.config
+        rel = _qualified(cfg.schema, cfg.convert_rule_table)
+        sql = f"SELECT {cfg.id_column} FROM {rel} WHERE {cfg.isv_column} = %s"
+        params: tuple = (isv,)
+        if since_ts is not None:
+            sql += f" AND {cfg.modify_time_column} > %s"
+            params = (isv, since_ts)
+        rows = self._driver.query(sql, params)
+        return [r[0] for r in rows if r[0] is not None]
+
+    def _fetch_convert_rule_rows_bulk(self, fids: list[str]) -> dict[str, dict]:
+        """一条 `fid = ANY(%s)` 取回一批转换规则行（含 fdata 与关系本体列）。
+
+        `fenabled`/`fsourceentitynumber`/`ftargetentitynumber` 是这张表的专属列，
+        直接写死列名（不做成 `DbConfig` 字段——只有 `convert_rule_table`/
+        `isv_column`/`modify_time_column` 需要跨表可配置）。
+        """
+        assert self._driver is not None, "请先 open()"
+        cfg = self.config
+        rel = _qualified(cfg.schema, cfg.convert_rule_table)
+        sql = (
+            f"SELECT {cfg.id_column}, {cfg.data_column}, {cfg.isv_column}, "
+            f"fenabled, fsourceentitynumber, ftargetentitynumber "
+            f"FROM {rel} WHERE {cfg.id_column} = ANY(%s)"
+        )
+        rows = self._driver.query(sql, (list(fids),))
+        out: dict[str, dict] = {}
+        for fid, fdata, isv, enabled, source_entity, target_entity in rows:
+            if fdata is None:
+                continue
+            out[fid] = {
+                "fdata": _to_bytes(fdata),
+                "isv": isv,
+                "enabled": _to_optional_bool(enabled),
+                "source_entity": source_entity,
+                "target_entity": target_entity,
+            }
+        return out
+
+    def fetch_convert_rule_fdata_bulk(self, fids: Iterable[str]) -> dict[str, bytes]:
+        """薄封装：只取 fdata（配套测试/诊断用）。"""
+        keys = list(dict.fromkeys(fids))
+        if not keys:
+            return {}
+        rows = self._fetch_convert_rule_rows_bulk(keys)
+        return {fid: row["fdata"] for fid, row in rows.items()}
+
+    def read_convert_rules_bulk(self, fids: Iterable[str]) -> dict[str, MetaModel]:
+        """批量按 fid 取回并各自合成 MetaModel（转换规则不像表单/实体拆两张表，
+        `t_botp_convertrule` 单表就有完整关系本体 + fdata，一次 SELECT 够了）。"""
+        keys = list(dict.fromkeys(fids))
+        if not keys:
+            return {}
+        rows = self._fetch_convert_rule_rows_bulk(keys)
+        out: dict[str, MetaModel] = {}
+        for fid, row in rows.items():
+            out[fid] = assemble_convert_rule(
+                row["fdata"],
+                fid=fid,
+                isv=row["isv"],
+                enabled=row["enabled"],
+                source_entity=row["source_entity"],
+                target_entity=row["target_entity"],
+                template_registry=self._registry,
+            )
+        return out
+
+    def server_now_iso(self) -> str:
+        """DB 服务端当前时间（非客户端本机时间，避免时钟偏差污染增量同步水位）。
+
+        `sync.py` 必须在发起变更查询**之前**调用这个方法记录水位——否则同步过程中
+        新提交的变更会被这一轮漏掉、且下一轮的 since_ts 已经晚于它，永久漏同步。
+        """
+        assert self._driver is not None, "请先 open()"
+        rows = self._driver.query("SELECT CURRENT_TIMESTAMP")
+        value = rows[0][0]
+        if isinstance(value, str):
+            return value
+        return value.isoformat()
 
     def ping(self) -> dict:
         """连接自检：确认只读会话可用，回报两张表能否 SELECT（不写任何数据）。"""

@@ -16,23 +16,31 @@
     discover.py    发现代码库里引用到、本地元数据没有的候选原厂 key（三类确定性信号：
                    扩展母体 / ORM 查询 / 操作执行，命中即必摄取）
     integrate.py   把 --vendor 指定的原厂 fnumber 拉取/合并进 build/bridge 的 models 列表
+    sync.py        build --db-config 自动增量同步本项目自己（二开）ISV 的 form/entity/
+                   转换规则变更（fmodifydate 判定，同 key 整条替换，非 vendor 合并语义）
 """
 
-from .assemble import assemble_model
+from .assemble import assemble_convert_rule, assemble_model
 from .config import DbConfig, load_config, sample_config_text
 from .discover import VendorCandidate, discover_candidates, known_keys_from_db, isv_prefixes_from_db
 from .integrate import apply_vendor_metadata
 from .reader import DbMetaReader
+from .sync import IsvAmbiguousError, SyncResult, resolve_isv, sync_own_isv_metadata
 
 __all__ = [
     "DbConfig",
     "DbMetaReader",
+    "IsvAmbiguousError",
+    "SyncResult",
     "VendorCandidate",
     "apply_vendor_metadata",
+    "assemble_convert_rule",
     "assemble_model",
     "discover_candidates",
     "known_keys_from_db",
     "isv_prefixes_from_db",
     "load_config",
+    "resolve_isv",
     "sample_config_text",
+    "sync_own_isv_metadata",
 ]

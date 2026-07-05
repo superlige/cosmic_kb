@@ -77,9 +77,8 @@ def test_merge_writers_dedups_class_and_hoists_constants():
     assert a["count"] == 3 and len(a["sites"]) == 3
     # 类级常量只在类节点出现一次，不在每个 site 重复。
     assert a["plugin_type"] == "op" and "plugin_type" not in a["sites"][0]
-    # site 保留行级 line/persists + calls 导航。
+    # site 保留行级 line/persists。
     assert {s["line"] for s in a["sites"]} == {1, 2, 3}
-    assert a["sites"][0]["calls"] == "calls p.A m1"
 
 
 def test_merge_writers_caps_classes_and_sites():
@@ -95,7 +94,7 @@ def test_merge_writers_caps_classes_and_sites():
 
 
 def test_merge_readers_folds_methods_under_class():
-    """读取按类合并，类内按方法去重计数；类级常量一份、方法保 count/calls。"""
+    """读取按类合并，类内按方法去重计数；类级常量一份、方法保 count。"""
     rows = [{"access_class": "p.R", "plugin_fqn": "p.R", "plugin_type": "form",
              "plugin_form_label": None, "event_method": "m1", "semantics_topic": "plugin-form"}
             for _ in range(4)]
@@ -106,7 +105,7 @@ def test_merge_readers_folds_methods_under_class():
     cls = out["classes"][0]
     assert cls["total"] == 5 and cls["class_fqn"] == "p.R"
     top = cls["methods"][0]
-    assert top["method"] == "m1" and top["count"] == 4 and top["calls"] == "calls p.R m1"
+    assert top["method"] == "m1" and top["count"] == 4
 
 
 # ── 集成：access 拆分 ─────────────────────────────────────────────────────────
@@ -154,7 +153,7 @@ def test_compact_access_read_only_readers(tmp_path: Path):
 
 def test_compact_unlocated_is_worklist(tmp_path: Path):
     """未定位单据（form_key=None 但确实读写本字段）在 compact 下折叠成「反推来源单据」工作单：
-    按 (类,方法) 去重、写读分计、带 calls + plugin_form_label 来源线索（非自动回填）。"""
+    按 (类,方法) 去重、写读分计、带 plugin_form_label 来源线索（非自动回填）。"""
     db = make_kb(tmp_path)
     # 同字段、来源单据判不出（form_key=None），但插件注册在 cqkd_assetcard 上（→ plugin_form_label 线索）。
     _seed(db, [
@@ -175,7 +174,7 @@ def test_compact_unlocated_is_worklist(tmp_path: Path):
     assert set(ul) == {"total", "writes", "reads", "by_reason", "methods", "capped"}
     assert ul["total"] == 2 and ul["writes"] == 2          # 两处写入去重前真实数
     m = ul["methods"][0]
-    assert m["method"] == "fill" and m["writes"] == 2 and m["calls"] == "calls cqspb.assets.CollateralOp fill"
+    assert m["method"] == "fill" and m["writes"] == 2
     # 来源线索 = 插件注册单据（只读提示，不写进 form_key）。
     assert "cqkd_assetcard" in (m["plugin_form_label"] or "")
 

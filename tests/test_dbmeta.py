@@ -21,7 +21,7 @@ import xml.etree.ElementTree as ET
 import pytest
 
 from cosmic_kb import _assets
-from cosmic_kb.dbmeta import assemble_model
+from cosmic_kb.dbmeta import assemble_convert_rule, assemble_model
 from cosmic_kb.dbmeta.assemble import _infer_model_type, build_deploy_root
 from cosmic_kb.dbmeta.config import DbConfig, from_dict, load_config, sample_config_text
 from cosmic_kb.dbmeta.connection import assert_readonly_sql, get_driver
@@ -393,3 +393,183 @@ def test_reader_bulk_methods_empty_input_short_circuits_no_query(monkeypatch):
     finally:
         r.close()
     assert fake.calls == []
+
+
+# ── 6. 转换规则：assemble_convert_rule（t_botp_convertrule 单表 → MetaModel）──────────
+_CONVERT_RULE_FDATA = """<?xml version="1.0" encoding="UTF-8"?>
+<ConvertRuleMetadata>
+  <RuleElement>
+    <ConvertRuleElement>
+      <Name>收款单红冲</Name>
+      <LinkEntityPolicy>
+        <LinkEntityPolicy>
+          <TargetEntryKey>cqkd_skdb</TargetEntryKey>
+          <SourceEntryKey>cqkd_skdb</SourceEntryKey>
+        </LinkEntityPolicy>
+      </LinkEntityPolicy>
+      <FieldMapPolicy>
+        <FieldMapPolicy>
+          <FieldMaps>
+            <FieldMapItem>
+              <ConvertType>SourceField</ConvertType>
+              <TargetFieldKey>billno</TargetFieldKey>
+              <SourceFieldKey/>
+              <SumType>First</SumType>
+            </FieldMapItem>
+          </FieldMaps>
+        </FieldMapPolicy>
+      </FieldMapPolicy>
+    </ConvertRuleElement>
+  </RuleElement>
+</ConvertRuleMetadata>"""
+
+
+def test_assemble_convert_rule_builds_expected_skeleton():
+    """关系本体（Id/Isv/Enabled/SourceEntityNumber/TargetEntityNumber）来自 DB 关系列，
+    不是 fdata 正文——这几项必须写成 DesignConvertRuleMeta 直接子节点才能被
+    _parse_convert_rule 读到（见 dym_parser.py:343-355 的 _wrap_text 优先级）。"""
+    model = assemble_convert_rule(
+        _CONVERT_RULE_FDATA,
+        fid="2007204479732048896",
+        isv="cqkd",
+        enabled=True,
+        source_entity="cqkd_skdb",
+        target_entity="cqkd_skdb",
+    )
+    assert model.key == "2007204479732048896"
+    assert model.form_type == "convert"
+    assert model.isv == "cqkd"
+    assert model.name == "收款单红冲"
+    assert model.convert.source_entity == "cqkd_skdb"
+    assert model.convert.target_entity == "cqkd_skdb"
+    assert model.convert.source_entry == "cqkd_skdb"
+    assert model.convert.target_entry == "cqkd_skdb"
+    assert model.convert.field_map_count == 1
+    assert model.convert.enabled is True
+    assert model.source_file == "db://convertrule/2007204479732048896"
+
+
+def test_assemble_convert_rule_enabled_false_roundtrips():
+    """`enabled=False` 不能被当成"未给"漏掉——必须写 "false" 字面量而非省略节点。"""
+    model = assemble_convert_rule(_CONVERT_RULE_FDATA, fid="x", enabled=False)
+    assert model.convert.enabled is False
+
+
+def test_assemble_convert_rule_empty_fdata_raises():
+    with pytest.raises(ValueError):
+        assemble_convert_rule("", fid="x")
+    with pytest.raises(ValueError):
+        assemble_convert_rule("   ", fid="x")
+
+
+# ── 7. reader：增量二开元数据同步取数（isv/fmodifydate/转换规则/服务端时间）────────────
+def test_reader_list_isv_form_counts_groups(monkeypatch):
+    responses = [[("kingdee", 500), ("cqkd", 340)]]
+    r, fake = _fake_open_reader(monkeypatch, responses)
+    try:
+        counts = r.list_isv_form_counts()
+    finally:
+        r.close()
+    assert counts == {"kingdee": 500, "cqkd": 340}
+    sql, params = fake.calls[0]
+    assert "fisv" in sql and "GROUP BY" in sql
+    assert "t_meta_formdesign" in sql
+    assert params == ()
+
+
+def test_reader_list_changed_keys_omits_time_filter_when_since_ts_none(monkeypatch):
+    r, fake = _fake_open_reader(monkeypatch, [[("cqkd_a",), ("cqkd_b",)]])
+    try:
+        keys = r.list_changed_keys("t_meta_formdesign", "cqkd", None)
+    finally:
+        r.close()
+    assert keys == ["cqkd_a", "cqkd_b"]
+    sql, params = fake.calls[0]
+    assert "fmodifydate" not in sql
+    assert params == ("cqkd",)
+
+
+def test_reader_list_changed_keys_includes_modify_time_filter_when_since_ts_given(monkeypatch):
+    r, fake = _fake_open_reader(monkeypatch, [[("cqkd_a",)]])
+    try:
+        keys = r.list_changed_keys("t_meta_formdesign", "cqkd", "2026-07-01T00:00:00")
+    finally:
+        r.close()
+    assert keys == ["cqkd_a"]
+    sql, params = fake.calls[0]
+    assert "fmodifydate" in sql and ">" in sql
+    assert params == ("cqkd", "2026-07-01T00:00:00")
+
+
+def test_reader_list_changed_form_and_entity_keys_unions_dedups_preserves_order(monkeypatch):
+    responses = [
+        [("cqkd_a",), ("cqkd_b",)],   # form_table
+        [("cqkd_b",), ("cqkd_c",)],   # entity_table，cqkd_b 重复
+    ]
+    r, fake = _fake_open_reader(monkeypatch, responses)
+    try:
+        keys = r.list_changed_form_and_entity_keys("cqkd", None)
+    finally:
+        r.close()
+    assert keys == ["cqkd_a", "cqkd_b", "cqkd_c"]   # 去重且保序
+    assert len(fake.calls) == 2
+
+
+def test_reader_list_changed_convert_rule_ids_uses_fid_not_fnumber(monkeypatch):
+    r, fake = _fake_open_reader(monkeypatch, [[("2007204479732048896",)]])
+    try:
+        ids = r.list_changed_convert_rule_ids("cqkd", None)
+    finally:
+        r.close()
+    assert ids == ["2007204479732048896"]
+    sql, _params = fake.calls[0]
+    assert "t_botp_convertrule" in sql
+    assert "SELECT fid " in sql or sql.strip().startswith("SELECT fid")
+
+
+def test_reader_read_convert_rules_bulk_assembles_via_assemble_convert_rule(monkeypatch):
+    row = (
+        "2007204479732048896", _CONVERT_RULE_FDATA.encode("utf-8"),
+        "cqkd", True, "cqkd_skdb", "cqkd_skdb",
+    )
+    r, fake = _fake_open_reader(monkeypatch, [[row]])
+    try:
+        models = r.read_convert_rules_bulk(["2007204479732048896"])
+    finally:
+        r.close()
+    assert set(models) == {"2007204479732048896"}
+    m = models["2007204479732048896"]
+    assert m.form_type == "convert"
+    assert m.convert.source_entity == "cqkd_skdb"
+    sql, params = fake.calls[0]
+    assert "= ANY(" in sql
+    assert set(params[0]) == {"2007204479732048896"}
+
+
+def test_reader_read_convert_rules_bulk_empty_input_short_circuits_no_query(monkeypatch):
+    r, fake = _fake_open_reader(monkeypatch, [])
+    try:
+        assert r.read_convert_rules_bulk([]) == {}
+        assert r.fetch_convert_rule_fdata_bulk([]) == {}
+    finally:
+        r.close()
+    assert fake.calls == []
+
+
+def test_reader_server_now_iso_returns_string_as_is(monkeypatch):
+    r, _fake = _fake_open_reader(monkeypatch, [[("2026-07-05T10:00:00",)]])
+    try:
+        assert r.server_now_iso() == "2026-07-05T10:00:00"
+    finally:
+        r.close()
+
+
+def test_reader_server_now_iso_normalizes_datetime(monkeypatch):
+    import datetime
+
+    dt = datetime.datetime(2026, 7, 5, 10, 0, 0)
+    r, _fake = _fake_open_reader(monkeypatch, [[(dt,)]])
+    try:
+        assert r.server_now_iso() == dt.isoformat()
+    finally:
+        r.close()

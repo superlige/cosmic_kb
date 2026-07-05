@@ -72,7 +72,7 @@ def _collapse_reader_methods(rows: list[dict[str, Any]], *, cap: int) -> dict[st
     """把读取行按 (入口类, 事件方法) 去重成「该读方法」清单（cause 无关版 worklist）。
 
     读取价值最低、却占膨胀大头——大模型真要弄清"谁读了它"，是去这些方法读源码，而非逐行看记录。
-    故同插件同事件方法只列一处，给 count + `calls` 导航 + 物理位置（≤3）+ 已焊的语义路由/归属，
+    故同插件同事件方法只列一处，给 count + 物理位置（≤3）+ 已焊的语义路由/归属，
     按 count 降序、cap 截断并报剩余数。形状与 dynamic_writers 同款（total/methods/capped）。
     """
     groups: dict[tuple, dict[str, Any]] = {}
@@ -97,8 +97,6 @@ def _collapse_reader_methods(rows: list[dict[str, Any]], *, cap: int) -> dict[st
             "plugin_simple": g["plugin_simple"], "plugin_type": g["plugin_type"],
             "plugin_form_label": g["plugin_form_label"], "semantics_topic": g["semantics_topic"],
             "count": g["count"],
-            "calls": (f"calls {g['class_fqn']} {g['method']}"
-                      if g["class_fqn"] and g["method"] else None),
             "locations": list(g["locations"].values())[:3],
         })
     out.sort(key=lambda d: (-d["count"], d["class_fqn"] or ""))
@@ -109,9 +107,9 @@ def _collapse_unlocated_methods(rows: list[dict[str, Any]], *, cap: int) -> dict
     """把「来源单据未钉出（form_key=None）但确实读写本字段」的行折叠成「反推来源单据」工作单。
 
     与 `dynamic_writers`（B 类，字段钉不出）对称：那是钉不出"改的哪个字段"，这是钉不出"改的
-    哪张单据"。确定性层数据流/元数据都没追到这个 DynamicObject 的来源实体，**交段二大模型顺
-    `calls` 读源码反推**（红线 #1 可读全文 / #4 不臆造）。按 (入口类, 事件方法) 去重——同方法读写
-    N 个本字段的位置只列一次，给写/读分计 + `calls` 导航 + 物理位置（≤3）+ 该插件注册所属单据
+    哪张单据"。确定性层数据流/元数据都没追到这个 DynamicObject 的来源实体，**交段二大模型直接
+    读源码反推**（红线 #1 可读全文 / #4 不臆造）。按 (入口类, 事件方法) 去重——同方法读写
+    N 个本字段的位置只列一次，给写/读分计 + 物理位置（≤3）+ 该插件注册所属单据
     `plugin_form_label`（**只读线索**：很可能来自这张单据，去源码确认，绝不自动回填 form_key）+
     语义路由。写多优先、按访问数降序，超 cap 截断并报剩余。形状同 dynamic_writers（total/methods/capped）。
     """
@@ -137,7 +135,7 @@ def _collapse_unlocated_methods(rows: list[dict[str, Any]], *, cap: int) -> dict
         g["locations"].setdefault(ac, f"{r.get('source_relpath')}:{r.get('line')}")
     out: list[dict[str, Any]] = []
     for g in groups.values():
-        # 该方法多行的主因（取最高频）+ 人读标签，提示段二「该不该顺 calls 反推」。
+        # 该方法多行的主因（取最高频）+ 人读标签，提示段二「该不该读源码反推」。
         reason = g["reasons"].most_common(1)[0][0] if g["reasons"] else None
         out.append({
             "class_fqn": g["class_fqn"], "method": g["method"],
@@ -145,8 +143,6 @@ def _collapse_unlocated_methods(rows: list[dict[str, Any]], *, cap: int) -> dict
             "plugin_form_label": g["plugin_form_label"], "semantics_topic": g["semantics_topic"],
             "null_reason": reason,
             "writes": g["writes"], "reads": g["reads"], "count": g["writes"] + g["reads"],
-            "calls": (f"calls {g['class_fqn']} {g['method']}"
-                      if g["class_fqn"] and g["method"] else None),
             "locations": list(g["locations"].values())[:3],
         })
     out.sort(key=lambda d: (-d["writes"], -d["count"], d["class_fqn"] or ""))
@@ -526,12 +522,6 @@ def _wire_len(obj: Any) -> int:
     return len(json.dumps(obj, ensure_ascii=True, indent=2))
 
 
-def _calls_str(r: dict[str, Any]) -> str | None:
-    """该写入/读取点的项目内调用导航锚点（从入口插件的事件方法下钻读源码）。"""
-    fqn, mth = r.get("plugin_fqn"), r.get("event_method")
-    return f"calls {fqn} {mth}" if fqn and mth else None
-
-
 def _merge_writers_by_class(rows: list[dict[str, Any]], *, cap_classes: int, cap_sites: int
                             ) -> dict[str, Any]:
     """写行按**物理写入类**(`access_class` 回落 `plugin_fqn`)合并：类级常量字段只存一份，写入点
@@ -558,7 +548,6 @@ def _merge_writers_by_class(rows: list[dict[str, Any]], *, cap_classes: int, cap
             "key_resolution": r.get("key_resolution"),
             "source_relpath": r.get("source_relpath"),
             "semantics_topic": r.get("semantics_topic"),
-            "calls": _calls_str(r),
         })
     classes = sorted(groups.values(), key=lambda c: (-len(c["sites"]), c["class_fqn"] or ""))
     out: list[dict[str, Any]] = []
@@ -577,8 +566,8 @@ def _merge_writers_by_class(rows: list[dict[str, Any]], *, cap_classes: int, cap
 def _merge_readers_by_class(rows: list[dict[str, Any]], *, cap_classes: int, cap_methods: int
                             ) -> dict[str, Any]:
     """读行按**类**(`access_class` 回落 `plugin_fqn`)合并，类内再按事件方法去重计数。读取价值最低，
-    塌成 `{class_fqn, methods:[{method,count,calls}], total}` 即可——要弄清谁读了它，顺 calls 去那
-    几个方法读源码。类按读取数降序、cap_classes 截断；类内 methods cap_methods 截断。"""
+    塌成 `{class_fqn, methods:[{method,count}], total}` 即可——要弄清谁读了它，去那几个方法读源码。
+    类按读取数降序、cap_classes 截断；类内 methods cap_methods 截断。"""
     groups: dict[str | None, dict[str, Any]] = {}
     for r in rows:
         cls = r.get("access_class") or r.get("plugin_fqn")
@@ -592,7 +581,7 @@ def _merge_readers_by_class(rows: list[dict[str, Any]], *, cap_classes: int, cap
         mrec = g["_methods"].get(mk)
         if mrec is None:
             mrec = g["_methods"][mk] = {
-                "method": mk, "count": 0, "calls": _calls_str(r),
+                "method": mk, "count": 0,
                 "semantics_topic": r.get("semantics_topic"),
             }
         mrec["count"] += 1
@@ -711,7 +700,7 @@ def _build_compact(
         "groups": groups_out, "groups_total": len(m["group_list"]), "groups_capped": groups_capped,
     }
     # possible：按 access 过滤后按类合并（写侧用写合并，读侧用读合并）。
-    # unlocated：折叠成「反推来源单据」工作单（含 calls + plugin_home 线索），比按类合并更省字节。
+    # unlocated：折叠成「反推来源单据」工作单（含 plugin_home 线索），比按类合并更省字节。
     poss, unloc = _access_rows(m["possible"], access), _access_rows(m["unlocated"], access)
     if want_read_detail:
         res["possible"] = _mr(poss)
@@ -1036,8 +1025,6 @@ def _fmt_access(r: dict[str, Any]) -> list[str]:
         f"  {persist}{cross}"
     )
     lines.append(f"        {r['via']}  {r['source_relpath']}:{r['line']}{res_flag}")
-    if r.get("plugin_fqn") and r.get("event_method"):
-        lines.append(f"        方法全文直接读源文件；项目内调用导航: calls {r['plugin_fqn']} {r['event_method']}")
     if r.get("semantics_topic"):
         lines.append(f"        ⚑ 事件 {r['event_method']} 属 {r['semantics_topic']}：判触发时机/是否入库前先 cosmic_semantics('{r['semantics_topic']}')，勿凭训练知识臆断")
     path = r.get("path") or []   # 精简行单元素 path 已被剔除，按缺省处理
@@ -1110,7 +1097,7 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
                 cls = m.get("plugin_simple") or (m.get("class_fqn") or "?").rsplit(".", 1)[-1]
                 lines.append(
                     f"    {cls} [{m.get('plugin_type')}]  事件 {m.get('method')}"
-                    f"  ({m['count']} 处)" + (f"  {m['calls']}" if m.get("calls") else ""))
+                    f"  ({m['count']} 处)")
                 if m.get("locations"):
                     lines.append(f"        位于 {' / '.join(m['locations'])}")
                 if m.get("semantics_topic"):
@@ -1152,8 +1139,7 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
             home = f"  «很可能属 {m['plugin_form_label']}»" if m.get("plugin_form_label") else "  «service/未注册»"
             lines.append(
                 f"  · {cls}.{m['method']} [{m.get('plugin_type')}]"
-                f"  (写 {m['writes']}/读 {m['reads']}){home}"
-                + (f"  {m['calls']}" if m.get("calls") else ""))
+                f"  (写 {m['writes']}/读 {m['reads']}){home}")
             if m.get("null_reason"):
                 lines.append(f"        成因：{nrmod.REASON_LABEL.get(m['null_reason'], m['null_reason'])}")
             if m.get("locations"):
@@ -1202,12 +1188,10 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
         lines.append("  去这几个方法读源码，判定是否含本字段（按写入数降序）：")
         for m in dyn.get("methods", [])[:max_list]:
             cls = (m["class_fqn"] or "?").rsplit(".", 1)[-1]
-            lines.append(
-                f"  · {cls}.{m['method']}  ({m['count']} 处/{m['cause_label']})"
-                + (f"  {m['calls']}" if m.get("calls") else ""))
+            lines.append(f"  · {cls}.{m['method']}  ({m['count']} 处/{m['cause_label']})")
             for w in m["writes_in"]:
                 lines.append(f"        写入位于 {w['class']}  {w['anchor']}")
         if dyn.get("capped"):
             lines.append(f"    …另有 {dyn['capped']} 个方法未列出（用 dynwrites --form 过滤、或 trace --json）")
-        lines.append("    注：这些写入静态钉不出具体字段，是否含本字段请让大模型按上面 calls/源码锚点读源码判定。")
+        lines.append("    注：这些写入静态钉不出具体字段，是否含本字段请让大模型按上面源码锚点读源码判定。")
     return "\n".join(lines)

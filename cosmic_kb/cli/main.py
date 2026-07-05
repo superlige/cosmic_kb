@@ -266,6 +266,68 @@ def _apply_vendor_metadata_cli(args: argparse.Namespace, models: list, scan_resu
     return models
 
 
+def _read_prior_dbmeta_sync_ts(db_path: str) -> str | None:
+    """从旧 KB 的 `kb_meta.source_args`（JSON）里拆出上次 dbmeta 同步水位；
+    旧 KB 不存在/JSON 解析失败/没有这个键都返回 None（当作"首次同步"处理）。
+    """
+    from ..graph import store
+
+    raw = store.read_meta_tolerant(db_path, "source_args")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    ts = data.get("dbmeta_last_sync_ts")
+    return ts if isinstance(ts, str) else None
+
+
+def _sync_own_isv_metadata_cli(args: argparse.Namespace, models: list, db_path: str):
+    """build 专用：`--db-config` 给了就自动按本项目二开 ISV 增量同步 form/entity/
+    转换规则变更，整条替换进 `models`（同 key 覆盖，新 key 追加）。
+
+    没给 `--db-config` 时不触发（返回 `(models, None, None)`，纯 opt-in，同
+    `_apply_vendor_metadata_cli` 的约定）。出错时返回非零 rc（int），调用方按
+    `isinstance(结果, int)` 判断是否要直接返回——这里返回值是三元组或 int，
+    调用方用 `isinstance(outcome, int)` 分支。
+    """
+    db_config_path = getattr(args, "db_config", None)
+    if not db_config_path:
+        return models, None, None
+
+    from ..bridge import namespace
+    from ..dbmeta import sync as sync_mod
+    from ..dbmeta.config import load_config
+
+    try:
+        db_cfg = load_config(db_config_path)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return 2
+
+    since_ts = None if getattr(args, "full_refresh", False) else _read_prior_dbmeta_sync_ts(db_path)
+    local_prefixes = set(namespace.discover_meta_prefixes(models))
+
+    try:
+        result = sync_mod.sync_own_isv_metadata(
+            models, db_cfg,
+            isv=getattr(args, "isv", None),
+            since_ts=since_ts,
+            local_prefixes=local_prefixes,
+        )
+    except sync_mod.IsvAmbiguousError as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        print(f"错误: 二开元数据同步失败: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+
+    for note in result.notices:
+        print(f"提示: {note}", file=sys.stderr)
+    return result.models, result.isv, result.sync_ts
+
+
 def _cmd_bridge(args: argparse.Namespace) -> int:
     """阶段3：把元数据插件 ClassName 桥接到源码 .java，产出桥接可信度报告。"""
     from ..ingest import scanner
@@ -369,9 +431,15 @@ def _build_kb(args: argparse.Namespace, db_path: str) -> tuple[dict | None, int]
     models, rc = _collect_models(args.meta, registry)
     if rc:
         return None, rc
-    if not models:
-        print("错误: 未解析出任何元数据表单（检查 dym/zip 输入）", file=sys.stderr)
-        return None, 2
+    # 空 models 的检查挪到下面——纯 DB 冷启动建库（--db-config 给了、meta 为空）
+    # 允许起步时 models 为空，交给下面的同步步骤去填。
+
+    sync_isv = sync_ts = None
+    if getattr(args, "db_config", None):
+        outcome = _sync_own_isv_metadata_cli(args, models, db_path)
+        if isinstance(outcome, int):
+            return None, outcome
+        models, sync_isv, sync_ts = outcome
 
     vendor_fnumbers = getattr(args, "vendor", None)
     result = _apply_vendor_metadata_cli(args, models, scan_result)
@@ -379,12 +447,22 @@ def _build_kb(args: argparse.Namespace, db_path: str) -> tuple[dict | None, int]
         return None, result
     models = result
 
+    if not models:
+        print(
+            "错误: 未解析出任何元数据表单（检查 dym/zip 输入，或 --db-config 未同步到任何记录）",
+            file=sys.stderr,
+        )
+        return None, 2
+
     index = namespace.build_index(scan_result)
     bridge = linker.link(scan_result, models, index=index)
     mm = project_map.module_map(scan_result, models, bridge, index=index)
     source_args = {"source_root": str(args.source_root), "meta": list(args.meta)}
     if vendor_fnumbers:
         source_args["vendor_fnumbers"] = list(vendor_fnumbers)
+    if sync_ts:
+        source_args["dbmeta_last_sync_ts"] = sync_ts
+        source_args["dbmeta_isv"] = sync_isv
     counts = store.build_kb(
         scan_result, models, bridge, mm, db_path, index=index,
         source_args=source_args,
@@ -592,30 +670,6 @@ def _cmd_bill(args: argparse.Namespace) -> int:
             print(json.dumps(bv, ensure_ascii=False, indent=2))
         else:
             print(bill_view.render_bill(bv, max_list=args.max_list))
-    finally:
-        conn.close()
-    return 0
-
-
-def _cmd_calls(args: argparse.Namespace) -> int:
-    """方法出向调用导航：类全限定名 + 方法名 → 该方法调用的项目内方法（目标类/文件/行）。"""
-    from ..graph import store
-    from ..report import method_calls
-
-    db, rc = _ensure_kb(args)
-    if rc:
-        return rc
-    conn = store.open_kb(db)
-    try:
-        rd = method_calls.method_calls(
-            conn, args.class_fqn, args.method, source_root=getattr(args, "source_root", None))
-        if args.json:
-            print(json.dumps(rd, ensure_ascii=False, indent=2))
-        else:
-            print(method_calls.render_method_calls(rd, max_list=args.max_list))
-        if not rd.get("found"):
-            # 类/方法歧义有候选 → 退出码 3（同 ask，提示"再问一轮"）；纯未命中 → 2。
-            return 3 if rd.get("candidates") else 2
     finally:
         conn.close()
     return 0
@@ -945,8 +999,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build.add_argument("source_root", help="苍穹项目源码根目录")
     build.add_argument(
-        "meta", nargs="+",
-        help="一个或多个元数据输入：.dym 文件、整包 .zip、或含 zip 的目录",
+        "meta", nargs="*",
+        help="一个或多个元数据输入：.dym 文件、整包 .zip、或含 zip 的目录；"
+             "配合 --db-config 时可省略（纯 DB 二开同步建库）",
     )
     build.add_argument(
         "--db", default=None,
@@ -968,7 +1023,18 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument(
         "--db-config", default=None,
         help="dbmeta 连接配置文件路径（默认就近找 cosmic_db.json，同 db-meta --config）；"
-             "给了即自动按三信号发现并摄取代码库引用到的原厂实体",
+             "给了即自动按三信号发现并摄取代码库引用到的原厂实体，"
+             "同时自动增量同步本项目自己（二开）ISV 的 form/entity/转换规则变更",
+    )
+    build.add_argument(
+        "--isv", default=None, metavar="ISV",
+        help="显式指定本项目二开 ISV（跳过自动发现/消歧）；不给且候选唯一时自动使用，"
+             "候选 >1 个且无法用本地元数据消歧时报错列出候选（各自表单数），需手动指定",
+    )
+    build.add_argument(
+        "--full-refresh", action="store_true",
+        help="忽略 KB 里记录的上次同步水位，强制该 ISV 下 form/entity/转换规则全量拉取"
+             "（而非仅拉变更集）；仅在给了 --db-config 时生效",
     )
     build.set_defaults(func=_cmd_build, creating=True)
 
@@ -1066,15 +1132,6 @@ def build_parser() -> argparse.ArgumentParser:
     bill.add_argument("bill", help="单据标识，如 cqkd_assetcard")
     _add_report_common(bill)
     bill.set_defaults(func=_cmd_bill)
-
-    # ── 方法出向调用导航：该方法调了项目内哪些方法、各在哪个文件（供大模型接着读源码下钻）──
-    calls = sub.add_parser(
-        "calls", help="调用导航：类全限定名+方法名→该方法调用的项目内方法(目标类/文件/行)，供继续读源码下钻",
-    )
-    calls.add_argument("class_fqn", help="类全限定名（也可只给末段类名，歧义会列候选）")
-    calls.add_argument("method", help="方法名（重载多个会全部列出）")
-    _add_report_common(calls)
-    calls.set_defaults(func=_cmd_calls)
 
     # ── 模式 A：读源码 + 自动标注字段中文名（让大模型读源码走本工具，原生 reader 易乱码且不标注）──
     source = sub.add_parser(

@@ -24,9 +24,8 @@ INSTRUCTIONS = (
     "- 先取证后下结论：字段/单据/方法/插件相关问题一律先调工具查 KB，不凭训练记忆猜；结论带"
     "类·方法·行号等证据，标 confirmed/likely/unknown，证不到就是 unknown，禁止臆造字段名/方法名/"
     "插件名。\n"
-    "- 路由：已知精确字段/单据标识用 trace/bill；已知类名+方法名查调用链用 method_calls；标识不"
-    "精确、或问『某插件/操作在干嘛』用 ask。\n"
-    "- 源码用宿主自带的文件读取工具读（本项目开发场景源码已是本地 UTF-8，无需专门解码）。读到的"
+    "- 路由：已知精确字段/单据标识用 trace/bill；标识不精确、或问『某插件/操作在干嘛』用 ask。\n"
+    "- 源码用宿主自带的文件读取工具读。读到的"
     "字段/实体/单据标识一律用 resolve_fields 核对真实中文名，禁止凭标识片段或命名惯例猜；已从源码"
     "字面量看到单据/分录归属时，传复合限定符做精确匹配——与 trace 同一套点号坐标写法："
     "`\"单据.字段\"`/`\"分录.字段\"`/`\"单据.分录.字段\"`，比裸 key 更准；查不到/多候选就是"
@@ -87,19 +86,19 @@ def _open():
 # ── 六个取证工具的纯逻辑（复用段一取证函数，绝不重写）────────────────────────
 def tool_ask(question: str) -> dict[str, Any]:
     """自然语言问题 → 意图解析 → 查 KB 返回确定性证据包。标识不精确、或问『某插件/操作在干嘛』这类
-    需要先定位再解释的问题用本工具；已知精确字段/单据/方法标识优先直接用 trace/bill/method_calls。
-    覆盖字段谁改的/单据钻取/插件解释/操作解释/方法调用共 5 类意图。判不准返回
+    需要先定位再解释的问题用本工具；已知精确字段/单据标识优先直接用 trace/bill。
+    覆盖字段谁改的/单据钻取/插件解释/操作解释共 4 类意图。判不准返回
     `status='need_clarification'` + `candidates`，挑一个精确标识再问，禁止替用户拍板。
     """
     from ..semantic import resolver
     from ..context import builder
-    from ..report import field_trace, bill_view, method_calls as mc_report
+    from ..report import field_trace, bill_view
 
     conn = _open()
     try:
         rq = resolver.resolve(conn, question)
         result = builder.build_context(conn, rq)
-        # 字段/单据/方法调用意图的 evidence 是完整富 dict，经 MCP 同样会被 host 截断——换成紧凑
+        # 字段/单据意图的 evidence 是完整富 dict，经 MCP 同样会被 host 截断——换成紧凑
         # 投影（cap + 字节 governor + 游标分页）。复用 rq，不动 builder/CLI 路径。
         if result.get("status") == "ok":
             if rq.intent == "field_who_changed":
@@ -108,9 +107,6 @@ def tool_ask(question: str) -> dict[str, Any]:
                     form_key=rq.form_key, entry_key=rq.entry_key, level=rq.level)
             elif rq.intent == "bill_drilldown":
                 result["evidence"] = bill_view.bill_compact(conn, rq.form_key)
-            elif rq.intent == "method_calls":
-                result["evidence"] = mc_report.method_calls_compact(
-                    conn, rq.class_fqn, rq.method_name)
         return result
     finally:
         conn.close()
@@ -174,27 +170,6 @@ def tool_bill(form_key: str, cursor: str | None = None) -> dict[str, Any]:
         conn.close()
 
 
-def tool_method_calls(class_fqn: str, method_name: str, cursor: str | None = None) -> dict[str, Any]:
-    """类全限定名+方法名 → 该方法调用的项目内方法及位置，用于按调用链下钻导航。只回目标类全限定名
-    （`target_fqn`，可再下钻）/源文件相对路径（`target_relpath`）/调用行号，不解释源码逻辑——
-    要懂"在干嘛"自行读源码。只列项目内可下钻调用，平台/外部调用不回；字段落库取证用 `trace`。
-    `fields.reads/writes` 只给字段 key + 行号，不附中文名——输出中文名前必须调 `resolve_fields`
-    核对，不得凭命名惯例猜。
-    类/方法判不准返回 `found=False` + `candidates`。
-
-    返回值经紧凑投影防 host 32KB 截断（方法体调用多/重载方法多时按方法计 cap + 字节 governor）；
-    真实总数在 `methods_total`/各方法 `calls_total`/`fields.*_total`。`next_cursor` 非 null 说明
-    还有被截条目，用 cursor=该值再调一次翻页取回，翻完（变 null）前禁止下"无更多调用/字段"结论。
-    """
-    from ..report import method_calls
-
-    conn = _open()
-    try:
-        return method_calls.method_calls_compact(conn, class_fqn, method_name, cursor=cursor)
-    finally:
-        conn.close()
-
-
 def tool_resolve_fields(keys: list[str]) -> dict[str, Any]:
     """标识批量核对为元数据真实中文名（比 trace 便宜得多，O(1) 打词典，不查谁改了它）。覆盖字段/
     表头实体/分录/子分录/单据(表单)五类标识——不是只查字段，读源码见到任何一类标识（如
@@ -249,7 +224,6 @@ TOOLS = {
     "ask": tool_ask,
     "trace": tool_trace,
     "bill": tool_bill,
-    "method_calls": tool_method_calls,
     "resolve_fields": tool_resolve_fields,
     "cosmic_semantics": tool_cosmic_semantics,
 }

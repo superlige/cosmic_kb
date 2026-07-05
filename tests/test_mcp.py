@@ -124,9 +124,10 @@ def test_open_raises_when_kb_missing(tmp_path: Path, monkeypatch):
 
 
 def test_tools_registry_matches():
-    """TOOLS 注册表收敛到 6 个排障核心工具（read_source 已于 2026-07-05 退役，防漏注册）。"""
+    """TOOLS 注册表收敛到 5 个排障核心工具（read_source 已于 2026-07-05 退役、method_calls 也已
+    退役，防漏注册）。"""
     assert set(mcp_server.TOOLS) == {
-        "ask", "trace", "bill", "method_calls",
+        "ask", "trace", "bill",
         "resolve_fields", "cosmic_semantics"}
     for fn in mcp_server.TOOLS.values():
         assert callable(fn)

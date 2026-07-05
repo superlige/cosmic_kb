@@ -101,11 +101,11 @@ def test_global_dynwrites_method_worklist(tmp_path: Path):
         by_cause = d["by_cause"]
         for cause in ("dynamic-loop", "concat", "external-const"):
             assert by_cause.get(cause, {}).get("writes", 0) >= 1
-        # 三类的动态写都在同一个方法里 → 各成因桶去重后应是 1 个方法、带 calls 锚点。
+        # 三类的动态写都在同一个方法里 → 各成因桶去重后应是 1 个方法。
         dl = by_cause["dynamic-loop"]
         assert dl["total_methods"] == 1 and len(dl["methods"]) == 1
         m = dl["methods"][0]
-        assert m["class_fqn"] == "cqspb.am.AmDynOp" and m["calls"].startswith("calls ")
+        assert m["class_fqn"] == "cqspb.am.AmDynOp"
         # 渲染不崩、带成因标签 + 方法行。
         text = dynamic_writes.render_dynamic_writes(d)
         assert "动态循环" in text and "拼接键" in text and "AmDynOp" in text
@@ -168,7 +168,6 @@ def test_trace_surfaces_dynamic_writers_scoped(tmp_path: Path):
         assert dyn["total_methods"] == 1
         m = dyn["methods"][0]
         assert m["class_fqn"] == "cqspb.am.AmDynOp" and m["count"] >= 3
-        assert m["calls"].startswith("calls ")
         # 渲染含动态写入候选段 + 方法行。
         text = field_trace.render_field_trace(ft)
         assert "动态写入候选" in text and "个方法" in text and "AmDynOp" in text

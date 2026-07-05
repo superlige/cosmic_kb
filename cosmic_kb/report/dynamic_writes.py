@@ -45,8 +45,8 @@ def build_method_worklist(rows: list[dict[str, Any]], *, cap: int = 10) -> dict[
     """把 null-key 访问行按 (入口类, 事件方法) **去重成「该读方法」清单**，是控制大模型上下文的关键：
 
     同一方法写 N 个钉不出 key 的字段，大模型只需读这方法一次。故不回逐行，回去重后的方法清单——
-    每条给：入口类全限定名 + 事件方法（`calls` 可直接导航）+ 多少处动态访问 + 成因 + 写入物理位置
-    （跨类时写在哪个 helper 的哪一行，供大模型直奔）。按动态访问数降序，超 cap 截断并报剩余数。
+    每条给：入口类全限定名 + 事件方法 + 多少处动态访问 + 成因 + 写入物理位置（`writes_in`，跨类
+    时写在哪个 helper 的哪一行，供大模型直奔读源码）。按动态访问数降序，超 cap 截断并报剩余数。
     """
     groups: dict[tuple, dict[str, Any]] = {}
     for r in rows:
@@ -73,8 +73,6 @@ def build_method_worklist(rows: list[dict[str, Any]], *, cap: int = 10) -> dict[
             "cause_label": "/".join(_CAUSE_SHORT.get(c, c) for c in causes),
             "writes_in": [{"class": (ac or "").rsplit(".", 1)[-1], "anchor": an}
                           for ac, an in list(g["writes_in"].items())[:3]],
-            "calls": (f"calls {g['class_fqn']} {g['method']}"
-                      if g["class_fqn"] and g["method"] else None),
         })
     out.sort(key=lambda d: (-d["count"], d["class_fqn"] or ""))
     return {"total_methods": len(out), "methods": out[:cap], "capped": max(0, len(out) - cap)}
@@ -176,9 +174,7 @@ def render_dynamic_writes(d: dict[str, Any], *, max_list: int = 20) -> str:
         )
         for m in b["methods"][:max_list]:
             cls = (m["class_fqn"] or "?").rsplit(".", 1)[-1]
-            lines.append(
-                f"  · {cls}.{m['method']}  ({m['count']} 处/{m['cause_label']})"
-                + (f"  {m['calls']}" if m.get("calls") else ""))
+            lines.append(f"  · {cls}.{m['method']}  ({m['count']} 处/{m['cause_label']})")
             for w in m["writes_in"]:
                 lines.append(f"        写入位于 {w['class']}  {w['anchor']}")
         if b["capped"]:

@@ -1,8 +1,8 @@
 """源码读取公共件：源码根解析 + 按建库同款野生编码探测读文件。
 
-`method_calls`（方法导航定位源文件）与 `read_source`（模式 A：让大模型读源码走我们的工具，
-自动正确解码 + 标注字段名）共用，避免重复造轮子。编码探测复用 `ingest.scanner.detect_encoding`，
-保证读出的行号与 KB 记录一致（红线 #2：野生 GBK/GB2312/UTF-8±BOM 混杂，原生 reader 易乱码）。
+供 `read_source`（模式 A：让大模型读源码走我们的工具，自动正确解码 + 标注字段名）使用。编码
+探测复用 `ingest.scanner.detect_encoding`，保证读出的行号与 KB 记录一致（红线 #2：野生
+GBK/GB2312/UTF-8±BOM 混杂，原生 reader 易乱码）。
 """
 
 from __future__ import annotations

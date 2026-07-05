@@ -34,8 +34,6 @@ _KW_PLUGIN = ("干嘛", "干什么", "做什么", "是什么", "什么作用", "
               "这个类", "这个插件", "这个服务", "这个工具", "读写哪些", "影响哪些字段")
 _KW_OP = ("这个操作", "操作按钮", "按钮", "提交时", "保存时", "审核时", "点这个",
           "执行时", "这个按钮")
-_KW_METHOD = ("方法", "函数", "做了什么", "做了啥", "怎么实现", "实现逻辑", "整个方法",
-              "这段代码", "干了什么", "看全文", "源码", "代码逻辑")
 
 # 标识/类名 token：cqkd_xxx（小写下划线）或 CamelCase 类名。
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -56,7 +54,6 @@ class ResolvedQuery:
     entry_key: str | None = None
     level: str | None = None
     class_fqn: str | None = None
-    method_name: str | None = None
     operation_key: str | None = None
     # 反问候选（ambiguous/unknown 时给消歧菜单）
     candidates: list[Candidate] = dc_field(default_factory=list)
@@ -67,7 +64,7 @@ class ResolvedQuery:
             "note": self.note, "need_clarification": self.need_clarification,
             "field_key": self.field_key, "form_key": self.form_key,
             "entry_key": self.entry_key, "level": self.level,
-            "class_fqn": self.class_fqn, "method_name": self.method_name,
+            "class_fqn": self.class_fqn,
             "operation_key": self.operation_key,
             "candidates": [{"kind": c.kind, "score": round(c.score, 1), "label": c.label()}
                            for c in self.candidates],
@@ -76,13 +73,6 @@ class ResolvedQuery:
 
 def _has(text: str, kws) -> bool:
     return any(k in text for k in kws)
-
-
-def _method_in_kb(conn, fqn: str, name: str) -> bool:
-    """该类该方法是否在 plugin_method 表里有记录（用于把 method_calls 判到高置信）。"""
-    return conn.execute(
-        "SELECT 1 FROM plugin_method WHERE plugin_fqn=? AND method_name=? LIMIT 1",
-        (fqn, name)).fetchone() is not None
 
 
 def _looks_like_locator(text: str) -> bool:
@@ -101,7 +91,6 @@ def resolve(conn, text: str, lexicon: Lexicon | None = None) -> ResolvedQuery:
 
     flag_who, flag_bill = _has(text, _KW_WHO), _has(text, _KW_BILL)
     flag_plugin, flag_op = _has(text, _KW_PLUGIN), _has(text, _KW_OP)
-    flag_method = _has(text, _KW_METHOD)
 
     # ── 0. 纯点号定位（用户直接给坐标，最强信号）──────────────────────────────
     if _looks_like_locator(text):
@@ -127,28 +116,6 @@ def resolve(conn, text: str, lexicon: Lexicon | None = None) -> ResolvedQuery:
             "operation_explain", raw, confidence=0.85,
             form_key=form_hits[0], operation_key=op_hits[0],
             note="操作按钮 → 该单据下绑定的插件与字段触达。")
-
-    # ── 2.5 方法调用导航（命中类名 + 指定了方法名）→ method_calls ────────────────
-    #   类+方法在 KB（plugin_method）里能对上 → 高置信；只命中方法关键词无验证 → 低置信交
-    #   method_calls 核验（它会返回候选/未命中，不臆造）。比类解释更具体，故排在其前。
-    #   注：返回的是「该方法调了项目内哪些方法、各在哪个文件」的下钻坐标，方法在干嘛由段二
-    #   大模型直接读源码解释——故意不复述源码、不列平台调用。
-    if class_hits and len(class_hits[0][1]) == 1:
-        cls_token, cls_entries = class_hits[0]
-        fqn = cls_entries[0].fqn
-        mtok = next(
-            (t for t in tokens
-             if t != cls_token and t not in field_hits and t not in form_hits
-             and re.fullmatch(r"[a-z][A-Za-z0-9_]*", t)
-             and (_method_in_kb(conn, fqn, t) or flag_method)),
-            None)
-        if mtok is not None:
-            in_kb = _method_in_kb(conn, fqn, mtok)
-            if in_kb or flag_method:
-                return ResolvedQuery(
-                    "method_calls", raw, confidence=0.9 if in_kb else 0.6,
-                    class_fqn=fqn, method_name=mtok,
-                    note="类+方法精确命中。" if in_kb else "疑似方法名，method_calls 将核验。")
 
     # ── 3. 类/插件解释（命中类名 + 解释类关键词，或无字段/单据竞争信号）──────────
     if class_hits and (flag_plugin or (not field_hits and not flag_who)):
