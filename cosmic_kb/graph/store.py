@@ -27,13 +27,13 @@ if TYPE_CHECKING:
     from ..metadata.model import MetaModel
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
-KB_SCHEMA_VERSION = "13"
+KB_SCHEMA_VERSION = "14"
 
 # DROP 顺序（FTS 虚拟表与各表；DROP TABLE 对 search 同样有效，会连带清掉 FTS 影子表）。
 _OBJECTS = [
     "search", "edge", "coarse_field_hit", "java_constant", "field_access", "plugin_method",
     "operation", "binding", "source_class", "convert_rule",
-    "plugin", "field", "entity", "form", "module", "kb_meta",
+    "field_combo_item", "plugin", "field", "entity", "form", "module", "kb_meta",
 ]
 
 
@@ -74,7 +74,8 @@ def build_kb(
     form_module: dict[str, str] = module_map["form_module"]
     class_module: dict[str, str] = module_map["class_module"]
     orphan_role = {o.fqn: o.role for o in bridge_result.orphans}
-    orphan_base = {o.fqn: o.plugin_base for o in bridge_result.orphans}
+    # 全量 fqn→插件基类（超集：孤儿的值本就来自同一份 plugin_simple，不会不一致，见 issue 1）。
+    orphan_base = bridge_result.plugin_bases
     orphan_set = set(orphan_role)
 
     schema_sql = _SCHEMA_PATH.read_text(encoding="utf-8")
@@ -116,8 +117,26 @@ def _populate(
             "confidence", "evidence")} for m in module_map["modules"]],
     )
 
+    # ── 全局实体 oid 索引（供基础资料引用字段 <BaseEntityId> 反查目标单据）────────
+    #   BaseEntityId 存的是目标实体的 <Id>（oid），不是可读 key；只能在本次建库涵盖的
+    #   全部 models 范围内反查——命中率取决于目标基础资料自身元数据是否也被解析进本次
+    #   KB（纯 dym/zip 导出常不含未改动的原厂基础资料；--db-config 原厂库同步命中率更高）。
+    #   同一 oid 若在不同表单下解析出不同 form_key，判 ambiguous，不擅自选一个（红线#4）。
+    entity_id_index: dict[str, tuple[str, str | None]] = {}
+    ambiguous_ids: set[str] = set()
+    for _m in models:
+        if _m.form_type == "convert":
+            continue
+        for _e in _m.entities:
+            if not _e.id:
+                continue
+            if _e.id in entity_id_index and entity_id_index[_e.id][0] != _m.key:
+                ambiguous_ids.add(_e.id)
+            else:
+                entity_id_index[_e.id] = (_m.key, _m.name)
+
     # ── form / entity / field / plugin / convert_rule + edges + FTS ────────
-    forms, entities, fields, plugins, edges, search = [], [], [], [], [], []
+    forms, entities, fields, plugins, combo_items, edges, search = [], [], [], [], [], [], []
     convert_rules: list = []
     for m in models:
         mod = form_module.get(m.key) if m.key else None
@@ -170,10 +189,18 @@ def _populate(
 
         for f in m.fields:
             uid = _field_uid(m.key, f)
+            ref_form_key = ref_form_name = None
+            if f.basedata_id and f.basedata_id not in ambiguous_ids:
+                hit = entity_id_index.get(f.basedata_id)
+                if hit:
+                    ref_form_key, ref_form_name = hit
             fields.append((uid, m.key, f.entity_key, f.key, f.name,
-                           f.db_column, f.field_type, f.kind, f.level))
+                           f.db_column, f.field_type, f.kind, f.level,
+                           f.basedata_id, ref_form_key, ref_form_name))
             edges.append(("form", m.key, "field", uid, "has_field", 1.0, None))
             search.append(("field", f.key or "", f.name or "", m.key or ""))
+            for ci in f.combo_items:
+                combo_items.append((uid, ci.value, ci.caption))
 
         for p in m.plugins:
             uid = _plugin_uid(m.key, p)
@@ -186,7 +213,8 @@ def _populate(
 
     conn.executemany("INSERT INTO form VALUES(?,?,?,?,?,?,?,?,?,?)", forms)
     conn.executemany("INSERT INTO entity VALUES(?,?,?,?,?,?)", entities)
-    conn.executemany("INSERT INTO field VALUES(?,?,?,?,?,?,?,?,?)", fields)
+    conn.executemany("INSERT INTO field VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", fields)
+    conn.executemany("INSERT INTO field_combo_item VALUES(?,?,?)", combo_items)
     conn.executemany("INSERT INTO plugin VALUES(?,?,?,?,?,?,?)", plugins)
     conn.executemany("INSERT INTO convert_rule VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", convert_rules)
 
@@ -235,6 +263,7 @@ def _populate(
         "form": len(forms),
         "entity": len(entities),
         "field": len(fields),
+        "field_combo_item": len(combo_items),
         "plugin": len(plugins),
         "convert_rule": len(convert_rules),
         "operation": len(operations),

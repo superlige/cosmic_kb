@@ -87,7 +87,11 @@ def test_tool_bill_handles_null_field_key(kb_env):
     finally:
         conn.close()
 
-    bv = mcp_server.tool_bill("cqkd_assetcard")
+    # 默认 profile="overview" 瘦身：entity_touch/fields 都不带出（有专职工具顶替）。
+    bv_overview = mcp_server.tool_bill("cqkd_assetcard")
+    assert "entity_touch" not in bv_overview and "fields" not in bv_overview
+
+    bv = mcp_server.tool_bill("cqkd_assetcard", profile="full")
     # 紧凑投影：逐字段事件已折叠为计数，按实体分组的 entity_touch 取代扁平 field_touch。
     assert "entity_touch" in bv and "field_touch" not in bv
     touched = [f["field_key"] for et in bv["entity_touch"] for f in et["fields"]]

@@ -1,6 +1,6 @@
 """DB 元数据合成 —— 把底层库两张表的 fdata XML 拼回 MetaModel。
 
-背景（见 docs/扩展元数据识别方案.md）：苍穹底层库里，一个单据/基础资料的元数据
+背景（见 docs/设计方案/扩展元数据识别方案.md）：苍穹底层库里，一个单据/基础资料的元数据
 拆存在两张设计表：
     t_meta_formdesign.fdata   → 布局/UI + 插件绑定，根节点 <FormMetadata>
     t_meta_entitydesign.fdata → 数据模型（实体/字段/操作），根节点 <EntityMetadata>

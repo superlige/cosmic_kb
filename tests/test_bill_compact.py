@@ -57,10 +57,25 @@ def _conn(db: Path):
 
 
 def test_overview_never_exceeds_budget(big_kb):
-    """灌爆后 overview 仍 ≤ 预算（governor 逐档收紧 cap），且真实总数在 *_total 不丢。"""
+    """默认 profile="overview"：不含 fields/entity_touch（这两段有专职工具顶替），仍 ≤ 预算。"""
     conn = _conn(big_kb)
     try:
         ov = B.bill_compact(conn, "cqkd_assetcard")
+    finally:
+        conn.close()
+    assert _wire_len(ov) <= _COMPACT_BUDGET
+    assert "field_touch" not in ov                 # 扁平副本已删
+    assert "fields" not in ov and "fields_total" not in ov         # 默认瘦身：不带出
+    assert "entity_touch" not in ov and "touched_fields_total" not in ov
+    # stats 里仍有真实规模（不静默丢——只是不主动展开明细）。
+    assert ov["stats"]["field_count"] >= 120
+
+
+def test_profile_full_never_exceeds_budget(big_kb):
+    """profile="full"：灌爆后仍 ≤ 预算（governor 逐档收紧 cap），且真实总数在 *_total 不丢。"""
+    conn = _conn(big_kb)
+    try:
+        ov = B.bill_compact(conn, "cqkd_assetcard", profile="full")
     finally:
         conn.close()
     assert _wire_len(ov) <= _COMPACT_BUDGET
@@ -129,5 +144,94 @@ def test_missing_form_returns_error(big_kb):
     conn = _conn(big_kb)
     try:
         assert "error" in B.bill_compact(conn, "cqkd_nope")
+    finally:
+        conn.close()
+
+
+# ── 顶层翻页门 `pagination`（散落 next_cursor 靠"自觉逐段检查"不可靠，
+#    改成返回体第一个 key、complete/pending 一眼可判）──────────────────────
+def test_pagination_gate_is_first_key_and_flags_incomplete(big_kb):
+    """灌爆后 profile="full" 必然有段被截 → `pagination` 是第一个 key，且 complete=False、
+    pending 里能找到与 `fields_next_cursor` 一致的游标（两套信号不打架）。
+    （_inflate 只灌 fields/field_access，默认 profile="overview" 不含这两段、不会被截，
+    故此用例显式要 profile="full" 才能复现截断场景。）"""
+    conn = _conn(big_kb)
+    try:
+        ov = B.bill_compact(conn, "cqkd_assetcard", profile="full")
+    finally:
+        conn.close()
+    assert next(iter(ov)) == "pagination"
+    gate = ov["pagination"]
+    assert gate["complete"] is False
+    assert gate["instruction"]
+    cursors = {p["next_cursor"] for p in gate["pending"]}
+    assert ov["fields_next_cursor"] in cursors
+
+
+def test_pagination_gate_complete_when_nothing_capped(tmp_path: Path):
+    """未灌爆的小 KB：没有段被截 → complete=True、pending 为空。"""
+    db = make_kb(tmp_path)
+    conn = _conn(db)
+    try:
+        ov = B.bill_compact(conn, "cqkd_assetcard")
+    finally:
+        conn.close()
+    assert next(iter(ov)) == "pagination"
+    assert ov["pagination"] == {"complete": True, "pending": []}
+
+
+# ── profile 两档 key 集合锁死（防止以后悄悄漂移）────────────────────────────────
+_OVERVIEW_KEYS = {
+    "pagination", "form", "stats", "entities", "entities_total", "operations",
+    "operations_total", "plugins", "plugins_total", "plugin_lanes",
+    "platform_plugins_excluded", "bindings", "bindings_total", "risk_bindings", "note",
+}
+_FULL_ONLY_KEYS = {"entity_touch", "touched_fields_total", "fields", "fields_total"}
+
+
+def test_profile_overview_excludes_fields_and_entity_touch_by_default(tmp_path: Path):
+    """默认 profile="overview"：key 集合恰好是概览+插件绑定，不含 fields/entity_touch。"""
+    db = make_kb(tmp_path)
+    conn = _conn(db)
+    try:
+        ov = B.bill_compact(conn, "cqkd_assetcard")
+    finally:
+        conn.close()
+    assert _FULL_ONLY_KEYS.isdisjoint(ov)
+    # 不断言恰好相等——被 cap 的段会带 `*_capped`/`*_next_cursor` 伴生 key，这里只锁"不该出现的没出现"。
+    assert _OVERVIEW_KEYS.issubset(ov)
+
+
+def test_profile_full_matches_legacy_shape(tmp_path: Path):
+    """profile="full"：在 overview 基础上补回 fields/entity_touch 及其 *_total，形状与旧版一致。"""
+    db = make_kb(tmp_path)
+    conn = _conn(db)
+    try:
+        full = B.bill_compact(conn, "cqkd_assetcard", profile="full")
+    finally:
+        conn.close()
+    assert _OVERVIEW_KEYS.issubset(full)
+    assert _FULL_ONLY_KEYS.issubset(full)
+
+
+def test_profile_invalid_returns_error(tmp_path: Path):
+    db = make_kb(tmp_path)
+    conn = _conn(db)
+    try:
+        r = B.bill_compact(conn, "cqkd_assetcard", profile="nope")
+    finally:
+        conn.close()
+    assert "error" in r
+
+
+def test_page_response_carries_pagination_gate(big_kb):
+    """`cursor=` 翻页响应同样带 `pagination`：末页 complete=True，非末页 complete=False 且
+    pending 里的 next_cursor 与 page.next_cursor 一致。"""
+    conn = _conn(big_kb)
+    try:
+        r = B.bill_compact(conn, "cqkd_assetcard", cursor="fields@0")
+        assert r["pagination"]["complete"] is (r["page"]["next_cursor"] is None)
+        if r["page"]["next_cursor"]:
+            assert r["pagination"]["pending"][0]["next_cursor"] == r["page"]["next_cursor"]
     finally:
         conn.close()

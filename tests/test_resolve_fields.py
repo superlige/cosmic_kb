@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,9 @@ def test_resolve_single_field_name(conn):
     it = items[0]
     assert it["kind"] == "field" and it["name"] == "抵押状态"
     assert it["form_key"] == "cqkd_assetcard" and it["level"] == "header"
+    # field_kind 码人读标签焊进返回值本体（此前裸码 "entity"，模型不知道是什么意思）。
+    assert it["field_kind"] == "entity"
+    assert it["field_kind_label"] == resolve_fields._FIELD_KIND_LABEL["entity"]
 
 
 def test_resolve_same_key_multi_coords(conn):
@@ -179,7 +183,7 @@ def test_mcp_tool_same_as_report(tmp_path: Path, monkeypatch):
     assert got == want
 
 
-# ── 实体限定精确匹配（2026-07-05，起因见 docs/read_source字段名解析逻辑.md §5）─────────
+# ── 实体限定精确匹配（2026-07-05，起因见 docs/参考手册/read_source字段名解析逻辑.md §5）─────────
 # 模型自己读源码看到 `.load("cqkd_contract", ...)` 这类实体字面量后，直接传
 # "form_key.field_key" 精确查库，不必再靠工具做文件级数据流推断去猜归属。
 
@@ -271,6 +275,198 @@ def test_resolve_three_part_qualifier_mismatch_reports_both(conn):
     assert mm["given_form"] == "cqkd_assetcard" and mm["given_entry"] == "cqkd_nope_entry"
     assert set(mm["available_forms"]) == {"cqkd_assetcard", "cqkd_contract"}
     assert set(mm["available_entities"]) == {"cqkd_entry", "cqkd_contract"}
+
+
+# ── 下拉选项 + 基础资料引用实体类型（2026-07-05 增强）─────────────────────────────
+# 起因：字段坐标只告诉模型"这是下拉/这是引用"，没告诉存储值的真实含义、引用的是哪张实体，
+# 模型只能凭猜。resolve_fields 顺带把已建库的 combo_items/ref_entity 焊进字段命中条目。
+
+def test_resolve_combo_items(conn):
+    """下拉字段命中带 combo_items（存储值→中文含义），不用再猜枚举含义。"""
+    conn.execute(
+        "INSERT INTO field(uid,form_key,entity_key,key,name,db_column,field_type,kind,level) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        ("u_combo", "cqkd_assetcard", "cqkd_assetcard", "cqkd_isvalid", "是否有效",
+         "fisvalid", "ComboField", "entity", "header"),
+    )
+    conn.executemany(
+        "INSERT INTO field_combo_item(field_uid,value,caption) VALUES(?,?,?)",
+        [("u_combo", "1", "是"), ("u_combo", "0", "否")],
+    )
+    conn.commit()
+    items = resolve_fields.resolve_fields(conn, ["cqkd_isvalid"])["resolved"]["cqkd_isvalid"]
+    assert items and len(items) == 1
+    combo = sorted((c["value"], c["caption"]) for c in items[0]["combo_items"])
+    assert combo == [("0", "否"), ("1", "是")]
+
+
+def test_resolve_ref_entity_resolved(conn):
+    """基础资料引用字段命中目标单据（本次建库范围内可反查）→ ref_entity 给出 form_key+name。"""
+    conn.execute(
+        "INSERT INTO field(uid,form_key,entity_key,key,name,db_column,field_type,kind,level,"
+        "ref_entity_id,ref_form_key,ref_form_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("u_ref", "cqkd_assetcard", "cqkd_assetcard", "cqkd_orgproperty", "所属组织",
+         "forg", "OrgField", "entity", "header", "orgoid123", "cqkd_org", "组织"),
+    )
+    conn.commit()
+    items = resolve_fields.resolve_fields(conn, ["cqkd_orgproperty"])["resolved"]["cqkd_orgproperty"]
+    assert items and len(items) == 1
+    assert items[0]["ref_entity"] == {"form_key": "cqkd_org", "name": "组织"}
+    assert "ref_entity_id" not in items[0]
+
+
+def test_resolve_ref_entity_id_when_unresolved(conn):
+    """基础资料引用字段查不到目标单据 → 退化为 ref_entity_id（原始 oid，诚实留痕不猜）。"""
+    conn.execute(
+        "INSERT INTO field(uid,form_key,entity_key,key,name,db_column,field_type,kind,level,"
+        "ref_entity_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        ("u_ref2", "cqkd_assetcard", "cqkd_assetcard", "cqkd_customer", "客户",
+         "fcust", "BasedataField", "entity", "header", "unknown-oid"),
+    )
+    conn.commit()
+    items = resolve_fields.resolve_fields(conn, ["cqkd_customer"])["resolved"]["cqkd_customer"]
+    assert items and len(items) == 1
+    assert items[0]["ref_entity_id"] == "unknown-oid"
+    assert "ref_entity" not in items[0]
+
+
+def test_resolve_plain_field_has_no_combo_or_ref_keys(conn):
+    """普通标量字段（无下拉/无引用）：combo_items/ref_entity/ref_entity_id 三个 key 都不出现
+    （零增量验证——本次增强不该给不相关字段多塞任何东西）。"""
+    items = resolve_fields.resolve_fields(conn, ["cqkd_collateralstatus"])["resolved"][
+        "cqkd_collateralstatus"]
+    it = items[0]
+    assert "combo_items" not in it
+    assert "ref_entity" not in it
+    assert "ref_entity_id" not in it
+
+
+def test_render_combo_items_and_ref_entity(conn):
+    """文本视图对下拉选项/引用实体分别追加可读行。"""
+    conn.execute(
+        "INSERT INTO field(uid,form_key,entity_key,key,name,db_column,field_type,kind,level,"
+        "ref_entity_id,ref_form_key,ref_form_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("u_ref3", "cqkd_assetcard", "cqkd_assetcard", "cqkd_orgproperty", "所属组织",
+         "forg", "OrgField", "entity", "header", "orgoid123", "cqkd_org", "组织"),
+    )
+    conn.execute(
+        "INSERT INTO field(uid,form_key,entity_key,key,name,db_column,field_type,kind,level) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        ("u_combo2", "cqkd_assetcard", "cqkd_assetcard", "cqkd_isvalid", "是否有效",
+         "fisvalid", "ComboField", "entity", "header"),
+    )
+    conn.execute(
+        "INSERT INTO field_combo_item(field_uid,value,caption) VALUES(?,?,?)",
+        ("u_combo2", "1", "是"),
+    )
+    conn.commit()
+    d = resolve_fields.resolve_fields(conn, ["cqkd_orgproperty", "cqkd_isvalid"])
+    text = resolve_fields.render_resolve_fields(d)
+    assert "→ 引用 cqkd_org「组织」" in text
+    assert "取值: 1=是" in text
+
+
+# ── issue 4：kind 过滤 ────────────────────────────────────────────────────────
+
+def test_resolve_kind_form_excludes_same_key_field_noise(conn):
+    """`kind="form"`：cqkd_assetcard 既是单据 key 又是表头实体 key，指定 kind=form 后
+    只返回单据候选，不再混入 header 容器命中的噪声。"""
+    items = resolve_fields.resolve_fields(
+        conn, ["cqkd_assetcard"], kind="form")["resolved"]["cqkd_assetcard"]
+    assert items and {it["kind"] for it in items} == {"form"}
+
+
+def test_resolve_kind_field_excludes_entry_and_form(conn):
+    """`kind="field"`：只返回字段候选，不含分录容器/单据候选。"""
+    items = resolve_fields.resolve_fields(
+        conn, ["cqkd_collateralstatus"], kind="field")["resolved"]["cqkd_collateralstatus"]
+    assert items and all(it["kind"] == "field" for it in items)
+
+
+def test_resolve_kind_entity_excludes_field(conn):
+    """`kind="entity"`：分录容器 key 只返回容器候选。"""
+    items = resolve_fields.resolve_fields(
+        conn, ["cqkd_entry"], kind="entity")["resolved"]["cqkd_entry"]
+    assert items and all(it["kind"] in ("header", "entry", "subentry") for it in items)
+
+
+def test_cli_resolve_kind_form(tmp_path: Path, capsys):
+    """CLI `resolve --kind form` 参数穿透。"""
+    from cosmic_kb.cli.main import main
+
+    db = make_kb(tmp_path)
+    rc = main(["resolve", "cqkd_assetcard", "--db", str(db), "--json", "--kind", "form"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    items = data["resolved"]["cqkd_assetcard"]
+    assert {it["kind"] for it in items} == {"form"}
+
+
+def test_mcp_tool_resolve_fields_kind_param(tmp_path: Path, monkeypatch):
+    """MCP `tool_resolve_fields(kind=...)` 参数穿透，与 report 层同口径。"""
+    from cosmic_kb.mcp import server as mcp_server
+
+    db = make_kb(tmp_path)
+    monkeypatch.setenv("COSMIC_KB_DB", str(db))
+    got = mcp_server.tool_resolve_fields(["cqkd_assetcard"], kind="form")
+    items = got["resolved"]["cqkd_assetcard"]
+    assert {it["kind"] for it in items} == {"form"}
+
+
+# ── issue 5：三段式限定符命中容器（分录/子分录）不应误入 mismatched_form ──────────
+
+def test_resolve_three_part_qualifier_hits_subentry_container_no_mismatch(conn):
+    """真实翻车场景：三段式限定符命中的是子分录**容器 key**本身（不是字段），此前 `_matches`
+    统一按 `entity_key` 比较，容器命中项没有这个键、`.get()` 拿到 None，永远判不匹配，
+    导致明明命中却被塞进 `mismatched_form`。修复后按 kind 分支用 `parent_key` 比较。"""
+    conn.execute(
+        "INSERT INTO form(key,name,form_type,model_type,isv,app_key,module,source_dym) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        ("cqkd_ht", "合同", "bill", "BillFormModel", "cqkd", "cqkd_assets",
+         "cqkd_assets", "ht.dym"),
+    )
+    conn.executemany(
+        "INSERT INTO entity(form_key,key,name,level,parent_key,table_name) VALUES(?,?,?,?,?,?)",
+        [
+            ("cqkd_ht", "cqkd_ht", "合同主体", "header", None, "t_ht"),
+            ("cqkd_ht", "cqkd_zdgl", "账单管理", "entry", "cqkd_ht", "t_zdgl"),
+            ("cqkd_ht", "cqkd_zdzfltk", "账单支付流通款", "subentry", "cqkd_zdgl", "t_zdzfltk"),
+        ],
+    )
+    conn.commit()
+    key = "cqkd_ht.cqkd_zdgl.cqkd_zdzfltk"
+    d = resolve_fields.resolve_fields(conn, [key])
+    resolved = d["resolved"][key]
+    assert resolved and len(resolved) == 1
+    assert resolved[0]["kind"] == "subentry" and resolved[0]["parent_key"] == "cqkd_zdgl"
+    assert key not in d.get("mismatched_form", {})
+
+
+# ── issue 6：平台/继承字段特定单据下 mismatch 时带 note，不当硬警告 ──────────────
+
+def test_resolve_platform_field_mismatch_gets_note(conn):
+    """auditdate 类平台字段只在某张单据的元数据里登记为 platform；换一张没登记的单据查，
+    不应当成"限定符写错"来硬警告，而是带 note 说明"随模板继承、未逐单据登记"。"""
+    conn.execute(
+        "INSERT INTO form(key,name,form_type,model_type,isv,app_key,module,source_dym) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        ("cqkd_tzjezd", "台账结转单", "bill", "BillFormModel", "cqkd", "cqkd_assets",
+         "cqkd_assets", "tz.dym"),
+    )
+    conn.execute(
+        "INSERT INTO field(uid,form_key,entity_key,key,name,db_column,field_type,kind,level) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        ("u_audit", "cqkd_assetcard", "cqkd_assetcard", "auditdate", "审核日期",
+         "fauditdate", "DateField", "platform", "header"),
+    )
+    conn.commit()
+    key = "cqkd_tzjezd.auditdate"
+    d = resolve_fields.resolve_fields(conn, [key])
+    mm = d["mismatched_form"][key]
+    assert "note" in mm and "平台标准字段" in mm["note"]
+    text = resolve_fields.render_resolve_fields(d)
+    assert "提示" in text and "ℹ" in text
 
 
 def test_cli_resolve_json(tmp_path: Path, capsys):

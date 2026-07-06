@@ -127,6 +127,10 @@ def test_compact_default_has_writers_and_reader_overview(tmp_path: Path):
     # coarse（粗扫疑似盲点）不分 access 一律带上（2026-07-03 修复：此前只在 access='read'
     # 才挂，默认视图里 writers=0 时连这条"高精度没找到≠源码真没有"的线索都看不到）。
     assert "dynamic_writers" in ft and "coarse" in ft
+    # by_cause 成因码人读标签焊进返回值本体（此前裸码、docstring 也没提到过这四个码）。
+    dw = ft["dynamic_writers"]
+    assert set(dw["cause_labels"]) == set(dw["by_cause"])
+    assert all(dw["cause_labels"].values())   # 每个码都有非空中文标签
 
 
 def test_compact_access_read_only_readers(tmp_path: Path):
@@ -171,10 +175,13 @@ def test_compact_unlocated_is_worklist(tmp_path: Path):
     finally:
         conn.close()
     ul = ft["unlocated"]
-    assert set(ul) == {"total", "writes", "reads", "by_reason", "methods", "capped"}
+    assert set(ul) == {"total", "writes", "reads", "by_reason", "reason_labels", "methods", "capped"}
     assert ul["total"] == 2 and ul["writes"] == 2          # 两处写入去重前真实数
     m = ul["methods"][0]
     assert m["method"] == "fill" and m["writes"] == 2
+    # 本用例种子行未走 analyze 管线赋值 null_reason（列为 NULL）——histogram 落 unknown 兜底桶，
+    # 仍应带上人读标签（成因码→标签的端到端覆盖见 test_null_reason.py）。
+    assert ul["reason_labels"].get("unknown") == "暂无足够证据归因——先补证据再判断"
     # 来源线索 = 插件注册单据（只读提示，不写进 form_key）。
     assert "cqkd_assetcard" in (m["plugin_form_label"] or "")
 
@@ -395,6 +402,67 @@ def test_pagination_overview_sets_next_cursor(tmp_path: Path):
         if u["capped"]:  # 60 方法折叠后通常超预算被截
             assert u["next_cursor"] == f"unlocated@{len(u['methods'])}"
             assert "next_cursor" in (ft["note"] or "")
+    finally:
+        conn.close()
+
+
+def test_pagination_gate_first_key_and_pending_matches_next_cursor(tmp_path: Path):
+    """顶层 `pagination` 门是返回体第一个 key；被截时 complete=False，pending 里的 next_cursor
+    与段内 next_cursor 一致——散落各段的游标不再只靠"自觉逐段检查"才能发现。"""
+    db = make_kb(tmp_path)
+    rows = [_row("cqkd_collateralstatus", plugin_fqn=f"cqspb.pkg.UnlocatedPlugin{i}",
+                 access="write", method=f"m{i}", line=i, form_key=None, via="do.set")
+            for i in range(60)]
+    _seed(db, rows)
+    conn = store.open_kb(db)
+    try:
+        ft = field_trace.trace_compact(conn, "cqkd_collateralstatus",
+                                       form_key="cqkd_assetcard", access="write")
+        assert next(iter(ft)) == "pagination"
+        u = ft["unlocated"]
+        if u["capped"]:
+            assert ft["pagination"]["complete"] is False
+            assert ft["pagination"]["instruction"]
+            cursors = {p["next_cursor"] for p in ft["pagination"]["pending"]}
+            assert u["next_cursor"] in cursors
+    finally:
+        conn.close()
+
+
+def test_pagination_gate_complete_when_nothing_capped(tmp_path: Path):
+    """未灌爆的小 KB：没有段被截 → complete=True、pending 为空。"""
+    db = make_kb(tmp_path)
+    conn = store.open_kb(db)
+    try:
+        ft = field_trace.trace_compact(conn, "cqkd_collateralstatus")
+    finally:
+        conn.close()
+    assert next(iter(ft)) == "pagination"
+    assert ft["pagination"] == {"complete": True, "pending": []}
+
+
+def test_pagination_page_response_carries_gate(tmp_path: Path):
+    """`cursor=` 翻页响应同样带 `pagination`：非末页 complete=False 且 pending 与 page.next_cursor
+    对得上；翻到末页 complete=True。"""
+    db = make_kb(tmp_path)
+    rows = [_row("cqkd_collateralstatus", plugin_fqn=f"cqspb.pkg.UnlocatedPlugin{i}",
+                 access="write", method=f"m{i}", line=i, form_key=None, via="do.set")
+            for i in range(60)]
+    _seed(db, rows)
+    conn = store.open_kb(db)
+    try:
+        cur = "unlocated@0"
+        saw_incomplete = False
+        while cur:
+            page = field_trace.trace_compact(conn, "cqkd_collateralstatus", form_key="cqkd_assetcard",
+                                             access="write", cursor=cur, budget=1500)
+            nxt = page["page"]["next_cursor"]
+            assert page["pagination"]["complete"] is (nxt is None)
+            if nxt:
+                saw_incomplete = True
+                assert page["pagination"]["pending"][0]["next_cursor"] == nxt
+            cur = nxt
+        assert saw_incomplete, "60 条应至少分出一页非末页"
     finally:
         conn.close()
 

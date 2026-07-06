@@ -35,8 +35,9 @@ _KW_PLUGIN = ("干嘛", "干什么", "做什么", "是什么", "什么作用", "
 _KW_OP = ("这个操作", "操作按钮", "按钮", "提交时", "保存时", "审核时", "点这个",
           "执行时", "这个按钮")
 
-# 标识/类名 token：cqkd_xxx（小写下划线）或 CamelCase 类名。
-_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# 标识/类名 token：cqkd_xxx（小写下划线）、CamelCase 类名，或包限定全名 pkg.sub.ClassName。
+# 用「标识(.标识)*」链式模式而非把 `.` 直接塞进字符类，避免贪婪吞掉句末紧贴的孤立句点。
+_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 
 
 @dataclass
@@ -96,6 +97,10 @@ def resolve(conn, text: str, lexicon: Lexicon | None = None) -> ResolvedQuery:
     if _looks_like_locator(text):
         fkey, form, entry, level = parse_locator(text)
         if lex.fields_by_key(fkey):
+            if form is None:
+                amb = _field_ambiguity(lex, fkey)
+                if amb:
+                    return _clarify_field(raw, fkey, amb)
             return ResolvedQuery(
                 "field_who_changed", raw, confidence=0.97,
                 field_key=fkey, form_key=form, entry_key=entry, level=level,
@@ -142,6 +147,10 @@ def resolve(conn, text: str, lexicon: Lexicon | None = None) -> ResolvedQuery:
         # 若同时命中单据 key，作为坐标过滤（缩小到该单据，但不锁层级——交 field_trace 按
         # 该单据全坐标分组，避免把分录字段误挤进「可能命中」桶）。
         form = form_hits[0] if form_hits else None
+        if form is None:
+            amb = _field_ambiguity(lex, fkey)
+            if amb:
+                return _clarify_field(raw, fkey, amb)
         return ResolvedQuery(
             "field_who_changed", raw, confidence=0.92,
             field_key=fkey, form_key=form,
@@ -181,12 +190,41 @@ def _resolve_fuzzy(lex, raw, text, flag_who, flag_bill, flag_plugin) -> Resolved
         rq = ResolvedQuery(primary_intent, raw, confidence=top.score / 100.0,
                            note=f"中文名模糊命中（{top.score:.0f} 分）。")
         _fill_subject(rq, top)
+        if rq.intent == "field_who_changed" and rq.form_key is None:
+            amb = _field_ambiguity(lex, rq.field_key)
+            if amb:
+                return _clarify_field(raw, rq.field_key, amb)
         return rq
 
     return ResolvedQuery(
         primary_intent, raw, confidence=top.score / 100.0, need_clarification=True,
         note="有多个相近候选，请挑一个精确标识：",
         candidates=primary[:8])
+
+
+def _field_ambiguity(lex: Lexicon, fkey: str) -> list[Candidate] | None:
+    """字段跨单据定义（同单据多层级/分录不算）→ 消歧候选；无歧义返回 None。"""
+    entries = lex.fields_by_key(fkey)
+    forms = {e.form_key for e in entries if e.form_key}
+    if len(forms) <= 1:
+        return None
+    seen: set[tuple] = set()
+    out: list[Candidate] = []
+    for e in entries:
+        ck = (e.form_key, e.entity_key, e.level)
+        if ck not in seen:
+            seen.add(ck)
+            out.append(Candidate("field", 100.0, e))
+    return out
+
+
+def _clarify_field(raw: str, fkey: str, candidates: list[Candidate]) -> ResolvedQuery:
+    """字段跨单据歧义 → 反问 ResolvedQuery（与 plugin_explain 的反问同一套形状）。"""
+    forms = {c.payload.form_key for c in candidates}
+    return ResolvedQuery(
+        "field_who_changed", raw, confidence=0.5, need_clarification=True,
+        note=f"字段 {fkey} 在 {len(forms)} 个单据都有定义，请指定单据（单据.字段 或 form_key 参数）后再查。",
+        candidates=candidates)
 
 
 def _fill_subject(rq: ResolvedQuery, cand: Candidate) -> None:

@@ -90,6 +90,45 @@ def test_ctx_plugin_explain(tmp_path: Path):
         conn.close()
 
 
+def test_ctx_plugin_explain_root_event_and_actual_method(tmp_path: Path):
+    """issue 2：写入证据不再只给根事件方法——fixture 里 cqkd_collateralstatus 的
+    path=[beforeExecuteOperationTransaction, update]，根事件与实际写入 helper 方法不同，
+    两者都要能在 evidence 与渲染文本里拿到。"""
+    conn = _conn(tmp_path)
+    try:
+        from cosmic_kb.semantic.resolver import ResolvedQuery
+        rq = ResolvedQuery("plugin_explain", "x", confidence=1.0,
+                            class_fqn="cqspb.assets.CollateralService")
+        ctx = builder.build_context(conn, rq)
+        w = next(w for w in ctx["evidence"]["writes"] if w["field_key"] == "cqkd_collateralstatus")
+        assert w["event_method"] == "beforeExecuteOperationTransaction"  # 向后兼容保留
+        assert w["root_event"] == "beforeExecuteOperationTransaction"
+        assert w["actual_method"] == "update"
+        text = builder.render_context(ctx)
+        assert "事件 beforeExecuteOperationTransaction" in text
+        assert "实际写入 update" in text
+    finally:
+        conn.close()
+
+
+def test_ctx_plugin_explain_registrations_have_form_name(tmp_path: Path):
+    """issue 3：registrations 补上 form_name（LEFT JOIN form），不再只有裸 form_key。"""
+    conn = _conn(tmp_path)
+    try:
+        from cosmic_kb.semantic.resolver import ResolvedQuery
+        rq = ResolvedQuery("plugin_explain", "x", confidence=1.0,
+                            class_fqn="cqspb.assets.CollateralOp")
+        ctx = builder.build_context(conn, rq)
+        reg = ctx["evidence"]["registrations"][0]
+        assert reg["form_key"] == "cqkd_assetcard"
+        assert reg["form_name"] == "资产卡片"
+        text = builder.render_context(ctx)
+        assert "cqkd_assetcard「资产卡片」" in text
+        assert any("资产卡片" in a for a in ctx["advice"])
+    finally:
+        conn.close()
+
+
 def test_ctx_operation_explain(tmp_path: Path):
     conn = _conn(tmp_path)
     try:

@@ -142,15 +142,20 @@ def _collapse_unlocated_methods(rows: list[dict[str, Any]], *, cap: int) -> dict
             "plugin_simple": g["plugin_simple"], "plugin_type": g["plugin_type"],
             "plugin_form_label": g["plugin_form_label"], "semantics_topic": g["semantics_topic"],
             "null_reason": reason,
+            # 成因码人读标签焊进返回值本体（MCP JSON 路径此前只有裸码，模型只能猜；
+            # CLI 文本渲染一直有 nrmod.REASON_LABEL，这里补齐 JSON 侧同等信息）。
+            "null_reason_label": nrmod.REASON_LABEL.get(reason, reason) if reason else None,
             "writes": g["writes"], "reads": g["reads"], "count": g["writes"] + g["reads"],
             "locations": list(g["locations"].values())[:3],
         })
     out.sort(key=lambda d: (-d["writes"], -d["count"], d["class_fqn"] or ""))
+    by_reason = _reason_histogram(rows)
     return {
         "total": len(rows),
         "writes": sum(1 for r in rows if r.get("access") == "write"),
         "reads": sum(1 for r in rows if r.get("access") != "write"),
-        "by_reason": _reason_histogram(rows),
+        "by_reason": by_reason,
+        "reason_labels": _reason_labels(by_reason),
         "methods": out[:cap],
         "capped": max(0, len(out) - cap),
     }
@@ -160,6 +165,14 @@ def _reason_histogram(rows: list[dict[str, Any]]) -> dict[str, int]:
     """未定位行按成因计数（真实总数恒在此，不受方法 cap 影响；红线 #4 不丢数）。"""
     c = Counter(r.get("null_reason") or nrmod.UNKNOWN for r in rows)
     return dict(c.most_common())
+
+
+def _reason_labels(by_reason: dict[str, int]) -> dict[str, str]:
+    """`by_reason` 直方图出现过的成因码 → 中文标签（legend），随直方图一起焊进返回值，
+    模型不用记码值/翻文档就能读懂 unlocated_by_reason 里每个码是什么意思。"""
+    return {code: nrmod.REASON_LABEL.get(code, code) for code in by_reason}
+
+
 # 动态写入候选纳入的成因（用户 2026-06-24 三项全放宽：含 unknown，未识别局部变量持 key 也算候选）。
 _DYN_CAUSES = ("dynamic-loop", "concat", "external-const", "unknown")
 # 动态写入候选的成因标签（key_resolution → 人读）。
@@ -229,6 +242,23 @@ def _collect_materials(
             "ORDER BY form_key,level", (field_key,),
         ).fetchall()
     ]
+
+    # ── 跨单据歧义闸门：裸字段（未指定 form_key）若元数据里跨 ≥2 张单据定义，直接反问 ──
+    # 同单据内跨层级/分录不算歧义（那走下面 possible 桶）；已显式给 form_key 的调用不受影响。
+    # 2026-07 起收窄：裸字段不再聚合列出全部单据的证据（对已知道要查哪张单据的排障者是噪音），
+    # 改交更便宜的 resolve_fields 做发现，trace 只做精确坐标取证。
+    if form_key is None:
+        distinct_forms = {o["form_key"] for o in occurrences if o["form_key"]}
+        if len(distinct_forms) > 1:
+            sample = sorted(distinct_forms)[0]
+            note = (f"字段「{field_key}」在 {len(distinct_forms)} 个单据都有定义"
+                    f"（{'、'.join(sorted(distinct_forms))}），请指定单据后再查，如 "
+                    f"\"{sample}.{field_key}\" 或加 form_key 参数。")
+            return {
+                "field_key": field_key, "status": "need_clarification",
+                "filter": {"form_key": form_key, "entry_key": entry_key, "level": level},
+                "occurrences": occurrences, "note": note,
+            }
 
     # 取该字段的全部读写记录（不在 SQL 里按 level/entry 过滤——精确模式要在 Python 里分桶，
     # 把"层级/分录判不准"的写入归到「可能命中」而非直接丢弃，满足"不能遗漏"）。
@@ -332,6 +362,9 @@ def _collect_materials(
 
     writers = [r for r in rows if r["access"] == "write"]
     readers = [r for r in rows if r["access"] == "read"]
+    # 未定位行按成因分布（信任优先）：哪些该不该顺源码反推，真实总数恒在此。按本字段**全部**
+    # form_key=None 行统计（裸字段查询不拆 unlocated 桶，故不能只数 unlocated 变量）。
+    unlocated_by_reason = _reason_histogram([r for r in all_rows if r["form_key"] is None])
     summary = {
         "writers": len(writers), "readers": len(readers),
         "persisting_writers": sum(1 for r in writers if r["persists"] == "yes"),
@@ -341,10 +374,9 @@ def _collect_materials(
         "coords": len(group_list),
         "possible": len(possible),
         "unlocated": len(unlocated),
-        # 未定位行按成因分布（信任优先）：哪些该不该顺源码反推，真实总数恒在此。按本字段**全部**
-        # form_key=None 行统计（裸字段查询不拆 unlocated 桶，故不能只数 unlocated 变量）。
-        "unlocated_by_reason": _reason_histogram(
-            [r for r in all_rows if r["form_key"] is None]),
+        "unlocated_by_reason": unlocated_by_reason,
+        # 成因码 → 中文标签 legend，焊进返回值本体（此前只有裸码，模型只能凭 kebab-case 猜）。
+        "unlocated_by_reason_labels": _reason_labels(unlocated_by_reason),
         # 注解反射映射写入（@…Annotation(value="key") + convertTo…DynamicObject 反射 set）命中数。
         # 仅标量（真实总数）；明细随普通 writers 行走既有「按类合并 + cap + 字节 governor」，不另起数组。
         "annotation_writers": sum(1 for r in all_rows
@@ -398,6 +430,9 @@ def _collect_materials(
         "total": len(dyn_scoped),
         "by_cause": {c: sum(1 for r in dyn_scoped if r["key_resolution"] == c)
                      for c in _DYN_CAUSES},
+        # 成因码 → 中文标签 legend（此前 by_cause 只有裸码，且这四个码连 docstring 都没提到过）；
+        # 各 method 条目自带的 cause_label 是同一份标签，这里补一份汇总级 legend 与 by_reason 对称。
+        "cause_labels": {c: _CAUSE_LABEL.get(c, c) for c in _DYN_CAUSES},
         "total_methods": wl_full["total_methods"],
         "methods": dyn_full_methods[:10],
         "capped": max(0, len(dyn_full_methods) - 10),
@@ -435,9 +470,20 @@ def _collect_materials(
                     f"请改查 {extends_target}.{field_key}")
         note = f"{redirect}；{note}" if note else redirect
 
-    # 模式 B：被查字段的已核对中文名（占位坐标的菜单在 occurrences；这里给"单一名"便于直接采用，
-    # 同 key 跨多坐标有不同名时留 None，不替选——消歧看 occurrences）。
-    distinct_names = {o["field_name"] for o in occurrences if o.get("field_name")}
+    # 已给 form_key（精确/半精确查询）时，对外只暴露本单据(+分录/层级)范围内的定义坐标——
+    # 其他单据的同名字段定义对"已经知道查哪张单据"的排障者是纯噪音（用户 2026-07-05 指出
+    # occurrences 未跟上 possible 桶 2026-07 那次"裸字段不聚合列全部单据"的收窄思路）。
+    # 内部 scope_forms/跨单据歧义闸门仍用上面未过滤的 occurrences（需要跨单据全貌才能判歧义/定候选范围）。
+    visible_occurrences = occurrences
+    if form_key:
+        visible_occurrences = [o for o in occurrences if o["form_key"] == form_key]
+        if entry_key:
+            visible_occurrences = [o for o in visible_occurrences if o["entity_key"] == entry_key]
+        if level:
+            visible_occurrences = [o for o in visible_occurrences if o["level"] == level]
+
+    # 模式 B：被查字段的已核对中文名（同 key 跨多坐标有不同名时留 None，不替选）。
+    distinct_names = {o["field_name"] for o in visible_occurrences if o.get("field_name")}
     field_name = next(iter(distinct_names)) if len(distinct_names) == 1 else None
 
     return {
@@ -445,7 +491,7 @@ def _collect_materials(
         "field_name": field_name,
         "filter": {"form_key": form_key, "entry_key": entry_key, "level": level},
         "precise": precise,
-        "occurrences": occurrences,
+        "occurrences": visible_occurrences,
         "group_list": group_list,      # 各组 writers/readers 为 RAW 行
         "possible": possible,          # RAW 行
         "unlocated": unlocated,        # RAW 行
@@ -469,6 +515,8 @@ def field_trace(
     真实总数恒在 summary（红线 #4）。MCP 防截断用 `trace_compact`（按类合并 + 写读拆分），不走本函数。
     """
     m = _collect_materials(conn, field_key, form_key=form_key, entry_key=entry_key, level=level)
+    if m.get("status") == "need_clarification":
+        return m
     for g in m["group_list"]:
         # 设界（summary 已锁真实计数）：writers 投影+cap；readers 折叠成「该读方法」清单。
         g["writers"] = [_slim_row(r) for r in g["writers"][:_CAP_WRITERS]]
@@ -726,7 +774,66 @@ def _build_compact(
                      "或用 form/entry/level 收窄到单坐标、access='read'/'write' 单看一侧。")
     res["note"] = " ".join(notes) if notes else None
     res["java_available"] = m["java_available"]
+    _prepend_pagination_gate(res, groups_capped)
     return res
+
+
+def _prepend_pagination_gate(res: dict[str, Any], groups_capped: int) -> None:
+    """把翻页完成状态提到返回体**第一个 key**（原地重排 `res`）。
+
+    背景：此前只把 next_cursor 散落在各段深处 + 一句 `note` 提醒"翻完前禁止下结论"，
+    但大模型仍会看到 `capped=0` 的段就当"数据齐了"下结论，翻页规则形同虚设——
+    散落各处的 cursor 依赖大模型"自觉逐段检查"，而不是一眼可判的事实。
+    这里改成顶层 `pagination.complete` 布尔 + `pending` 清单，把"要不要翻页"从
+    "阅读理解题"降级成"查一个字段"，且置于返回体最前面，避免被后面的正文淹没。
+    """
+    pending = _collect_pending_cursors(res)
+    if groups_capped:
+        pending.append({"section": "groups", "next_cursor": None,
+                        "hint": "坐标组数超限被截，无法翻页取全——用 form_key/entry_key/level "
+                                "收窄到单坐标可看到该坐标完整内容"})
+    reordered = {"pagination": pagination_gate(pending), **res}
+    res.clear()
+    res.update(reordered)
+
+
+def pagination_gate(pending: list[dict[str, Any]]) -> dict[str, Any]:
+    """构造顶层 `pagination` 门：`complete` 一眼可判，`pending` 列出每个未取全段的 next_cursor。
+
+    `bill_view.py` 复用本函数，保证 trace/bill 两个高频取证工具的翻页信号同一套口径。
+    """
+    gate: dict[str, Any] = {"complete": not pending, "pending": pending}
+    if pending:
+        gate["instruction"] = ("pending 非空 = 数据未取全：对 next_cursor 非 null 的每一项，用 "
+                               "cursor=<该值> 再调一次本工具，直至全部 next_cursor 变 null，"
+                               "才能下\"未覆盖/无人读写/不存在\"等结论；中途下结论视为臆造。")
+    return gate
+
+
+def _pending_from_flat_cursors(res: dict[str, Any], suffix: str = "_next_cursor"
+                               ) -> list[dict[str, Any]]:
+    """扫顶层形如 `<段名>{suffix}` 的扁平游标字段（bill 视图用此命名法），汇总成待翻页清单。"""
+    return [{"section": k[:-len(suffix)], "next_cursor": v}
+            for k, v in res.items() if k.endswith(suffix) and v]
+
+
+def _collect_pending_cursors(res: dict[str, Any]) -> list[dict[str, Any]]:
+    """扫结果里所有仍非 null 的 `next_cursor`，汇总成待翻页清单（供顶层 `pagination` 门用）。"""
+    pending: list[dict[str, Any]] = []
+    for key in ("unlocated", "dynamic_writers", "possible", "coarse"):
+        node = res.get(key)
+        if isinstance(node, dict) and node.get("next_cursor"):
+            pending.append({"section": key, "next_cursor": node["next_cursor"]})
+    occ_cursor = res.get("occurrences_next_cursor")
+    if occ_cursor:
+        pending.append({"section": "occurrences", "next_cursor": occ_cursor})
+    for g in res.get("groups") or []:
+        label = g.get("label") or g.get("form_key")
+        for key in ("writers", "readers", "readers_overview"):
+            node = g.get(key)
+            if isinstance(node, dict) and node.get("next_cursor"):
+                pending.append({"section": f"{key}@{label}", "next_cursor": node["next_cursor"]})
+    return pending
 
 
 # ── 游标分页（红线 #4 升级：被 cap 的 worklist 不只报计数，给 next_cursor 让模型逐页取回全部）──
@@ -800,12 +907,13 @@ def _section_full(m: dict[str, Any], access: str | None, section: str
     if section == "unlocated":
         d = _collapse_unlocated_methods(_access_rows(m["unlocated"], access), cap=_BIG_CAP)
         return d["methods"], {"total_rows": d["total"], "writes": d.get("writes"),
-                              "reads": d.get("reads")}
+                              "reads": d.get("reads"), "by_reason": d.get("by_reason"),
+                              "reason_labels": d.get("reason_labels")}
     if section == "dynamic_writers":
         dw = m["dynamic_writers"]
         return list(m.get("dynamic_writers_full") or []), {
             "total_rows": dw.get("total"), "total_methods": dw.get("total_methods"),
-            "by_cause": dw.get("by_cause")}
+            "by_cause": dw.get("by_cause"), "cause_labels": dw.get("cause_labels")}
     if section == "possible":
         rows = _access_rows(m["possible"], access)
         d = (_merge_readers_by_class(rows, cap_classes=_BIG_CAP, cap_methods=_BIG_CAP)
@@ -845,9 +953,12 @@ def _page_section(m: dict[str, Any], access: str | None, section: str, offset: i
     offset = min(max(0, offset), total)
 
     def _wrap(page: list[dict[str, Any]], nxt: int) -> dict[str, Any]:
-        return {**base, "page": {**head, "section": section, "offset": offset,
-                                 "returned": len(page), "total": total, "items": page,
-                                 "next_cursor": (f"{section}@{nxt}" if nxt < total else None)}}
+        next_cursor = f"{section}@{nxt}" if nxt < total else None
+        pending = [{"section": section, "next_cursor": next_cursor}] if next_cursor else []
+        return {"pagination": pagination_gate(pending), **base,
+                "page": {**head, "section": section, "offset": offset,
+                        "returned": len(page), "total": total, "items": page,
+                        "next_cursor": next_cursor}}
 
     page: list[dict[str, Any]] = []
     for it in items[offset:]:
@@ -875,6 +986,8 @@ def trace_compact(
     if access not in ("write", "read"):
         access = None
     m = _collect_materials(conn, field_key, form_key=form_key, entry_key=entry_key, level=level)
+    if m.get("status") == "need_clarification":
+        return m
     if cursor:
         section, offset = _parse_cursor(cursor)
         return _page_section(m, access, section, offset, budget)
@@ -906,7 +1019,7 @@ def trace_compact(
 def parse_locator(text: str) -> tuple[str, str | None, str | None, str | None]:
     """把层级显式的点号查询解析成 (field_key, form_key, entry_key, level)，纯按段数判定：
 
-      字段              → (field, None, None, None)   裸字段=发现态，列全部坐标
+      字段              → (field, None, None, None)   裸字段；若跨单据有歧义，trace 会反问单据
       单据.字段          → (field, 单据, None, "header")
       单据.分录.字段      → (field, 单据, 分录, "entry")
       单据.分录.子分录.字段 → (field, 单据, 子分录, "subentry")   （中段=父分录，仅供阅读）
@@ -1058,6 +1171,12 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
                 f"  «{o['form_key'] or '?'}»{('「'+o['form_name']+'」') if o.get('form_name') else ''}  "
                 f"{o['field_name'] or ''} [{_LEVEL_LABEL.get(o['level'], o['level'])}{ek}{en}] ({o['kind']})"
             )
+
+    if ft.get("status") == "need_clarification":
+        lines.append("")
+        lines.append(f"⚠ {ft.get('note') or '该字段在多个单据都有定义，请指定单据后再查。'}")
+        return "\n".join(lines)
+
     s = ft["summary"]
     lines.append("")
     lines.append(

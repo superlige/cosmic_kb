@@ -243,14 +243,21 @@ public class FillHelper {
             "SELECT COUNT(*) FROM field_access WHERE form_key IS NOT NULL AND null_reason IS NOT NULL"
         ).fetchone()[0] == 0
 
-        # 裸字段查询：summary 直方图统计本字段全部 form_key=None 行的成因。
-        ft = field_trace.field_trace(conn, "cqkd_amt")
+        # cqkd_amt 跨 cqkd_bill/cqkd_other 两单据定义，裸查询会反问消歧；加 form_key 绕开
+        # （unlocated_by_reason 统计源不按 form_key 过滤，加参数不改变计数结果）。
+        ft = field_trace.field_trace(conn, "cqkd_amt", form_key="cqkd_bill")
         assert ft["summary"]["unlocated_by_reason"].get(nr.HELPER_CALLER_UNKNOWN, 0) >= 1
+        # 成因码人读标签焊进 summary 本体（此前只有裸码，模型只能凭 kebab-case 猜）。
+        assert ft["summary"]["unlocated_by_reason_labels"][nr.HELPER_CALLER_UNKNOWN] == \
+            nr.REASON_LABEL[nr.HELPER_CALLER_UNKNOWN]
 
         # 精确查询（给 form_key）：form_key=None 行落入「反推来源单据」工作单，带成因。
         ftp = field_trace.field_trace(conn, "cqkd_amt", form_key="cqkd_bill")
         methods = ftp["unlocated"]["methods"]
         assert methods and methods[0]["null_reason"] == nr.HELPER_CALLER_UNKNOWN
+        assert methods[0]["null_reason_label"] == nr.REASON_LABEL[nr.HELPER_CALLER_UNKNOWN]
         assert ftp["unlocated"]["by_reason"].get(nr.HELPER_CALLER_UNKNOWN, 0) >= 1
+        assert ftp["unlocated"]["reason_labels"][nr.HELPER_CALLER_UNKNOWN] == \
+            nr.REASON_LABEL[nr.HELPER_CALLER_UNKNOWN]
     finally:
         conn.close()

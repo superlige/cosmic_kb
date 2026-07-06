@@ -382,11 +382,13 @@ function renderField(ft) {
       ["c-form", "c-lvl", "c-entity", "c-fname", "c-kind"], rows, "occ"));
   }
 
-  const s = ft.summary || {};
-  out.appendChild(el("p", "muted",
-    `实体坐标 ${s.coords || 0} 个 · 写入 ${s.writers || 0}` +
-    `（落库 ${s.persisting_writers || 0} / 存疑 ${s.uncertain_writers || 0}）· ` +
-    `读取 ${s.readers || 0} · 涉及插件 ${s.plugins || 0} / 单据 ${s.forms || 0}`));
+  if (ft.status !== "need_clarification") {
+    const s = ft.summary || {};
+    out.appendChild(el("p", "muted",
+      `实体坐标 ${s.coords || 0} 个 · 写入 ${s.writers || 0}` +
+      `（落库 ${s.persisting_writers || 0} / 存疑 ${s.uncertain_writers || 0}）· ` +
+      `读取 ${s.readers || 0} · 涉及插件 ${s.plugins || 0} / 单据 ${s.forms || 0}`));
+  }
   if (ft.note) out.appendChild(el("p", "warn", esc(ft.note)));
 
   (ft.groups || []).forEach((g) => out.appendChild(renderGroup(g)));
@@ -820,7 +822,7 @@ $("#tab-result").addEventListener("click", (ev) => {
 });
 
 const PLACEHOLDER = {
-  field: "按层级录入：单据.字段(表头) / 单据.分录.字段 / 单据.分录.子分录.字段；裸字段=列全部坐标",
+  field: "按层级录入：单据.字段(表头) / 单据.分录.字段 / 单据.分录.子分录.字段；裸字段若跨单据有定义会反问指定单据",
   whois: "输入类名或报错栈里的类（末段即可），回车反查",
   bill: "输入单据标识，如 cqkd_assetcard，回车查看单据视图",
 };

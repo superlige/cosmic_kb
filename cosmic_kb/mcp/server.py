@@ -18,7 +18,7 @@ from ..graph import store
 DEFAULT_DB = "cosmic_kb.db"
 
 # 段二语义层「下沉进 MCP」：任意 agent 初始化时拿到这段路由+纪律（不再只靠 Claude 私有 SKILL）。
-# 多数 MCP 客户端会把 server instructions 并入系统提示。见 docs/分发与多agent接入方案.md §2。
+# 多数 MCP 客户端会把 server instructions 并入系统提示。见 docs/设计方案/分发与多agent接入方案.md §2。
 INSTRUCTIONS = (
     "苍穹（金蝶 Cosmic）历史项目本地理解工具，供 AI 查 KB 排障。\n"
     "- 先取证后下结论：字段/单据/方法/插件相关问题一律先调工具查 KB，不凭训练记忆猜；结论带"
@@ -32,7 +32,10 @@ INSTRUCTIONS = (
     "unknown，不替你选。**一次批量传入本轮读到的所有陌生标识，"
     "不得以\"减少工具调用\"为由只核实其中一部分、对其余标识凭字面翻译——单据/表头/分录/子分录标识"
     "与字段同标准，没有\"次要标识可以不核实\"这回事。**\n"
-    "- 返回值带 next_cursor 说明内容未取全，翻完（变 null）前禁止下『不存在/未覆盖』这类结论。\n"
+    "- **先查顶层 `pagination.complete`，为 false 才继续读正文**：trace/bill 返回体第一个 key 就是"
+    "`pagination`，`complete=false` 时 `pending` 列出每段的 `next_cursor`，逐个原样传回 `cursor=` 参数"
+    "翻页，直至再次调用后 `pagination.complete=true`；中途只因某段本身 `capped=0` 就下『不存在/未"
+    "覆盖』结论＝臆造，因为别的段可能仍未取全。\n"
     "- 解释插件/事件/操作语义、判断入库时机、或遇到不认识的 kd.bos.* 符号，先调 cosmic_semantics"
     "(topic) 取苍穹语义再下结论；不确定查哪篇先空参列清单。\n"
     "- 各工具具体返回结构见其自身描述，此处只讲跨工具全局纪律。"
@@ -89,6 +92,8 @@ def tool_ask(question: str) -> dict[str, Any]:
     需要先定位再解释的问题用本工具；已知精确字段/单据标识优先直接用 trace/bill。
     覆盖字段谁改的/单据钻取/插件解释/操作解释共 4 类意图。判不准返回
     `status='need_clarification'` + `candidates`，挑一个精确标识再问，禁止替用户拍板。
+    字段/单据类意图的 `evidence` 内嵌 `pagination` 门（与 trace/bill 同口径），`complete=false`
+    时按 `pending` 里的 `next_cursor` 直接改用 `trace`/`bill` 加 `cursor=` 翻页，翻完再下结论。
     """
     from ..semantic import resolver
     from ..context import builder
@@ -121,18 +126,24 @@ def tool_trace(
     cursor: str | None = None,
 ) -> dict[str, Any]:
     """字段 → 哪些类的哪个事件函数读/写它、是否落库、行号、源码路径。已知精确字段/单据时用本工具
-    （比 ask 更省）。`field` 支持点号坐标 `单据.字段`/`单据.分录.字段`/`单据.分录.子分录.字段`，
-    裸字段列全部坐标；已知坐标建议带上（`form/entry/level` 可显式覆盖推断），更省且不裁剪。
+    （比 ask 更省）。`field` 支持点号坐标 `单据.字段`/`单据.分录.字段`/`单据.分录.子分录.字段`；
+    已知坐标建议带上（`form/entry/level` 可显式覆盖推断），更省且不裁剪。裸字段若在元数据里跨
+    多张单据定义，返回 `{status:"need_clarification", occurrences, note}`——先用 `occurrences`
+    挑一张单据，加 `form`/点号坐标再查，不会替你聚合多单据证据（消歧发现更省的做法是先调
+    `resolve_fields`）。
 
     `access='write'`（默认含写）按类合并写入点；`access='read'`按类合并读取方法；不传时只给写入
     明细+读取按类计数概览。`coarse.coarse_only`>0 说明源码字面量有命中但未结构化，禁止当作"确实
     无人读写"，需读完整个方法核实（保存调用可能在窗口外，窄窗口没读到不等于不保存）。真实总数在
-    `summary`，内容超预算靠 `next_cursor` 翻页，翻完（变 null）前禁止下"某字段无人读写/未覆盖"
-    结论。
+    `summary`；返回体第一个 key 是 `pagination`，`complete=false` 说明内容超预算被截断，`pending`
+    列出每段的 `next_cursor`，逐个 `cursor=` 传回翻页直至再次调用后 `complete=true`，翻页完成前
+    禁止下"某字段无人读写/未覆盖"结论——只看到某一段 `capped=0` 不代表全部段都取全了。
 
-    `unlocated`：读写命中但来源单据未钉出（`dynamic_writers` 是字段本身钉不出，二者不同），带
-    `null_reason` 成因码——`basedata-ref`/`dynamic-entity` 是正常 None 无需追；其余成因值得顺
-    `calls` 读源码反推来源。
+    `unlocated`：读写命中但来源单据未钉出（`dynamic_writers` 是字段本身钉不出，二者不同）。二者的
+    成因码（`null_reason`/`key_resolution`）都自带中文标签，无需记码值——`unlocated` 每条方法带
+    `null_reason_label`、汇总直方图 `summary.unlocated_by_reason` 旁有 `unlocated_by_reason_labels`；
+    `dynamic_writers` 每条方法带 `cause_label`、汇总 `by_cause` 旁有 `cause_labels`。`basedata-ref`/
+    `dynamic-entity` 是正常 None 无需追；其余成因值得读源码反推来源。
     """
     from ..report import field_trace
 
@@ -152,42 +163,63 @@ def tool_trace(
         conn.close()
 
 
-def tool_bill(form_key: str, cursor: str | None = None) -> dict[str, Any]:
-    """单据钻取：操作集/插件清单/字段触达（按实体）/桥接风险。要查某字段谁改的/哪个事件/是否落库，
-    对该字段改用 `trace 单据.字段`（更细，entity_touch 每行已带 trace 锚点）。
+def tool_bill(
+    form_key: str, cursor: str | None = None, profile: str = "overview",
+) -> dict[str, Any]:
+    """单据钻取：单据基本信息/操作集/插件清单+绑定/桥接风险。要查某字段谁改的/哪个事件/是否落库，
+    对该字段改用 `trace 单据.字段`；要批量核对字段真实中文名改用 `resolve_fields`。
+
+    `profile="overview"`（默认）只给单据概览 + 插件绑定，**不含** `fields`（字段元数据）与
+    `entity_touch`（按实体分组的字段读写触达）——这两段这次多半用不上，默认带出来是冗余。
+    需要时改传 `profile="full"`（补回这两段，形状与旧版一致），或不管 profile 是哪档，
+    都能直接 `cursor="fields@0"`/`"entity_touch@0"` 单独把这两段翻出来（不静默丢证据）。
 
     `plugin_lanes` 按场景（操作/界面/列表/反写/转换）分流插件、给排障优先级 + 语义文档路由
-    （`semantics_topic`）；只含单据绑定插件，孤儿类（无 form_key）不在此列。内容超预算靠
-    `next_cursor` 翻页（`cursor=` 原样传回再调），翻完（变 null）前禁止下"某字段/插件未出现"
-    这类结论。
+    （`semantics_topic`）；只含单据绑定插件，孤儿类（无 form_key）不在此列。返回体第一个 key 是
+    `pagination`，`complete=false` 说明内容超预算被截断，`pending` 列出每段的 `next_cursor`，逐个
+    `cursor=` 传回翻页直至再次调用后 `complete=true`，翻页完成前禁止下"某字段/插件未出现"这类
+    结论。
     """
     from ..report import bill_view
 
     conn = _open()
     try:
-        return bill_view.bill_compact(conn, form_key, cursor=cursor)
+        return bill_view.bill_compact(conn, form_key, cursor=cursor, profile=profile)
     finally:
         conn.close()
 
 
-def tool_resolve_fields(keys: list[str]) -> dict[str, Any]:
+def tool_resolve_fields(keys: list[str], kind: str | None = None) -> dict[str, Any]:
     """标识批量核对为元数据真实中文名（比 trace 便宜得多，O(1) 打词典，不查谁改了它）。覆盖字段/
     表头实体/分录/子分录/单据(表单)五类标识——不是只查字段，读源码见到任何一类标识（如
     `bill.getString("cqkd_amount")`、`.load("cqkd_invoic_apply", ...)`）都必须先调本工具核对，
-    命名惯例不算证据，禁止凭字面猜中文名。`keys` 支持批量：**一次把本轮读到的所有陌生标识都传
-    进去，不得因为想省调用次数就只核实一部分、对其余的凭字面翻译**——批量参数本身就是为了用一次
-    调用覆盖多个标识，不是"选重要的核实、次要的跳过"的理由。已从源码字面量看到单据/分录归属时，
-    key 支持复合限定符——与 `trace` 同一套点号坐标写法：`"单据.字段"`/`"分录.字段"`/
-    `"单据.分录.字段"`（如 `"cqkd_zkd.cqkd_amount"`/`"cqkd_entry.cqkd_amount"`）——匹配到即唯一
-    答案；限定符不含该字段时，返回值 `mismatched_form` 会给出该字段真实所在的单据/分录，不悄悄
-    回退成全部候选掩盖这个信号。不带限定符时同一 key 跨多坐标（名字可能不同）全部列出、不替你选；
-    钉不出回 `null`，标 unknown。
+    命名惯例不算证据，禁止凭字面猜中文名。
+
+    **能确定标识种类时，务必传 `kind`（`"field"`/`"entity"`/`"form"`）缩小候选，这不是可选项**：
+    源码里见到 `.loadSingle(id, "cqkd_ht")`、`BusinessDataServiceHelper.load(id, "cqkd_ht")`
+    （这类方法入参里但凡出现单据标识字符串，基本都是 formKey）、`BillOpenParameter(..., "cqkd_ht")`
+    这类单据号字面量 → `kind="form"`；见到分录/子分录容器 key（如
+    `bill.getDynamicObjectCollection("cqkd_entry")`）→ `kind="entity"`；见到字段读写（如
+    `bill.getString("cqkd_amount")`）→ `kind="field"`。同一个 key 可能在元数据里同时是单据号和
+    字段 key（如 `cqkd_ht` 既是单据又可能是某分录字段），不传 `kind` 会把两路候选混在一起，需要
+    你自己再筛一遍——传对 `kind` 从根上不产出这噪声。只有真不确定标识种类时才留空跑全量三路。
+
+    `keys` 支持批量：**一次把本轮读到的所有陌生标识都传进去，不得因为想省调用次数就只核实一部分、
+    对其余的凭字面翻译**——批量参数本身就是为了用一次调用覆盖多个标识，不是"选重要的核实、次要的
+    跳过"的理由。已从源码字面量看到单据/分录归属时，key 支持复合限定符——与 `trace` 同一套点号
+    坐标写法：`"单据.字段"`/`"分录.字段"`/`"单据.分录.字段"`（如 `"cqkd_zkd.cqkd_amount"`/
+    `"cqkd_entry.cqkd_amount"`）——匹配到即唯一答案；限定符不含该字段时，返回值 `mismatched_form`
+    会给出该字段真实所在的单据/分录，不悄悄回退成全部候选掩盖这个信号。不带限定符时同一 key 跨多
+    坐标（名字可能不同）全部列出、不替你选；钉不出回 `null`，标 unknown。字段命中自动带取值语义：
+    下拉/枚举字段给 `combo_items`（存储值→中文），基础资料/组织等引用字段给 `ref_entity`
+    （引用的目标单据，查不到则给 `ref_entity_id` 原始 oid）——不用再猜枚举含义或把引用字段当成
+    数据本身。
     """
     from ..report import resolve_fields
 
     conn = _open()
     try:
-        return resolve_fields.resolve_fields(conn, keys)
+        return resolve_fields.resolve_fields(conn, keys, kind=kind)
     finally:
         conn.close()
 

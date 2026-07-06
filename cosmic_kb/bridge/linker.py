@@ -105,6 +105,8 @@ class BridgeResult:
     plugin_total: int = 0          # 元数据插件绑定总条数（含跨表单重复）
     code_prefixes: dict[str, int] = field(default_factory=dict)
     meta_prefixes: dict[str, int] = field(default_factory=dict)
+    # 全源码 FQN → 命中的苍穹插件基类名（不筛是否被元数据绑定，孤儿 plugin_base 是其子集）。
+    plugin_bases: dict[str, str] = field(default_factory=dict)
 
     # ── 便捷分组（按 status）──────────────────────────────────────
     def _by(self, status: BindStatus) -> list[Binding]:
@@ -245,13 +247,16 @@ def link(
         b.note = "project 插件，源码树未找到对应 FQN/类名（可能源码未给全）"
         result.bindings.append(b)
 
-    # 孤儿：所有源码顶层 FQN 中，未被任何绑定命中的。打轻量角色标签。
-    # 先做插件基类传递闭包：识别「继承了苍穹插件基类」的类型简单名（含经过项目中间基类）。
+    # 插件基类传递闭包：识别「继承了苍穹插件基类」的类型简单名（含经过项目中间基类）。
+    # 对全部源码 FQN 计算（不筛 bound_fqns）——已绑定元数据的插件类同样需要 plugin_base，
+    # 否则 source_class.plugin_base 对已注册插件永远是 NULL（见 issue 1）。
     plugin_simple = namespace.resolve_plugin_classes(index)
     for unit in index.units:
         for fqn, simple in zip(unit.all_fqns, unit.all_types):
+            base = plugin_simple.get(simple)
+            if base:
+                result.plugin_bases[fqn] = base
             if fqn not in bound_fqns:
-                base = plugin_simple.get(simple)
                 result.orphans.append(
                     OrphanClass(
                         fqn=fqn, relpath=unit.relpath, package=unit.package,

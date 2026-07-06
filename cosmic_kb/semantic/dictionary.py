@@ -64,6 +64,11 @@ class FieldEntry:
     level: str | None
     kind: str | None
     field_type: str | None = None   # XML 标签名（MulBasedataField/BasedataField/...），判 getDynamicObjectCollection 取值语义的精确信号
+    uid: str | None = None                              # field 表 uid（关联 combo_items）
+    ref_entity_id: str | None = None                    # 基础资料引用字段 <BaseEntityId> 原始 oid
+    ref_form_key: str | None = None                     # oid 反查命中的目标单据 key（解不出为 None）
+    ref_form_name: str | None = None                    # 目标单据中文名
+    combo_items: tuple[tuple[str | None, str | None], ...] = ()  # 下拉选项 (value, caption) 列表
 
 
 @dataclass(frozen=True)
@@ -155,11 +160,18 @@ class Lexicon:
             for r in conn.execute("SELECT key,name,form_type FROM form")
             if r["key"]
         ]
+        combo_by_uid: dict[str, list[tuple[str | None, str | None]]] = {}
+        for r in conn.execute("SELECT field_uid,value,caption FROM field_combo_item"):
+            combo_by_uid.setdefault(r["field_uid"], []).append((r["value"], r["caption"]))
+
         self.fields = [
             FieldEntry(r["key"], r["name"], r["form_key"], form_names.get(r["form_key"]),
-                       r["entity_key"], r["level"], r["kind"], r["field_type"])
+                       r["entity_key"], r["level"], r["kind"], r["field_type"],
+                       r["uid"], r["ref_entity_id"], r["ref_form_key"], r["ref_form_name"],
+                       tuple(combo_by_uid.get(r["uid"], ())))
             for r in conn.execute(
-                "SELECT key,name,form_key,entity_key,level,kind,field_type FROM field")
+                "SELECT key,name,form_key,entity_key,level,kind,field_type,"
+                "uid,ref_entity_id,ref_form_key,ref_form_name FROM field")
             if r["key"]
         ]
         self.entities = [

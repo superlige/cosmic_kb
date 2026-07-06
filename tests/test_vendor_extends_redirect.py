@@ -76,10 +76,15 @@ def test_field_trace_compact_notes_extension_alias_redirect(tmp_path):
     assert "bd_customer" in compact["note"]
 
 
-def test_field_trace_without_form_filter_unaffected(tmp_path):
-    """不带 --form 的裸字段查询不受别名机制影响（别名行本身没有字段，不会污染结果）。"""
+def test_field_trace_bare_query_ambiguous_and_not_polluted_by_alias(tmp_path):
+    """cqkd_amount 跨单据定义，裸查询触发消歧（不会跑到扩展别名判断那段代码）；
+    单坐标精确查询的 note 也不会被别名机制污染。"""
     db = make_kb(tmp_path)
     _add_extension_alias(db)
     conn = store.open_kb(db)
     ft = field_trace.field_trace(conn, "cqkd_amount")
-    assert ft["note"] is None or "扩展别名" not in ft["note"]
+    assert ft["status"] == "need_clarification"
+    assert "扩展别名" not in (ft.get("note") or "")
+
+    ftp = field_trace.field_trace(conn, "cqkd_amount", form_key="cqkd_assetcard")
+    assert ftp["note"] is None or "扩展别名" not in ftp["note"]

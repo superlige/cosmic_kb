@@ -589,7 +589,8 @@ def test_field_trace_coarse_only_filtering(tmp_path: Path):
         conn.execute("INSERT INTO coarse_field_hit VALUES(?,?,?,?)",
                      ("cqkd_head", "wild/Nowhere.java", 999, "literal"))              # 仅粗扫见 → 保留
         conn.commit()
-        cs = field_trace.field_trace(conn, "cqkd_head")["coarse"]
+        # cqkd_head 跨 cqkd_bill/cqkd_bill2 两单据定义，裸查询会反问消歧；加 form_key 绕开。
+        cs = field_trace.field_trace(conn, "cqkd_head", form_key="cqkd_bill")["coarse"]
         # 高精度也记被剔除，只剩 wild/Nowhere.java 这一条仅粗扫见（且非强信号、非常量类）。
         assert cs["coarse_only"] == 1 and cs["idiom"] == 0 and cs["const_excluded"] == 0
         locs = {(l["relpath"], l["line"]) for l in cs["locations"]}
@@ -601,7 +602,7 @@ def test_field_trace_coarse_only_filtering(tmp_path: Path):
             "INSERT INTO source_class VALUES(?,?,?,?,?,?,?,?)",
             ("wild.Nowhere", "Nowhere", "wild", "wild/Nowhere.java", None, 1, "constant", None))
         conn.commit()
-        cs2 = field_trace.field_trace(conn, "cqkd_head")["coarse"]
+        cs2 = field_trace.field_trace(conn, "cqkd_head", form_key="cqkd_bill")["coarse"]
         assert cs2["coarse_only"] == 0 and cs2["const_excluded"] == 1
     finally:
         conn.close()
@@ -736,7 +737,7 @@ def test_unbound_webapi_entry(tmp_path: Path):
 def test_validator_entry(tmp_path: Path):
     """独立校验器（AbstractValidator）识别为 kind='validator'：validate() 作入口、读字段被抓到。
 
-    回归 docs/动作车道词表.md 附录 B 的盲区：此前校验器落 orphan_role='unknown'、
+    回归 docs/参考手册/动作车道词表.md 附录 B 的盲区：此前校验器落 orphan_role='unknown'、
     plugin_type='service'、plugin_method 全 helper、bill/plugin 看不见。修复后：
       * field_access.plugin_type='validator'、event_method/phase='validate'；
       * 读到的字段 key 经反查回填来源单据（校验器读单据字段、不写）；
@@ -939,15 +940,18 @@ def test_list_dynamicobject_param_source_propagation(tmp_path: Path):
 
 
 def test_field_trace_coordinate_grouping(tmp_path: Path):
-    """同字段跨单据 → 按实体坐标分组；form 过滤缩到单个坐标。"""
+    """同字段跨单据 → 裸查询反问消歧；form 过滤缩到单个坐标。"""
     db, _ = _build(tmp_path)
     conn = store.open_kb(db)
     try:
         ft = field_trace.field_trace(conn, "cqkd_head")
-        forms = {g["form_key"] for g in ft["groups"]}
-        assert {"cqkd_bill", "cqkd_bill2"} <= forms              # 两单据各成一组
-        assert ft["summary"]["coords"] >= 2
+        assert ft["status"] == "need_clarification"
+        forms = {o["form_key"] for o in ft["occurrences"]}
+        assert {"cqkd_bill", "cqkd_bill2"} <= forms              # 两单据都有定义，需指定单据
         narrowed = field_trace.field_trace(conn, "cqkd_head", form_key="cqkd_bill")
         assert {g["form_key"] for g in narrowed["groups"]} == {"cqkd_bill"}
+        # 已给 form_key 后，occurrences（定义坐标菜单）只留本单据——另一张单据的同名字段
+        # 定义对"已知道查哪张单据"的排障者是噪音，不应再混进来（2026-07-05 收窄）。
+        assert {o["form_key"] for o in narrowed["occurrences"]} == {"cqkd_bill"}
     finally:
         conn.close()

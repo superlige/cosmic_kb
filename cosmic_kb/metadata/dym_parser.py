@@ -1,7 +1,7 @@
 """阶段 2 · 单 dym 三类解析器（统一入口）。
 
 把单据 / 基础资料 / 动态表单三类 dym 统一解析成 `MetaModel`（见 model.py）。
-解析机制依据 docs/阶段验收.md「样例结构勘探结论」逐条对齐：
+解析机制依据 docs/核心/阶段验收.md「样例结构勘探结论」逐条对齐：
 
     DeployMetadata → DesignMetas
       ├─ DesignFormMeta   → DataXml → FormMetadata   → Items  布局/UI + 插件

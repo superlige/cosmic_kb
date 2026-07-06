@@ -33,7 +33,7 @@ key 多义（罕见）标 ambiguous、不擅自选一个。
 
 **MCP 层退役（2026-07-05）**：本模块原有一层专供 MCP 的紧凑投影（两步取证协议 + 字节预算分页），
 随 MCP `read_source` 工具一并下线——段二改为宿主自带 reader 读源码 + `resolve_fields` 精确核对
-（见 `docs/read_source字段名解析逻辑.md` 顶部说明、`docs/阶段验收.md` 对应条目）。本文件只保留
+（见 `docs/参考手册/read_source字段名解析逻辑.md` 顶部说明、`docs/核心/阶段验收.md` 对应条目）。本文件只保留
 CLI `cosmic_kb source` 用到的富模式（`read_source()`，全文盲扫 + 三档消歧），不再区分 `keys` 档位。
 
 延续 report 包约定：dict 在前（供 --json），`render_*` 文本在后。

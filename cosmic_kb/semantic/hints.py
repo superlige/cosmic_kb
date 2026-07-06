@@ -9,7 +9,7 @@
 任何宿主钩子，只焊在我们自己工具的返回值（唯一所有 MCP host 都一定读的硬信息）。
 
 （原还包含"已核对字段名"自动标注一半——2026-07-05 随 read_source MCP 工具退役一并砍掉，改为
-模型自己读源码识别字段/实体 key 后调 `resolve_fields` 精确核对，见 `docs/阶段验收.md` 对应条目。）
+模型自己读源码识别字段/实体 key 后调 `resolve_fields` 精确核对，见 `docs/核心/阶段验收.md` 对应条目。）
 
 本模块是纯逻辑（只读 KB / 纯映射），report 与 context 层都复用，不反向依赖 mcp。
 事件→主题映射与 `mcp.server.WHEN_TO_USE` 同一套主题名（已接受其轻微漂移代价，见 server 注释）。

@@ -1,13 +1,15 @@
-"""编排层（dbmeta/sync.py）验收测试——build --db-config 自动增量同步本项目二开元数据。
+"""编排层（dbmeta/sync.py）验收测试——build --db-config 自动全量同步本项目二开元数据。
 
 用假 DbMetaReader（monkeypatch，同 test_dbmeta_integrate.py 的 `_FakeReader` 风格）
 避免真连库，只验证编排逻辑：
     ① resolve_isv：显式给的直接采信不查库；候选唯一自动用；候选 >1 靠本地前缀消歧；
        仍歧义/零候选一律 IsvAmbiguousError，绝不静默猜一个。
     ② sync_own_isv_metadata：同 key 整条替换（不是 merge_vendor_extension 的父子并集
-       语义，旧字段不残留）；新 key 直接 append；转换规则同一套替换逻辑；
-       since_ts=None 时查询不带时间过滤；server_now_iso 必须先于变更查询调用
-       （水位时序正确性）；零变更时 sync_ts 仍推进、notice 如实提示。
+       语义，旧字段不残留）；新 key 直接 append；转换规则同一套替换逻辑；变更查询
+       固定传 since_ts=None（每次全量，2026-07-05 修复：增量只抓变更会让未变更的
+       自家实体在 build 幂等重建时缺席，见 dbmeta/sync.py 模块docstring）；
+       server_now_iso 必须先于变更查询调用（水位时序正确性）；库里查不到任何内容时
+       notice 如实提示。
 """
 
 from __future__ import annotations
@@ -126,7 +128,7 @@ def test_sync_replaces_existing_key_not_merge_additively(monkeypatch):
     fake = _FakeSyncReader(isv_counts={"cqkd": 1}, form_entity_map={"cqkd_a": new})
     monkeypatch.setattr(sync, "DbMetaReader", fake)
 
-    result = sync.sync_own_isv_metadata([old], config=object(), isv="cqkd", since_ts=None)
+    result = sync.sync_own_isv_metadata([old], config=object(), isv="cqkd")
 
     assert len(result.models) == 1
     assert result.models[0] is new
@@ -139,7 +141,7 @@ def test_sync_appends_brand_new_key_not_previously_local(monkeypatch):
     fake = _FakeSyncReader(isv_counts={"cqkd": 1}, form_entity_map={"cqkd_c": brand_new})
     monkeypatch.setattr(sync, "DbMetaReader", fake)
 
-    result = sync.sync_own_isv_metadata([keep], config=object(), isv="cqkd", since_ts=None)
+    result = sync.sync_own_isv_metadata([keep], config=object(), isv="cqkd")
 
     assert {m.key for m in result.models} == {"cqkd_b", "cqkd_c"}
 
@@ -152,17 +154,20 @@ def test_sync_covers_convert_rule_replace_by_fid_key(monkeypatch):
     fake = _FakeSyncReader(isv_counts={"cqkd": 1}, convert_map={"fid1": new_rule})
     monkeypatch.setattr(sync, "DbMetaReader", fake)
 
-    result = sync.sync_own_isv_metadata([old_rule], config=object(), isv="cqkd", since_ts=None)
+    result = sync.sync_own_isv_metadata([old_rule], config=object(), isv="cqkd")
 
     assert len(result.models) == 1
     assert result.models[0].name == "新规则"
 
 
-def test_sync_since_ts_none_passed_through_to_change_queries(monkeypatch):
+def test_sync_always_queries_full_isv_key_set_with_since_ts_none(monkeypatch):
+    """回归锁（2026-07-05 修复）：不管上一次同步是什么时候，变更查询固定传 since_ts=None
+    （该 isv 下全量）——否则未变更的自家实体这一轮会在 models 里缺席，build 幂等重建时
+    要么被 vendor 兜底误判成"原厂"，要么直接从 KB 消失（真实翻车：cqkd_ht 等 132 个）。"""
     fake = _FakeSyncReader(isv_counts={"cqkd": 1})
     monkeypatch.setattr(sync, "DbMetaReader", fake)
 
-    sync.sync_own_isv_metadata([], config=object(), isv="cqkd", since_ts=None)
+    sync.sync_own_isv_metadata([], config=object(), isv="cqkd")
 
     fe_call = next(c for c in fake.calls if c[0] == "list_changed_form_and_entity_keys")
     cr_call = next(c for c in fake.calls if c[0] == "list_changed_convert_rule_ids")
@@ -175,28 +180,28 @@ def test_sync_calls_server_now_before_change_queries(monkeypatch):
     fake = _FakeSyncReader(isv_counts={"cqkd": 1})
     monkeypatch.setattr(sync, "DbMetaReader", fake)
 
-    sync.sync_own_isv_metadata([], config=object(), isv="cqkd", since_ts=None)
+    sync.sync_own_isv_metadata([], config=object(), isv="cqkd")
 
     kinds = [c[0] for c in fake.calls]
     assert kinds.index("server_now_iso") < kinds.index("list_changed_form_and_entity_keys")
     assert kinds.index("server_now_iso") < kinds.index("list_changed_convert_rule_ids")
 
 
-def test_sync_zero_changes_still_returns_sync_ts_and_notice(monkeypatch):
+def test_sync_zero_hits_still_returns_sync_ts_and_notice(monkeypatch):
     fake = _FakeSyncReader(isv_counts={"cqkd": 1}, server_now="2026-07-05T12:00:00")
     monkeypatch.setattr(sync, "DbMetaReader", fake)
 
-    result = sync.sync_own_isv_metadata([], config=object(), isv="cqkd", since_ts="2026-07-01T00:00:00")
+    result = sync.sync_own_isv_metadata([], config=object(), isv="cqkd")
 
     assert result.sync_ts == "2026-07-05T12:00:00"
     assert result.models == []
-    assert any("未同步到任何变更" in n for n in result.notices)
+    assert any("底层库未查到任何" in n for n in result.notices)
 
 
 def test_sync_resolves_isv_when_not_explicit(monkeypatch):
     fake = _FakeSyncReader(isv_counts={"kingdee": 500, "cqkd": 340})
     monkeypatch.setattr(sync, "DbMetaReader", fake)
 
-    result = sync.sync_own_isv_metadata([], config=object(), isv=None, since_ts=None)
+    result = sync.sync_own_isv_metadata([], config=object(), isv=None)
 
     assert result.isv == "cqkd"

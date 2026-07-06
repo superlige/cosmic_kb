@@ -1,7 +1,7 @@
 """自包含包验收：运行期资产经 importlib.resources 定位，**不依赖 parents[1] 同级目录布局**。
 
 这组用例模拟「装进 site-packages 后」的取数路径——只走 `cosmic_kb._assets` 的 resources 访问器，
-不碰 `PROJECT_ROOT`，确保资产随 wheel 走、能被 uvx/.mcpb 消费（docs/分发与多agent接入方案.md §4）。
+不碰 `PROJECT_ROOT`，确保资产随 wheel 走、能被 uvx/.mcpb 消费（docs/设计方案/分发与多agent接入方案.md §4）。
 """
 
 from __future__ import annotations

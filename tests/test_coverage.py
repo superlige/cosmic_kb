@@ -42,7 +42,11 @@ def _kb_with_fields(tmp_path: Path) -> sqlite3.Connection:
         ("f2::h::x", "f2", "h", "x", "X", None, "T", "entity", "header"),
         ("f2::h::y", "f2", "h", "y", "Y", None, "T", "entity", "header"),
     ]
-    conn.executemany("INSERT INTO field VALUES(?,?,?,?,?,?,?,?,?)", fields)
+    conn.executemany(
+        "INSERT INTO field(uid,form_key,entity_key,key,name,db_column,field_type,kind,level) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        fields,
+    )
 
     # field_access：f1.a 被写(落库,literal)、f1.b 被读(constant)；
     #   一条 form_key=NULL 的未定位写(ambiguous)；一条解析出元数据没有的 key 'zzz'。

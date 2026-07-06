@@ -5,7 +5,7 @@
 在**继承根模板**里（bos_billtpl / bos_basetpl），没随业务 dym 导出。本模块把模板解析成
 `hex oid → {key, name, operation_type}` 映射表，供 dym_parser 按 oid 回填操作语义。
 
-关键事实（见 docs/阶段验收.md）：
+关键事实（见 docs/核心/阶段验收.md）：
     - **标准操作 oid 不是平台全局，每类模板各一套**：同名 save，单据是 c91d5125000033ac，
       基础资料是 b599405400001aac。→ 回填必须按 ModelType 选对应模板，不能一张表通吃。
     - 抽操作 oid 必须取 `<Operation>` 的**直接子 `<Id>`**，不能取后代第一个 Id
@@ -49,7 +49,7 @@ def _parse_template_operations(root: Any) -> dict[str, OperationDef]:
     """从模板 XML 树抽取 oid → 操作语义。
 
     只认 `<Operations>` 容器的**直接子 `<Operation>`**，并取其**直接子** Id/Key/Name/
-    OperationType —— 避开块内嵌套元素的 Id（坑见 docs/阶段验收.md）。
+    OperationType —— 避开块内嵌套元素的 Id（坑见 docs/核心/阶段验收.md）。
     """
     result: dict[str, OperationDef] = {}
     for ops in root.iter("Operations"):

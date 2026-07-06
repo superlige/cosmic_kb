@@ -1,6 +1,6 @@
 """dbmeta —— 苍穹底层库元数据源（只读）。
 
-动机（docs/扩展元数据识别方案.md）：ISV 导出的 dym 只含扩展部分，原厂标准单据
+动机（docs/设计方案/扩展元数据识别方案.md）：ISV 导出的 dym 只含扩展部分，原厂标准单据
 （bd_customer 等）的完整元数据不在包里，导致扩展单据字段级排障"结构性半盲"。
 但平台底层库里躺着**全部** form/entity 元数据；直连库把这两张表的 fdata 取回、
 拼回 MetaModel，即可拿到原厂标准字段，补齐三个硬伤。
@@ -16,8 +16,8 @@
     discover.py    发现代码库里引用到、本地元数据没有的候选原厂 key（三类确定性信号：
                    扩展母体 / ORM 查询 / 操作执行，命中即必摄取）
     integrate.py   把 --vendor 指定的原厂 fnumber 拉取/合并进 build/bridge 的 models 列表
-    sync.py        build --db-config 自动增量同步本项目自己（二开）ISV 的 form/entity/
-                   转换规则变更（fmodifydate 判定，同 key 整条替换，非 vendor 合并语义）
+    sync.py        build --db-config 自动全量同步本项目自己（二开）ISV 当前的 form/entity/
+                   转换规则内容（同 key 整条替换，非 vendor 合并语义）
 """
 
 from .assemble import assemble_convert_rule, assemble_model

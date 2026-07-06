@@ -12,7 +12,7 @@ from cosmic_kb.bridge import linker, namespace
 from cosmic_kb.graph import store
 from cosmic_kb.ingest import scanner
 from cosmic_kb.metadata.model import (
-    MetaEntity, MetaField, MetaModel, MetaPlugin,
+    ComboItem, MetaEntity, MetaField, MetaModel, MetaPlugin,
 )
 from cosmic_kb.report import project_map
 
@@ -172,6 +172,29 @@ def test_source_class_orphan_flag(tmp_path: Path):
         conn.close()
 
 
+def test_source_class_plugin_base_for_bound_class(tmp_path: Path):
+    """issue 1：已绑定元数据的插件类，source_class.plugin_base 也要非空（此前只有孤儿才有）。"""
+    _write(tmp_path / "AuditOp.java",
+           "package cqspb.op;\n"
+           "public class AuditOp extends AbstractOperationServicePlugIn {}\n")
+    scan = scanner.scan(tmp_path)
+    models = [_model("cqkd_x", "X", "cqkd_assets", [_plugin("cqspb.op.AuditOp", ptype="op")])]
+    index = namespace.build_index(scan)
+    bridge = linker.link(scan, models, index=index)
+    mm = project_map.module_map(scan, models, bridge, index=index)
+    db = tmp_path / "kb2.db"
+    store.build_kb(scan, models, bridge, mm, db, index=index)
+    conn = store.open_kb(db)
+    try:
+        row = conn.execute(
+            "SELECT is_orphan,plugin_base FROM source_class WHERE fqn=?",
+            ("cqspb.op.AuditOp",)).fetchone()
+        assert row["is_orphan"] == 0
+        assert row["plugin_base"] == "AbstractOperationServicePlugIn"
+    finally:
+        conn.close()
+
+
 def test_fts_search(tmp_path: Path):
     db, _ = _build(tmp_path)
     conn = store.open_kb(db)
@@ -183,6 +206,135 @@ def test_fts_search(tmp_path: Path):
         # 按类名检索源码类。
         hits2 = store.search(conn, "AssetCardService")
         assert any(h["kind"] == "class" for h in hits2)
+    finally:
+        conn.close()
+
+
+def test_combo_items_persisted(tmp_path: Path):
+    """下拉字段的 ComboItem 落进 field_combo_item 表，按 field.uid 关联。"""
+    scan = scanner.scan(tmp_path)
+    models = [
+        _model("cqkd_bill", "单据", "cqkd_assets", [],
+               entities=[MetaEntity("BillEntity", "cqkd_bill", "单据主体",
+                                    "1", "header", None, "t_bill")],
+               fields=[MetaField(
+                   "ComboField", "cqkd_status", "状态", "fk_status", "f1",
+                   None, "entity", "header", "cqkd_bill",
+                   combo_items=[ComboItem("是", "1"), ComboItem("否", "0")],
+               )]),
+    ]
+    index = namespace.build_index(scan)
+    bridge = linker.link(scan, models, index=index)
+    mm = project_map.module_map(scan, models, bridge, index=index)
+    db = tmp_path / "kb.db"
+    counts = store.build_kb(scan, models, bridge, mm, db, index=index)
+    assert counts["field_combo_item"] == 2
+    conn = store.open_kb(db)
+    try:
+        rows = sorted(
+            (r["value"], r["caption"])
+            for r in conn.execute("SELECT value,caption FROM field_combo_item")
+        )
+        assert rows == [("0", "否"), ("1", "是")]
+    finally:
+        conn.close()
+
+
+def test_basedata_ref_resolved_when_target_form_in_same_kb(tmp_path: Path):
+    """BaseEntityId 命中同批 models 里另一表单的实体 → ref_form_key/ref_form_name 回填。"""
+    scan = scanner.scan(tmp_path)
+    models = [
+        _model("cqkd_org", "组织", "cqkd_bd", [],
+               entities=[MetaEntity("BaseEntity", "cqkd_org", "组织",
+                                    "orgoid123", "header", None, "t_org")]),
+        _model("cqkd_bill", "单据", "cqkd_assets", [],
+               entities=[MetaEntity("BillEntity", "cqkd_bill", "单据主体",
+                                    "1", "header", None, "t_bill")],
+               fields=[MetaField(
+                   "OrgField", "cqkd_orgproperty", "所属组织", "fk_org", "f1",
+                   None, "entity", "header", "cqkd_bill",
+                   basedata_id="orgoid123",
+               )]),
+    ]
+    index = namespace.build_index(scan)
+    bridge = linker.link(scan, models, index=index)
+    mm = project_map.module_map(scan, models, bridge, index=index)
+    db = tmp_path / "kb.db"
+    store.build_kb(scan, models, bridge, mm, db, index=index)
+    conn = store.open_kb(db)
+    try:
+        row = conn.execute(
+            "SELECT ref_entity_id,ref_form_key,ref_form_name FROM field WHERE key='cqkd_orgproperty'"
+        ).fetchone()
+        assert row["ref_entity_id"] == "orgoid123"
+        assert row["ref_form_key"] == "cqkd_org"
+        assert row["ref_form_name"] == "组织"
+    finally:
+        conn.close()
+
+
+def test_basedata_ref_unresolved_when_target_not_in_kb(tmp_path: Path):
+    """BaseEntityId 在本次建库范围内查不到目标实体 → ref_form_key/name 留 NULL，raw oid 仍透传。"""
+    scan = scanner.scan(tmp_path)
+    models = [
+        _model("cqkd_bill", "单据", "cqkd_assets", [],
+               entities=[MetaEntity("BillEntity", "cqkd_bill", "单据主体",
+                                    "1", "header", None, "t_bill")],
+               fields=[MetaField(
+                   "BasedataField", "cqkd_customer", "客户", "fk_cust", "f1",
+                   None, "entity", "header", "cqkd_bill",
+                   basedata_id="unknown-oid-xyz",
+               )]),
+    ]
+    index = namespace.build_index(scan)
+    bridge = linker.link(scan, models, index=index)
+    mm = project_map.module_map(scan, models, bridge, index=index)
+    db = tmp_path / "kb.db"
+    store.build_kb(scan, models, bridge, mm, db, index=index)
+    conn = store.open_kb(db)
+    try:
+        row = conn.execute(
+            "SELECT ref_entity_id,ref_form_key,ref_form_name FROM field WHERE key='cqkd_customer'"
+        ).fetchone()
+        assert row["ref_entity_id"] == "unknown-oid-xyz"
+        assert row["ref_form_key"] is None
+        assert row["ref_form_name"] is None
+    finally:
+        conn.close()
+
+
+def test_basedata_ref_ambiguous_id_not_guessed(tmp_path: Path):
+    """同一 oid 被两个不同表单的实体使用 → 判 ambiguous，ref_form_key 不擅自选一个（红线#4）。"""
+    scan = scanner.scan(tmp_path)
+    models = [
+        _model("cqkd_form_a", "单据A", "cqkd_assets", [],
+               entities=[MetaEntity("BillEntity", "cqkd_form_a", "单据A主体",
+                                    "dup-oid", "header", None, "t_a")]),
+        _model("cqkd_form_b", "单据B", "cqkd_assets", [],
+               entities=[MetaEntity("BillEntity", "cqkd_form_b", "单据B主体",
+                                    "dup-oid", "header", None, "t_b")]),
+        _model("cqkd_bill", "单据", "cqkd_assets", [],
+               entities=[MetaEntity("BillEntity", "cqkd_bill", "单据主体",
+                                    "1", "header", None, "t_bill")],
+               fields=[MetaField(
+                   "BasedataField", "cqkd_ref", "引用", "fk_ref", "f1",
+                   None, "entity", "header", "cqkd_bill",
+                   basedata_id="dup-oid",
+               )]),
+    ]
+    index = namespace.build_index(scan)
+    bridge = linker.link(scan, models, index=index)
+    mm = project_map.module_map(scan, models, bridge, index=index)
+    db = tmp_path / "kb.db"
+    store.build_kb(scan, models, bridge, mm, db, index=index)
+    conn = store.open_kb(db)
+    try:
+        row = conn.execute(
+            "SELECT ref_entity_id,ref_form_key,ref_form_name FROM field WHERE key='cqkd_ref'"
+        ).fetchone()
+        assert row["ref_entity_id"] == "dup-oid"
+        assert row["ref_form_key"] is None
+        assert row["ref_form_name"] is None
     finally:
         conn.close()
 

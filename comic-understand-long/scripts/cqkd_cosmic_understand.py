@@ -31,7 +31,7 @@ DEFAULT_CONFIG_EXAMPLE = SKILL_ROOT / ".cosmic-understand" / "config.example.jso
 
 
 def _refs_root() -> Path:
-    """references/rules 已下沉进 cosmic_kb 包（docs/分发与多agent接入方案.md §2，单一源）。
+    """references/rules 已下沉进 cosmic_kb 包（docs/设计方案/分发与多agent接入方案.md §2，单一源）。
 
     优先从已安装的 `cosmic_kb.semantics` 取（含 references/ 与 rules/ 两子目录）；取不到
     （未装包）才回退 skill 同级目录（老布局）。注意：本路由表里的 rel 形如 `references/...`、

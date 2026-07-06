@@ -46,7 +46,7 @@ _COSMIC_PLUGIN_BASES = frozenset({
     # 校验器：通过操作插件 onAddValidators 的 e.addValidator(new XxxValidator()) 在代码里挂载，
     # 不进元数据绑定 → 此前一律落成 orphan_role='unknown'、plugin_type='service'，bill/plugin
     # 看不到。它们承载"提交/审核报错"的关键校验逻辑（读单据字段 + addErrorMessage），是排障真凶，
-    # 必须识别为插件（kind=validator），见 docs/动作车道词表.md 附录 B。
+    # 必须识别为插件（kind=validator），见 docs/参考手册/动作车道词表.md 附录 B。
     "AbstractValidator",
     "AbstractPrintServicePlugin", "AbstractPrintPlugin",
     "AbstractReportListDataPlugin", "AbstractReportTreeDataPlugin", "AbstractReportFormPlugin",

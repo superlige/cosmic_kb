@@ -6,7 +6,7 @@
 
 KB 是两段之间的契约：段一写 KB，段二读 KB。
 
-子包与开发阶段映射（详见 ../docs/开发计划.md）：
+子包与开发阶段映射（详见 ../docs/核心/开发计划.md）：
     ingest    阶段1  源码摄取：扫目录、编码探测、排除 target/build/jar
     metadata  阶段2  元数据解析：dym/zip → 实体/字段/分录/绑定
     java      阶段1/5/6/7  Java 静态分析：tree-sitter、事件、字段访问、路径、入库

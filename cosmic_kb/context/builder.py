@@ -64,6 +64,13 @@ def build_context(conn, rq: ResolvedQuery) -> dict[str, Any]:
 def _ctx_field(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, Any]:
     ft = ft_mod.field_trace(
         conn, rq.field_key, form_key=rq.form_key, entry_key=rq.entry_key, level=rq.level)
+    # 兜底：正常路径下 resolver 的跨单据歧义检查已在到达这里前反问过；这里防的是
+    # 直接传 form_key=None 绕过 resolver 的调用方（field_trace 自身也有同一道闸门）。
+    if ft.get("status") == "need_clarification":
+        base["status"] = "need_clarification"
+        base["evidence"] = ft
+        base["advice"] = [ft.get("note") or "字段在多个单据都有定义，请指定单据。"]
+        return base
     base["status"] = "ok"
     base["evidence"] = ft
     s = ft["summary"]
@@ -111,6 +118,20 @@ def _ctx_bill(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, Any]:
     return base
 
 
+def _apply_event_path(row: dict[str, Any]) -> None:
+    """把 field_access.path（JSON 调用链）拆成 root_event/actual_method 焊进返回值。
+
+    `event_method` 只落根事件方法，真正写字段的行可能在 BFS 追下去的 helper 方法里
+    （见 java/analyze.py:_walk_event 的 path），此前 context 层没选这一列，字段级证据
+    定位不到实际写入的 helper（见 issue 2）。对齐 report/field_trace.py 的现成解析方式：
+    path 是 JSON 字符串、单元素 path 是常态，只有 len>1 才代表跨方法调用。
+    """
+    path = json.loads(row["path"]) if row.get("path") else []
+    row["path"] = path
+    row["root_event"] = path[0] if path else row.get("event_method")
+    row["actual_method"] = path[-1] if len(path) > 1 else None
+
+
 # ── 插件/类：解释（薄查询，只读 KB 表）────────────────────────────────────────
 def _ctx_plugin(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, Any]:
     fqn = rq.class_fqn
@@ -119,7 +140,9 @@ def _ctx_plugin(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, Any]
         "FROM source_class WHERE fqn=?", (fqn,)).fetchone()
     # 注册：该类绑定到哪些单据/操作（plugin 表）+ 桥接状态（binding 表）。
     registrations = [dict(r) for r in conn.execute(
-        "SELECT form_key,plugin_type,operation_key,operation_name FROM plugin WHERE class_name=?",
+        "SELECT p.form_key AS form_key, p.plugin_type AS plugin_type, p.operation_key AS operation_key,"
+        " p.operation_name AS operation_name, f.name AS form_name FROM plugin p "
+        "LEFT JOIN form f ON f.key = p.form_key WHERE p.class_name=?",
         (fqn,)).fetchall()]
     bindings = [dict(r) for r in conn.execute(
         "SELECT form_key,plugin_type,status,source_relpath,confidence,note FROM binding "
@@ -132,12 +155,13 @@ def _ctx_plugin(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, Any]
     # 字段读写：作为入口插件(plugin_fqn) 或 物理所在类(access_class) 触达的字段。
     accesses = [dict(r) for r in conn.execute(
         "SELECT DISTINCT field_key,form_key,level,entry_key,access,persists,event_method,plugin_type,"
-        "via,line,source_relpath,plugin_fqn,access_class FROM field_access "
+        "via,line,source_relpath,plugin_fqn,access_class,path FROM field_access "
         "WHERE plugin_fqn=? OR access_class=? ORDER BY access,field_key",
         (fqn, fqn)).fetchall()]
     # 事件语义路由焊进返回值（勿凭训练知识断时机入库）；字段中文名不再自动标注，需要调 resolve_fields。
     for a in accesses:
         a["semantics_topic"] = hints.event_topic(a.get("event_method"), a.get("plugin_type"))
+        _apply_event_path(a)
     for e in events:
         e["semantics_topic"] = hints.event_topic(e.get("method_name"))
     writers = [a for a in accesses if a["access"] == "write"]
@@ -165,7 +189,7 @@ def _ctx_plugin(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, Any]
         role = (cls["orphan_role"] if cls else None)
         if registrations:
             advice.append("注册归属：" + "、".join(
-                f"{r['form_key']}[{r['plugin_type']}]" +
+                f"{r['form_key']}「{r.get('form_name') or ''}」[{r['plugin_type']}]" +
                 (f"←{r['operation_key']}" if r["operation_key"] else "")
                 for r in registrations[:8]))
         elif role == "plugin":
@@ -199,12 +223,13 @@ def _ctx_operation(conn, rq: ResolvedQuery, base: dict[str, Any]) -> dict[str, A
         ph = ",".join("?" * len(fqns))
         touched = [dict(r) for r in conn.execute(
             f"SELECT field_key,level,entry_key,access,persists,plugin_fqn,plugin_type,access_class,"
-            f"event_method,line,source_relpath FROM field_access "
+            f"event_method,line,source_relpath,path FROM field_access "
             f"WHERE form_key=? AND plugin_fqn IN ({ph}) ORDER BY access,field_key",
             (form_key, *sorted(fqns))).fetchall()]
         # 事件语义路由焊进返回值；字段中文名不再自动标注，需要调 resolve_fields。
         for t in touched:
             t["semantics_topic"] = hints.event_topic(t.get("event_method"), t.get("plugin_type"))
+            _apply_event_path(t)
     writers = [t for t in touched if t["access"] == "write"]
     base["status"] = "ok" if op or plugins else "not_found"
     base["evidence"] = {
@@ -279,7 +304,7 @@ def _render_plugin(ev: dict[str, Any], max_list: int) -> list[str]:
         out.append("【注册归属】")
         for rg in ev["registrations"][:max_list]:
             op = f" ←{rg['operation_key']}" if rg.get("operation_key") else ""
-            out.append(f"  {rg['form_key']} [{rg['plugin_type']}]{op}")
+            out.append(f"  {rg['form_key']}「{rg.get('form_name') or ''}」 [{rg['plugin_type']}]{op}")
     if ev["events"]:
         out.append("【事件方法】")
         for e in ev["events"][:max_list]:
@@ -290,7 +315,10 @@ def _render_plugin(ev: dict[str, Any], max_list: int) -> list[str]:
         out.append(f"【写入字段】（前 {min(max_list, len(ev['writes']))}，中文名请调 resolve_fields 核对）")
         for w in ev["writes"][:max_list]:
             pf = {"yes": "✅落库", "no": "—内存", "unknown": "❓存疑"}.get(w["persists"], "")
-            out.append(f"  {w['field_key']:<26} {pf}  事件 {w['event_method']}  "
+            event_desc = f"事件 {w.get('root_event') or w['event_method']}"
+            if w.get("actual_method") and w["actual_method"] != w.get("root_event"):
+                event_desc += f" → 实际写入 {w['actual_method']}"
+            out.append(f"  {w['field_key']:<26} {pf}  {event_desc}  "
                        f"{w['source_relpath']}:{w['line']}")
     return out
 
@@ -307,7 +335,10 @@ def _render_operation(ev: dict[str, Any], max_list: int) -> list[str]:
         out.append(f"【字段触达】（前 {min(max_list, len(ev['field_access']))}，中文名请调 resolve_fields 核对）")
         for a in ev["field_access"][:max_list]:
             pf = {"yes": "✅落库", "no": "—内存", "unknown": "❓存疑", "na": ""}.get(a["persists"], "")
-            out.append(f"  {a['access']:<5} {a['field_key']:<26} {pf}  "
+            event_desc = f"事件 {a.get('root_event') or a.get('event_method')}"
+            if a.get("actual_method") and a["actual_method"] != a.get("root_event"):
+                event_desc += f" → 实际写入 {a['actual_method']}"
+            out.append(f"  {a['access']:<5} {a['field_key']:<26} {pf}  {event_desc}  "
                        f"{a['source_relpath']}:{a['line']}")
     return out
 

@@ -52,15 +52,26 @@ CREATE TABLE entity (
 
 -- ── 字段 ─────────────────────────────────────────────────────────────────────
 CREATE TABLE field (
-    uid         TEXT,                     -- 稳定唯一键（form_key + entity_key + key/id）
-    form_key    TEXT,
-    entity_key  TEXT,
-    key         TEXT,
-    name        TEXT,
-    db_column   TEXT,
-    field_type  TEXT,
-    kind        TEXT,                     -- entity/dynamic/basedata_prop/platform/inherited
-    level       TEXT
+    uid           TEXT,                   -- 稳定唯一键（form_key + entity_key + key/id）
+    form_key      TEXT,
+    entity_key    TEXT,
+    key           TEXT,
+    name          TEXT,
+    db_column     TEXT,
+    field_type    TEXT,
+    kind          TEXT,                   -- entity/dynamic/basedata_prop/platform/inherited
+    level         TEXT,
+    ref_entity_id TEXT,                   -- 基础资料/组织等引用字段的 <BaseEntityId> 原始 oid（诚实透传）
+    ref_form_key  TEXT,                   -- oid 反查命中的目标单据 key（解不出/歧义为 NULL，红线#4）
+    ref_form_name TEXT                    -- 目标单据中文名（同上）
+);
+
+-- ── 下拉/枚举选项（ComboField/MulComboField 的 Items/ComboItem）────────────────
+--   与 field 表分离而不塞 JSON 列（仿 java_constant 模式）：字段可有 0~N 项，独立表更好查询。
+CREATE TABLE field_combo_item (
+    field_uid   TEXT,                     -- 对应 field.uid
+    value       TEXT,                     -- 存储值
+    caption     TEXT                      -- 中文显示文本
 );
 
 -- ── 插件（界面/列表/操作）──────────────────────────────────────────────────
@@ -244,6 +255,7 @@ CREATE INDEX idx_facc_nullreason  ON field_access(null_reason);
 CREATE INDEX idx_coarse_field     ON coarse_field_hit(field_key);
 CREATE INDEX idx_javaconst_class  ON java_constant(class_name, const_name);
 CREATE INDEX idx_javaconst_name   ON java_constant(const_name);
+CREATE INDEX idx_combo_field      ON field_combo_item(field_uid);
 
 -- ── FTS5 全文检索（为阶段 9 NL 查询打底：中文名↔标识 / 字段 / 类名）──────────
 --   kind: form/entity/field/plugin/class —— 统一检索面，extra 放归属上下文（模块/表单）。

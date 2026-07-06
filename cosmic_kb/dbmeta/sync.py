@@ -1,4 +1,4 @@
-"""编排层：项目自己（二开）ISV 的增量元数据同步——`build --db-config` 自动触发。
+"""编排层：项目自己（二开）ISV 的元数据同步——`build --db-config` 自动触发。
 
 与 `dbmeta/integrate.py` 的区别（务必分清，两者不可混用）：
     目标      `integrate.py` 拉的是**原厂**标准单据（供扩展母体补全结构性半盲）；
@@ -7,13 +7,18 @@
     合并语义  `integrate.py` 遇到同 key 走 `merge_vendor_extension`（父子结构并集，
               双方字段/插件都留）；本模块遇到同 key 是"整条替换成 DB 上的最新版本"——
               旧版本里已经删掉/改名的字段继续留着就是残留脏数据，不能合并。
-    适用范围  `integrate.py` 服务 build 和 bridge；本模块**只服务 build**——增量判定
-              要靠 KB 的 `kb_meta` 记的上次同步水位，`bridge` 不建库、没有这个持久
-              状态，做不了"增量"，不接这个功能。
+    适用范围  `integrate.py` 服务 build 和 bridge；本模块**只服务 build**。
 
-增量判定用 `fmodifydate > since_ts`；`since_ts=None`（首次同步 / `--full-refresh`）
-自然退化成"该 isv 下全量"，同一套查询逻辑天然覆盖"新增二开元数据"和"纯 DB 零 zip
-冷启动建库"两个场景，不需要额外的全量枚举差集逻辑。
+每次都拉**该 isv 下当前完整**的 form/entity/转换规则集合（2026-07-05 修复：不再按
+`fmodifydate > since_ts` 只抓"自上次同步以来变更"的子集，`--full-refresh` 参数随之
+退役）。原因：`store.build_kb` 是"幂等重建"——每轮只用这一轮收集到的 `models` 重建
+整个 KB，不会拿上一次已建好的 KB 内容打底。如果同步只抓变更子集，未变更的自家实体
+这一轮就会在 `models` 里缺席，要么被 `dbmeta/integrate.py` 的三信号兜底摄取机制误判
+成"原厂只读引用"（`strip_vendor_plugins` 丢掉本该有的插件归属），要么干脆从重建后的
+KB 里消失——真实翻车：`cqkd_ht` 等 132 个自家二开实体在一次"零变更"的增量同步里全部
+被当成原厂摄取，见 `docs/核心/阶段验收.md`。当前项目规模（form 百余/entity 数百）一次批量
+`fnumber = ANY(%s)` 查询即可拉完，全量校验的开销可接受；`fmodifydate`/`since_ts` 这层
+状态因此不再需要。
 """
 
 from __future__ import annotations
@@ -114,32 +119,33 @@ def sync_own_isv_metadata(
     config: "DbConfig",
     *,
     isv: str | None,
-    since_ts: str | None,
     local_prefixes: Iterable[str] = (),
 ) -> SyncResult:
-    """按本项目二开 ISV，从底层库同步 form/entity/转换规则的变更（或全量）内容，
+    """按本项目二开 ISV，从底层库同步该 isv 下**当前完整**的 form/entity/转换规则内容，
     整条替换进 `models`（同 key 覆盖，新 key 追加），供 build 装库前调用。
+
+    不做"只抓变更"的增量筛选（模块docstring 已说明原因）——`list_changed_*` 系列查询
+    固定传 `since_ts=None`，天然退化成"该 isv 下全量"，复用已有的查询实现零改动。
     """
     with DbMetaReader(config) as reader:
         resolved = resolve_isv(reader, explicit=isv, local_prefixes=local_prefixes)
-        # 必须先拿水位、再查变更——否则同步过程中新提交的变更会被这一轮漏掉，
-        # 且下一轮 since_ts 已经晚于它，永久漏同步（宁可"多拿"不可"漏拿"）。
         sync_ts = reader.server_now_iso()
 
-        form_entity_keys = reader.list_changed_form_and_entity_keys(resolved, since_ts)
+        form_entity_keys = reader.list_changed_form_and_entity_keys(resolved, None)
         fresh_fe = reader.read_models_bulk(form_entity_keys) if form_entity_keys else {}
 
-        convert_ids = reader.list_changed_convert_rule_ids(resolved, since_ts)
+        convert_ids = reader.list_changed_convert_rule_ids(resolved, None)
         fresh_cr = reader.read_convert_rules_bulk(convert_ids) if convert_ids else {}
 
     result, (added_fe, replaced_fe) = _replace_by_key(list(models), fresh_fe)
     result, (added_cr, replaced_cr) = _replace_by_key(result, fresh_cr)
 
     notices = [
-        f"ISV={resolved!r} 同步 form/entity：新增 {added_fe} 个、替换 {replaced_fe} 个；"
-        f"转换规则：新增 {added_cr} 个、替换 {replaced_cr} 个"
+        f"ISV={resolved!r} 全量同步 form/entity：共 {len(fresh_fe)} 个"
+        f"（新增 {added_fe} 个、替换 {replaced_fe} 个）；"
+        f"转换规则：共 {len(fresh_cr)} 个（新增 {added_cr} 个、替换 {replaced_cr} 个）"
     ]
     if not fresh_fe and not fresh_cr:
-        notices.append(f"ISV={resolved!r} 本次未同步到任何变更")
+        notices.append(f"ISV={resolved!r} 底层库未查到任何 form/entity/转换规则")
 
     return SyncResult(models=result, isv=resolved, sync_ts=sync_ts, notices=notices)

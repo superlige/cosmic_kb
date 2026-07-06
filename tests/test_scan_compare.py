@@ -153,7 +153,11 @@ def _kb(tmp_path: Path) -> sqlite3.Connection:
         ("f1::h::e", "f1", "h", "e", "戊", None, "T", "entity", "header"),
         ("f1::h::id", "f1", "h", "id", "主键", None, "T", "platform", "header"),
     ]
-    conn.executemany("INSERT INTO field VALUES(?,?,?,?,?,?,?,?,?)", fields)
+    conn.executemany(
+        "INSERT INTO field(uid,form_key,entity_key,key,name,db_column,field_type,kind,level) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        fields,
+    )
 
     def fa(fkey, access):
         return ("f1", fkey, "header", None, "cqspb.P", "form", "cqspb.P",

@@ -5,7 +5,7 @@
 候选——三档置信（unique / resolved / ambiguous），杜绝把多张单据的同名字段平铺误导。
 
 MCP `read_source` 工具已于 2026-07-05 退役（段二改为宿主自带 reader + `resolve_fields` 精确核对，
-见 `docs/阶段验收.md` 对应条目），本文件只保留 CLI 富模式覆盖。
+见 `docs/核心/阶段验收.md` 对应条目），本文件只保留 CLI 富模式覆盖。
 
 复用 `_synthkb`（含 `cqkd_collateralstatus「抵押状态」`、`cqkd_entry「资产明细」`），再补两个**跨单据同名
 但中文名不同**的字段（消歧场景）+ 一个本文件 field_access 行 + 真实源文件 + source_args。

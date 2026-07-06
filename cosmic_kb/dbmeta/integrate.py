@@ -86,6 +86,18 @@ def apply_vendor_metadata(
         plain_vendor_by_fnumber = reader.read_models_bulk(plain_fnumbers) if plain_fnumbers else {}
 
     result = list(models)
+    # 同一个真实原厂实体可能被两类信号各自发现成两个不同的候选字符串：本地扩展 key 因
+    # 平台标识长度限制被截断，`detect_extension` 猜出的候选（信号①）本身也是截断的
+    # （如 "sim_original_bil"）；而源码里 ORM/操作调用直接写的是完整未截断字面量
+    # （如 "sim_original_bill"）——两者各自查库后 fmasterid/直查都会解析到同一个真实
+    # 母体 key。若不识别这种"同一真实实体、两个候选字符串"的情况，第二个候选会把第一个
+    # 候选刚合并出的模型当成"本地已有的同 key 模型"再合并一次：`merge_vendor_extension`
+    # 的实体去重只按对象身份跳过表头行，不按 key 去重非表头实体（分录/子分录），会导致
+    # 该实体的分录在最终 KB 里重复一份（真实翻车：sim_original_bil 信号=ext 与
+    # sim_original_bill 信号=orm 都指向同一张单，build 日志能看到两条各自的合并提示）。
+    # `produced_keys` 记录本次调用内已经产出/合并过的真实母体 key，后续候选一旦解析到
+    # 同一 key，直接在已产出的那份基础上继续合并（而不是拿新鲜查到的 vendor 再合并一次）。
+    produced_keys: set[str] = set()
     for fnumber in fnumbers:
         exts = ext_by_fnumber.get(fnumber, [])
         if exts:
@@ -100,13 +112,22 @@ def apply_vendor_metadata(
                 )
                 continue
             vendor = strip_vendor_plugins(vendor)
-            merged = merge_vendor_extension(vendor, exts)
+            real_key = vendor.key or fnumber
+            if real_key in produced_keys:
+                base = next(m for m in result if m.key == real_key)
+                result.remove(base)
+                merged = merge_vendor_extension(base, exts)
+                dup_note = "（与本次已处理的原厂内容为同一实体）"
+            else:
+                merged = merge_vendor_extension(vendor, exts)
+                dup_note = ""
             for ext in exts:
                 result.remove(ext)
-                result.append(build_extension_alias(ext, vendor.key or fnumber))
+                result.append(build_extension_alias(ext, real_key))
             result.append(merged)
+            produced_keys.add(real_key)
             notices.append(
-                f"原厂 fnumber={fnumber!r}（母体真实标识={vendor.key!r}）"
+                f"原厂 fnumber={fnumber!r}（母体真实标识={real_key!r}）{dup_note}"
                 f"已并入 {len(exts)} 个本地扩展模型"
                 f"（{', '.join(e.key or '?' for e in exts)}）"
             )
@@ -116,6 +137,13 @@ def apply_vendor_metadata(
                 notices.append(f"原厂 fnumber={fnumber!r} 在底层库未查到，跳过合并")
                 continue
             vendor = strip_vendor_plugins(vendor)
+            real_key = vendor.key or fnumber
+            if real_key in produced_keys:
+                notices.append(
+                    f"原厂 fnumber={fnumber!r} 与本次已处理的原厂内容（母体真实标识={real_key!r}）"
+                    "指向同一实体，跳过重复合并"
+                )
+                continue
             # 同 key 去重（2026-07-03 修复）：`fnumber` 未被 detect_extension 识别为标准
             # `_ext` 命名扩展，不代表本地一定没有同 key 模型——手动 `--vendor` 会绕过
             # 自动摄取那层 known_keys 过滤，若指定的 fnumber 恰好是本地已有 key（真实扩展但
@@ -123,18 +151,20 @@ def apply_vendor_metadata(
             # 里出现两份，建库时字段/实体被插入两遍（用户实测复现：同单据同字段返回两次）。
             # 走 `merge_vendor_extension` 而非直接丢弃本地份——保留本地可能存在的真实定制
             # 字段/插件，同时确保最终 key 唯一。
-            local_dupes = [m for m in result if m.key == fnumber]
+            local_dupes = [m for m in result if m.key == real_key]
             if local_dupes:
                 for m in local_dupes:
                     result.remove(m)
                 merged = merge_vendor_extension(vendor, local_dupes)
                 result.append(merged)
+                produced_keys.add(real_key)
                 notices.append(
                     f"原厂 fnumber={fnumber!r} 本地已存在 {len(local_dupes)} 个同 key 模型"
                     "（未被识别为标准 _ext 扩展命名），已并入原厂内容而非重复追加"
                 )
             else:
                 result.append(vendor)
+                produced_keys.add(real_key)
                 notices.append(
                     f"原厂 fnumber={fnumber!r} 未匹配到本地扩展，作为引用实体并入（无项目插件）"
                 )

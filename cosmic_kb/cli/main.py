@@ -266,26 +266,13 @@ def _apply_vendor_metadata_cli(args: argparse.Namespace, models: list, scan_resu
     return models
 
 
-def _read_prior_dbmeta_sync_ts(db_path: str) -> str | None:
-    """从旧 KB 的 `kb_meta.source_args`（JSON）里拆出上次 dbmeta 同步水位；
-    旧 KB 不存在/JSON 解析失败/没有这个键都返回 None（当作"首次同步"处理）。
-    """
-    from ..graph import store
+def _sync_own_isv_metadata_cli(args: argparse.Namespace, models: list):
+    """build 专用：`--db-config` 给了就自动按本项目二开 ISV 同步 form/entity/转换规则
+    的当前完整内容，整条替换进 `models`（同 key 覆盖，新 key 追加）。
 
-    raw = store.read_meta_tolerant(db_path, "source_args")
-    if not raw:
-        return None
-    try:
-        data = json.loads(raw)
-    except (TypeError, ValueError):
-        return None
-    ts = data.get("dbmeta_last_sync_ts")
-    return ts if isinstance(ts, str) else None
-
-
-def _sync_own_isv_metadata_cli(args: argparse.Namespace, models: list, db_path: str):
-    """build 专用：`--db-config` 给了就自动按本项目二开 ISV 增量同步 form/entity/
-    转换规则变更，整条替换进 `models`（同 key 覆盖，新 key 追加）。
+    每次都全量同步（不再区分"增量/全量"，`dbmeta/sync.py` 模块docstring 有完整原因）——
+    `build_kb` 幂等重建只用这一轮 `models` 建库，只抓变更子集会让未变更的自家实体这一轮
+    缺席，进而被 vendor 兜底机制误判成"原厂只读引用"或直接从 KB 里消失。
 
     没给 `--db-config` 时不触发（返回 `(models, None, None)`，纯 opt-in，同
     `_apply_vendor_metadata_cli` 的约定）。出错时返回非零 rc（int），调用方按
@@ -306,14 +293,12 @@ def _sync_own_isv_metadata_cli(args: argparse.Namespace, models: list, db_path: 
         print(f"错误: {exc}", file=sys.stderr)
         return 2
 
-    since_ts = None if getattr(args, "full_refresh", False) else _read_prior_dbmeta_sync_ts(db_path)
     local_prefixes = set(namespace.discover_meta_prefixes(models))
 
     try:
         result = sync_mod.sync_own_isv_metadata(
             models, db_cfg,
             isv=getattr(args, "isv", None),
-            since_ts=since_ts,
             local_prefixes=local_prefixes,
         )
     except sync_mod.IsvAmbiguousError as exc:
@@ -436,7 +421,7 @@ def _build_kb(args: argparse.Namespace, db_path: str) -> tuple[dict | None, int]
 
     sync_isv = sync_ts = None
     if getattr(args, "db_config", None):
-        outcome = _sync_own_isv_metadata_cli(args, models, db_path)
+        outcome = _sync_own_isv_metadata_cli(args, models)
         if isinstance(outcome, int):
             return None, outcome
         models, sync_isv, sync_ts = outcome
@@ -616,7 +601,7 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
         return rc
     conn = store.open_kb(db)
     try:
-        d = resolve_fields.resolve_fields(conn, args.keys)
+        d = resolve_fields.resolve_fields(conn, args.keys, kind=args.kind)
         if args.json:
             print(json.dumps(d, ensure_ascii=False, indent=2))
         else:
@@ -647,9 +632,10 @@ def _cmd_trace(args: argparse.Namespace) -> int:
             print(json.dumps(ft, ensure_ascii=False, indent=2))
         else:
             print(field_trace.render_field_trace(ft, max_list=args.max_list))
+        # 跨单据歧义需反问时返回非零退出码，方便脚本/Skill 判断"还要指定单据再查"。
+        return 3 if ft.get("status") == "need_clarification" else 0
     finally:
         conn.close()
-    return 0
 
 
 def _cmd_bill(args: argparse.Namespace) -> int:
@@ -836,7 +822,7 @@ def _cmd_db_meta_discover(args: argparse.Namespace) -> int:
 def _cmd_db_meta(args: argparse.Namespace) -> int:
     """从苍穹底层库（只读）按 fnumber 取 form+entity 元数据，合成 MetaModel。
 
-    动机见 docs/扩展元数据识别方案.md：拿回原厂标准单据的完整字段，补齐扩展单据半盲。
+    动机见 docs/设计方案/扩展元数据识别方案.md：拿回原厂标准单据的完整字段，补齐扩展单据半盲。
     """
     from ..dbmeta import DbMetaReader, load_config, sample_config_text
     from ..dbmeta.config import find_config_file, DEFAULT_CONFIG_NAMES
@@ -1024,17 +1010,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--db-config", default=None,
         help="dbmeta 连接配置文件路径（默认就近找 cosmic_db.json，同 db-meta --config）；"
              "给了即自动按三信号发现并摄取代码库引用到的原厂实体，"
-             "同时自动增量同步本项目自己（二开）ISV 的 form/entity/转换规则变更",
+             "同时自动全量同步本项目自己（二开）ISV 当前的 form/entity/转换规则内容",
     )
     build.add_argument(
         "--isv", default=None, metavar="ISV",
         help="显式指定本项目二开 ISV（跳过自动发现/消歧）；不给且候选唯一时自动使用，"
              "候选 >1 个且无法用本地元数据消歧时报错列出候选（各自表单数），需手动指定",
-    )
-    build.add_argument(
-        "--full-refresh", action="store_true",
-        help="忽略 KB 里记录的上次同步水位，强制该 ISV 下 form/entity/转换规则全量拉取"
-             "（而非仅拉变更集）；仅在给了 --db-config 时生效",
     )
     build.set_defaults(func=_cmd_build, creating=True)
 
@@ -1098,6 +1079,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="一个或多个字段/分录容器/单据标识，如 cqkd_zjjnqk cqkd_zdfl cqkd_invoic_apply"
              "（可批量核对；支持复合限定符精确匹配，与 trace 同一套点号坐标写法："
              "单据.字段 / 分录.字段 / 单据.分录.字段）")
+    resolve.add_argument(
+        "--kind", choices=["field", "entity", "form"],
+        help="只返回某一种候选（field=字段/entity=分录容器/form=单据），"
+             "避免字段名与单据/分录 key 同名时混入噪声")
     _add_report_common(resolve)
     resolve.set_defaults(func=_cmd_resolve)
 

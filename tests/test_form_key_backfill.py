@@ -141,7 +141,7 @@ def test_field_form_index():
 def test_field_form_index_excludes_platform_kind():
     """kind='platform' 的通用系统字段（如原厂 name/number/id）不进反查索引——只并入少量原厂
     实体就会让这类字段"看似唯一"，其实只是没并入其它同样带这个字段的实体（红线 #4，见
-    docs/阶段验收.md「原厂元数据并入 KB」）。"""
+    docs/核心/阶段验收.md「原厂元数据并入 KB」）。"""
     m = MetaModel(key="bd_customer", name="客户", model_type="BaseFormModel", form_type="basedata",
                   isv=None, fields=[
                       MetaField("TextField", "name", "名称", "fname", "i1", None, "platform", "header", "bd_customer"),

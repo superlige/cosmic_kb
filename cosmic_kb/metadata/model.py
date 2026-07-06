@@ -203,7 +203,7 @@ class MetaModel:
     isv: str | None               # 元数据 ISV 标识（cqkd），仅作报告产物，不作定位依据
     app_key: str | None = None    # 所属应用标识（appKey）；整包按目录回填，单 dym 为 None。
     # appKey 是阶段 4 模块识别的主锚（平台应用级标识，不受开发者包路径风格影响），
-    # 比"代码包前缀"可靠 —— 见 docs/开发计划.md 阶段 4「模块识别（多信号）」。
+    # 比"代码包前缀"可靠 —— 见 docs/核心/开发计划.md 阶段 4「模块识别（多信号）」。
     inherit_path: list[str] = field(default_factory=list)  # 继承链（根→直接父）
     entities: list[MetaEntity] = field(default_factory=list)
     fields: list[MetaField] = field(default_factory=list)

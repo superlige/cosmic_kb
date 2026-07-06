@@ -1,6 +1,6 @@
 """阶段 2.2 · 整包双层 zip 解析。
 
-整包结构（见 docs/阶段验收.md「整包 zip（双层）结构勘探结论」）：
+整包结构（见 docs/核心/阶段验收.md「整包 zip（双层）结构勘探结论」）：
 
     外层 zip
      ├─ kdpkgs.xml                        部署清单（isv/product/app/版本）

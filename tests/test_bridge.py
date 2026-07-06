@@ -249,6 +249,34 @@ def test_summary_orphan_by_role(tmp_path: Path):
     assert s["orphan_by_role"].get("unknown") == 1
 
 
+def test_plugin_base_recorded_for_bound_class(tmp_path: Path):
+    """issue 1：已绑定元数据的插件类也要有 plugin_base（此前只在孤儿循环里算，绑定类落 None）。"""
+    _write(
+        tmp_path / "AuditOp.java",
+        "package p;\nimport kd.bos.entity.plugin.AbstractOperationServicePlugIn;\n"
+        "public class AuditOp extends AbstractOperationServicePlugIn {}\n",
+    )
+    scan = scanner.scan(tmp_path)
+    models = [_model("cqkd_x", "X", [_plugin("p.AuditOp", ptype="op")])]
+    result = linker.link(scan, models)
+    assert result.linked and result.linked[0].status == "linked"
+    assert result.plugin_bases["p.AuditOp"] == "AbstractOperationServicePlugIn"
+
+
+def test_plugin_base_orphan_still_recorded(tmp_path: Path):
+    """plugin_bases 是超集：未绑定的插件实现类（孤儿）依旧命中，且与 OrphanClass.plugin_base 一致。"""
+    _write(
+        tmp_path / "OrphanValidator.java",
+        "package p;\npublic class OrphanValidator extends AbstractValidator {}\n",
+    )
+    scan = scanner.scan(tmp_path)
+    result = linker.link(scan, [])
+    assert result.plugin_bases["p.OrphanValidator"] == "AbstractValidator"
+    orphan = next(o for o in result.orphans if o.fqn == "p.OrphanValidator")
+    assert orphan.plugin_base == "AbstractValidator"
+    assert result.plugin_bases["p.OrphanValidator"] == orphan.plugin_base
+
+
 def test_no_class_name_plugin(tmp_path: Path):
     scan = scanner.scan(tmp_path)
     models = [_model("cqkd_x", "X", [_plugin(None)])]

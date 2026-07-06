@@ -14,7 +14,8 @@ from typing import Any
 
 from ..semantic import hints
 # 复用 trace 的「host 口径字节度量 + 游标解析 + 预算/哨兵」单一事实源（红线 #6：度量逻辑只此一份）。
-from .field_trace import _wire_len, _parse_cursor, _COMPACT_BUDGET
+from .field_trace import (_wire_len, _parse_cursor, _COMPACT_BUDGET,
+                          pagination_gate, _pending_from_flat_cursors)
 
 
 def bill_view(conn, key: str) -> dict[str, Any] | None:
@@ -264,13 +265,19 @@ def _cap_flag(res: dict[str, Any], sec: str, total: int, cap: int) -> bool:
 
 def _build_bill_compact(
     bv: dict[str, Any], cap_fields: int, cap_ops: int, cap_plugins: int,
-    cap_bindings: int, cap_entities: int, cap_touch: int,
+    cap_bindings: int, cap_entities: int, cap_touch: int, profile: str,
 ) -> dict[str, Any]:
-    """一档 cap 下构建紧凑 bill dict（governor 会按字节预算反复调用收紧）。"""
+    """一档 cap 下构建紧凑 bill dict（governor 会按字节预算反复调用收紧）。
+
+    `profile="overview"`（默认）只给单据概览 + 插件绑定，不含 `fields`/`entity_touch`——
+    这两段本有专职工具顶替（字段名核对用 `resolve_fields`，谁改的/是否落库用 `trace`），
+    默认带出来对"解读单据/方法"场景是纯冗余。`profile="full"` 补回这两段，与今天的
+    紧凑投影形状一致。两档均可用 `cursor="fields@0"`/`"entity_touch@0"` 单独翻页取回，
+    不受 profile 限制（红线 #4：不静默丢证据，只是不主动塞）。
+    """
     ents, ops, plugins = bv["entities"], bv["operations"], bv["plugins"]
     binds, fields = bv["bindings"], bv["fields"]
-    touch = _touch_rows(bv)
-    touch_shown = touch[:cap_touch]
+    full = profile == "full"
 
     res: dict[str, Any] = {
         "form": _slim_form(bv["form"]),
@@ -288,35 +295,52 @@ def _build_bill_compact(
         "bindings": [_slim_binding(b) for b in binds[:cap_bindings]],
         "bindings_total": len(binds),
         "risk_bindings": [_slim_binding(b) for b in bv["risk_bindings"]],  # 通常很少，整列内联
-        "entity_touch": _group_touch_rows(touch_shown),
-        "touched_fields_total": len(touch),
-        "fields": [_slim_field_meta(x) for x in fields[:cap_fields]],
-        "fields_total": len(fields),
     }
     capped = False
     capped |= _cap_flag(res, "entities", len(ents), cap_entities)
     capped |= _cap_flag(res, "operations", len(ops), cap_ops)
     capped |= _cap_flag(res, "plugins", len(plugins), cap_plugins)
     capped |= _cap_flag(res, "bindings", len(binds), cap_bindings)
-    capped |= _cap_flag(res, "fields", len(fields), cap_fields)
-    if len(touch_shown) < len(touch):    # entity_touch 按扁平字段行计数翻页（offset=扁平行号）
-        res["entity_touch_capped"] = len(touch) - len(touch_shown)
-        res["entity_touch_next_cursor"] = f"entity_touch@{len(touch_shown)}"
-        capped = True
+
+    if full:
+        touch = _touch_rows(bv)
+        touch_shown = touch[:cap_touch]
+        res["entity_touch"] = _group_touch_rows(touch_shown)
+        res["touched_fields_total"] = len(touch)
+        res["fields"] = [_slim_field_meta(x) for x in fields[:cap_fields]]
+        res["fields_total"] = len(fields)
+        capped |= _cap_flag(res, "fields", len(fields), cap_fields)
+        if len(touch_shown) < len(touch):    # entity_touch 按扁平字段行计数翻页（offset=扁平行号）
+            res["entity_touch_capped"] = len(touch) - len(touch_shown)
+            res["entity_touch_next_cursor"] = f"entity_touch@{len(touch_shown)}"
+            capped = True
 
     note = ""
     if bv.get("note"):   # 扩展别名重定向提示（见 bill_view），优先摆最前，别被防截断说明淹没
         note += bv["note"] + " "
-    note += ("紧凑投影（防 MCP 32KB 截断）：每字段的逐条事件已折叠为「写/落库/读」计数——要看『某字段"
-            "谁改的/在哪个事件函数/是否落库』逐字段用 `trace 单据.字段`（entity_touch 每行已给 trace 锚点）。"
-            "插件按场景车道分流见 `plugin_lanes`（操作/界面/列表/反写/转换，op+form 主力在前，带语义文档路由）；"
-            "逐插件明细在平铺 `plugins`（各带 plugin_type，按此归位）——只含单据绑定插件，孤儿类不在此。"
-            "平台预制插件 kd.bos.*（source=platform）不进车道（`platform_plugins_excluded` 计数），非二开排障目标。")
+    if full:
+        note += ("紧凑投影（防 MCP 32KB 截断）：每字段的逐条事件已折叠为「写/落库/读」计数——要看『某字段"
+                "谁改的/在哪个事件函数/是否落库』逐字段用 `trace 单据.字段`（entity_touch 每行已给 trace 锚点）。"
+                "插件按场景车道分流见 `plugin_lanes`（操作/界面/列表/反写/转换，op+form 主力在前，带语义文档路由）；"
+                "逐插件明细在平铺 `plugins`（各带 plugin_type，按此归位）——只含单据绑定插件，孤儿类不在此。"
+                "平台预制插件 kd.bos.*（source=platform）不进车道（`platform_plugins_excluded` 计数），非二开排障目标。")
+    else:
+        note += ("单据概览（默认瘦身投影）：不含逐字段元数据 `fields` 与按实体分组的读写触达 `entity_touch`——"
+                "字段名核对改用 `resolve_fields`（批量更省），某字段谁改的/是否落库改用 `trace 单据.字段`；"
+                "确要看这两段可 `bill(key, profile=\"full\")` 换完整紧凑投影，或 `cursor=\"fields@0\"`/"
+                "`\"entity_touch@0\"` 单独翻页取回（不问自答，取回全部证据两不误）。"
+                "插件按场景车道分流见 `plugin_lanes`（操作/界面/列表/反写/转换，带语义文档路由）；"
+                "逐插件明细在平铺 `plugins`——只含单据绑定插件，孤儿类不在此。"
+                "平台预制插件 kd.bos.*（source=platform）不进车道（`platform_plugins_excluded` 计数）。")
     if capped:
         note += ("各列表真实总数在 `*_total`，被 cap 截掉的段带 `*_next_cursor`，"
                  "用 `bill(key, cursor=该值)` 再调可逐页**取回全部被截条目**（不丢数）；"
                  f"可分页：{', '.join(_BILL_PAGE_SECTIONS)}。")
     res["note"] = note
+    pending = _pending_from_flat_cursors(res)
+    reordered = {"pagination": pagination_gate(pending), **res}
+    res.clear()
+    res.update(reordered)
     return res
 
 
@@ -348,9 +372,11 @@ def _bill_page_section(bv: dict[str, Any], section: str, offset: int, budget: in
     offset = min(max(0, offset), total)
 
     def _wrap(page: list[dict[str, Any]], nxt: int) -> dict[str, Any]:
-        return {**base, "page": {"section": section, "offset": offset, "returned": len(page),
-                                 "total": total, "items": page,
-                                 "next_cursor": (f"{section}@{nxt}" if nxt < total else None)}}
+        next_cursor = f"{section}@{nxt}" if nxt < total else None
+        pending = [{"section": section, "next_cursor": next_cursor}] if next_cursor else []
+        return {"pagination": pagination_gate(pending), **base,
+                "page": {"section": section, "offset": offset, "returned": len(page),
+                        "total": total, "items": page, "next_cursor": next_cursor}}
 
     page: list[dict[str, Any]] = []
     for it in items[offset:]:
@@ -361,16 +387,26 @@ def _bill_page_section(bv: dict[str, Any], section: str, offset: int, budget: in
     return _wrap(page, offset + len(page))
 
 
+_BILL_PROFILES = ("overview", "full")
+
+
 def bill_compact(
     conn, key: str, *, cursor: str | None = None, budget: int = _COMPACT_BUDGET,
+    profile: str = "overview",
 ) -> dict[str, Any]:
     """**紧凑投影**（MCP 入口，防 host 32KB 截断）：折叠逐字段事件 + cap/字节 governor + 游标分页。
 
+    - `profile="overview"`（默认）：单据概览 + 插件绑定，不含 `fields`/`entity_touch`
+      （字段名核对改用 `resolve_fields`，谁改的/是否落库改用 `trace`）。
+      `profile="full"`：补回这两段，与旧版紧凑投影形状一致。
     - 每字段逐条事件折叠为计数；要看「某字段谁改的」逐字段用 `trace 单据.字段`。
-    - 真实总数在 `*_total`；被 cap 截掉的段带 `*_next_cursor`，用 `bill(key, cursor=该值)` 翻页取全。
+    - 真实总数在 `*_total`；被 cap 截掉的段带 `*_next_cursor`，用 `bill(key, cursor=该值)` 翻页取全
+      ——不论 profile 是哪档，`cursor="fields@0"`/`"entity_touch@0"` 都能单独把这两段翻出来。
     - governor：构完测序列化字节，超 `budget` 就逐档收紧 cap 重建，直至 ≤ budget——保证永不被 host 截断。
-    单据不存在返回 `{"error": ...}`（与 tool_bill 同口径）。
+    单据不存在返回 `{"error": ...}`（与 tool_bill 同口径）；非法 profile 同样返回 `{"error": ...}`。
     """
+    if profile not in _BILL_PROFILES:
+        return {"error": f"未知 profile: {profile}（可选 {'/'.join(_BILL_PROFILES)}）"}
     bv = bill_view(conn, key)
     if bv is None:
         return {"error": f"单据不存在: {key}"}
@@ -379,7 +415,7 @@ def bill_compact(
         return _bill_page_section(bv, section, offset, budget)
     res: dict[str, Any] = {}
     for caps in _BILL_LADDER:
-        res = _build_bill_compact(bv, *caps)
+        res = _build_bill_compact(bv, *caps, profile)
         if _wire_len(res) <= budget:
             return res
     return res

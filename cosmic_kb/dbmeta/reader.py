@@ -5,7 +5,7 @@
     read_model(fnumber)   → MetaModel                 取回后交 assemble 合成
     ……_bulk 系列          → 批量版本，见下方"批量取数"
 
-批量取数（2026-07-03 拍板新增，见 `docs/阶段验收.md` 增补条目）：build/bridge 自动摄取
+批量取数（2026-07-03 拍板新增，见 `docs/核心/阶段验收.md` 增补条目）：build/bridge 自动摄取
 一次通常有几十个候选 fnumber，若逐个 `read_model`/`read_model_via_local_ext` 循环调用，
 就是"N 个候选 = N×2 次网络往返"——候选一多、DB 又不在本机，摄取会被网络延迟拖得很慢
 （红线 #3：规模大，要性能）。`fetch_fdata_bulk`/`fetch_fdata_via_local_ext_bulk` 把同一
@@ -250,7 +250,7 @@ class DbMetaReader:
             )
         return out
 
-    # ── 增量二开元数据同步（2026-07-05 拍板，见 dbmeta/sync.py）─────────────
+    # ── 本项目二开元数据同步（2026-07-05 拍板，见 dbmeta/sync.py）───────────
     def list_isv_form_counts(self) -> dict[str, int]:
         """按 fisv 分组统计表单表里的表单数（只查 form_table，够消歧提示用）。
 
@@ -271,8 +271,9 @@ class DbMetaReader:
     def list_changed_keys(self, table: str, isv: str, since_ts: str | None) -> list[str]:
         """某表按 isv（+ 可选 since_ts）圈定"变更/全量"key 列表。
 
-        `since_ts=None` 不追加时间过滤，天然退化成"该 isv 下全量"——首次同步/
-        `--full-refresh`/纯 DB 冷启动建库都走这同一条查询，不需要另外的全量枚举逻辑。
+        `since_ts=None` 不追加时间过滤，天然退化成"该 isv 下全量"——`sync.py` 固定传
+        `None`（每次全量同步，见其模块docstring），此处仍保留 `since_ts` 形参只是复用同一
+        条查询语句，不是给调用方挑"增量/全量"用的开关。
         """
         assert self._driver is not None, "请先 open()"
         cfg = self.config

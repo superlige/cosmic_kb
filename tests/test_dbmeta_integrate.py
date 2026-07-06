@@ -174,6 +174,66 @@ def test_apply_vendor_metadata_no_ext_match_but_local_same_key_merges_not_duplic
     assert any("本地已存在 1 个同 key 模型" in n for n in notices)
 
 
+def test_apply_vendor_metadata_same_vendor_discovered_via_two_candidates_merges_once(monkeypatch):
+    """真实故障复现（2026-07-05）：本地扩展 key 因平台标识长度限制被截断
+    （`cqkd_sim_original_bil_ext`），`detect_extension` 猜出的候选（信号①）也随之截断成
+    "sim_original_bil"；但源码里 ORM 调用直接写的是完整未截断字面量
+    "sim_original_bill"（信号②），三信号发现把这当成两个独立候选，`fnumbers` 里同时有
+    "sim_original_bil"（走 exts 分支）和 "sim_original_bill"（走 plain 分支），两者
+    fmasterid 关联/直查解出的真实母体 key 其实是同一个（"sim_original_bill"）。
+
+    旧代码没有识别"两个候选、同一个真实母体"，plain 分支会把 exts 分支刚合并出的模型当
+    成"本地已有同 key 模型"再合并一次——`merge_vendor_extension` 的实体去重只按对象身份
+    跳过表头行，不按 key 去重分录/子分录，导致该单据的分录在最终 KB 里重复一份；同时
+    vendor 自己的字段被当成"扩展字段"跟 vendor 自己再比一次，触发虚假的"字段 key 冲突"
+    警告。修复后不管两个候选谁先被处理，最终都应只有一份模型、分录不重复、无虚假警告。"""
+    def _vendor_with_entry() -> MetaModel:
+        header = MetaEntity("BaseEntity", "sim_original_bill", "原始单", "h1", "header", None, "t_sim")
+        entry = MetaEntity("BillEntity", "sim_original_bill_entry", "分录", "e1", "entry", "h1", "t_sim_entry")
+        return MetaModel(
+            key="sim_original_bill", name="原始单", model_type="BillFormModel",
+            form_type="bill", isv=None,
+            entities=[header, entry],
+            fields=[
+                MetaField("TextField", "name", "名称", "fname", "f1", "h1", "platform", "header", "sim_original_bill"),
+                MetaField("TextField", "amt", "金额", "famt", "f2", "e1", "platform", "entry", "sim_original_bill"),
+            ],
+            plugins=[MetaPlugin(class_name="kd.bos.form.plugin.Foo", plugin_type="form", source="platform")],
+            source_file="db://sim_original_bill",
+        )
+
+    def _fresh_ext() -> MetaModel:
+        ext_header = MetaEntity("BillEntity", "cqkd_sim_original_bil_ext", "扩展", "eh1", "header", None, None)
+        return MetaModel(
+            key="cqkd_sim_original_bil_ext", name=None, model_type=None, form_type="bill", isv="cqkd",
+            inherit_path=["root1"], entities=[ext_header],
+            fields=[MetaField("TextField", "cqkd_x", "扩展字段", "fx", "fext1", "eh1",
+                              "entity", "header", "cqkd_sim_original_bil_ext")],
+            plugins=[MetaPlugin(class_name="cqspb.InvoiceExtPlugin", plugin_type="form", source="project")],
+        )
+
+    for order in (["sim_original_bil", "sim_original_bill"], ["sim_original_bill", "sim_original_bil"]):
+        monkeypatch.setattr(
+            integrate, "DbMetaReader",
+            _FakeReader(
+                fetch_map={"sim_original_bill": _vendor_with_entry()},
+                ext_map={"cqkd_sim_original_bil_ext": _vendor_with_entry()},
+            ),
+        )
+
+        models, notices = integrate.apply_vendor_metadata([_fresh_ext()], order, config=object())
+
+        matches = [m for m in models if m.key == "sim_original_bill"]
+        assert len(matches) == 1, order      # 不能有两份同 key 模型
+        merged = matches[0]
+        entry_entities = [e for e in merged.entities if e.key == "sim_original_bill_entry"]
+        assert len(entry_entities) == 1, order   # 分录不能重复
+        assert len(merged.fields) == 3, order    # name + amt + cqkd_x，各恰好一份
+        assert merged.warnings == [], order      # 不应触发虚假的"字段 key 冲突"
+        assert [p.class_name for p in merged.plugins] == ["cqspb.InvoiceExtPlugin"], order
+        assert any("跳过重复合并" in n or "为同一实体" in n for n in notices), order
+
+
 def test_apply_vendor_metadata_no_matching_extension_adds_reference_only(monkeypatch):
     monkeypatch.setattr(integrate, "DbMetaReader", _FakeReader({"bd_supplier": _vendor_model("bd_supplier")}))
 
