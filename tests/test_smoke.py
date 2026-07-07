@@ -32,14 +32,13 @@ def test_subpackages_importable():
     for name in (
         "ingest",
         "metadata",
-        "java",
-        "bridge",
-        "graph",
-        "semantic",
-        "context",
-        "report",
-        "cli",
-    ):
+            "java",
+            "bridge",
+            "graph",
+            "semantic",
+            "report",
+            "cli",
+        ):
         importlib.import_module(f"cosmic_kb.{name}")
 
 

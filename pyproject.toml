@@ -21,8 +21,6 @@ dependencies = []
 parse = ["tree-sitter>=0.21", "tree-sitter-java>=0.21"]
 # 阶段 1：编码自动探测（GBK/GB2312/UTF-8/BOM）
 encoding = ["charset-normalizer>=3.0"]
-# 阶段 9：中文名↔标识模糊匹配候选
-fuzzy = ["rapidfuzz>=3.0"]
 # 段二接入：MCP 服务器（把取证命令暴露成 MCP 工具供 LLM 宿主调用）
 mcp = ["mcp>=1.0"]
 # 底层库元数据源：直连苍穹平台库（只读）取原厂/扩展元数据。当前实现 PostgreSQL

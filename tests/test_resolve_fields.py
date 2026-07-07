@@ -478,3 +478,298 @@ def test_cli_resolve_json(tmp_path: Path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "抵押状态" in out and "resolved" in out
+
+
+# ── mismatched_kind：指定 kind 查不到时反查其它词典，诊断"种类给错了"（issue 4）──────────
+
+def test_resolve_mismatched_kind_field_but_actually_entity(conn):
+    """cqkd_entry 实为分录容器 key（entity 表），却传 kind="field" 去查：
+    resolve_fields 应反查到它实际是 entry，给出 mismatched_kind 诊断，resolved 仍给候选
+    （不是 None——种类猜错不代表这个 key 钉不出）。"""
+    d = resolve_fields.resolve_fields(conn, ["cqkd_entry"], kind="field")
+    mm = d["mismatched_kind"]["cqkd_entry"]
+    assert mm["requested_kind"] == "field"
+    assert mm["actual_kinds"] == ["entry"]
+    assert mm["candidates"] and mm["candidates"][0]["kind"] == "entry"
+    assert "qualifier_matches" not in mm   # 裸 key，没有限定符可诊断
+    assert d["resolved"]["cqkd_entry"] == mm["candidates"]
+    assert "mismatched_form" not in d      # 与 mismatched_form 互斥触发
+
+
+def test_resolve_mismatched_kind_form_but_actually_header_entity(conn):
+    """cqkd_assetcard 既是单据 key 又是表头实体 key；kind="field" 两者都不是字段，
+    应反查到 actual_kinds 含 form/header 两种真实种类。"""
+    d = resolve_fields.resolve_fields(conn, ["cqkd_assetcard"], kind="field")
+    mm = d["mismatched_kind"]["cqkd_assetcard"]
+    assert mm["requested_kind"] == "field"
+    assert set(mm["actual_kinds"]) == {"form", "header"}
+
+
+def test_resolve_mismatched_kind_with_qualifier_gives_qualifier_matches(conn):
+    """带限定符的 key 种类给错时，额外给 qualifier_matches——诊断"限定符本身对不对"这层，
+    与 mismatched_form 是纵向两级但这里只走种类这一级（种类都不对，不需要再判单据对不对）。"""
+    d = resolve_fields.resolve_fields(conn, ["cqkd_assetcard.cqkd_entry"], kind="field")
+    mm = d["mismatched_kind"]["cqkd_assetcard.cqkd_entry"]
+    assert mm["requested_kind"] == "field"
+    assert mm["actual_kinds"] == ["entry"]
+    assert mm["qualifier_matches"] and mm["qualifier_matches"][0]["form_key"] == "cqkd_assetcard"
+
+
+def test_resolve_mismatched_kind_absent_when_kind_correct(conn):
+    """种类给对了：不触发 mismatched_kind，行为与之前一致（回归护栏）。"""
+    d = resolve_fields.resolve_fields(conn, ["cqkd_collateralstatus"], kind="field")
+    assert "mismatched_kind" not in d
+
+
+def test_resolve_mismatched_kind_absent_when_truly_unknown(conn):
+    """反查也找不到全局候选（真的钉不出）：不产出 mismatched_kind 噪声，老实回 None。"""
+    d = resolve_fields.resolve_fields(conn, ["cqkd_totally_unknown_xyz"], kind="field")
+    assert "mismatched_kind" not in d
+    assert d["resolved"]["cqkd_totally_unknown_xyz"] is None
+
+
+# ── kind="entity" 两段式分录限定符 fail-closed（2026-07-07，真实翻车复盘）────────────
+# 模型传 {"keys":["分录.子分录"],"kind":"entity"}（无单据前缀）时，_matches 在 form_key 为
+# None 时不按单据过滤，若该 (parent_key,key) 组合恰好只在别的单据下存在，会返回看似钉准实则
+# 未经单据校验的单条候选。这一具体分支硬拒绝，不再走"全摆出不替选"的老路径。
+
+def test_resolve_entity_kind_two_segment_without_form_is_rejected(conn):
+    """`kind="entity"` + 两段式「分录.子分录」（无单据前缀）：直接拒绝，不给候选。"""
+    conn.execute(
+        "INSERT INTO entity(form_key,key,name,level,parent_key,table_name) "
+        "VALUES(?,?,?,?,?,?)",
+        ("cqkd_assetcard", "cqkd_subentry", "抵押物明细", "subentry", "cqkd_entry", "t_sub"),
+    )
+    conn.commit()
+    key = "cqkd_entry.cqkd_subentry"
+    d = resolve_fields.resolve_fields(conn, [key], kind="entity")
+    inv = d["invalid_request"][key]
+    assert inv["reason"] == "missing_form_key"
+    assert inv["entry_key"] == "cqkd_entry" and inv["field_key"] == "cqkd_subentry"
+    assert "hint" in inv and inv["hint"]
+    assert d["resolved"][key] is None
+    assert "mismatched_form" not in d or key not in d["mismatched_form"]
+    assert "mismatched_kind" not in d or key not in d["mismatched_kind"]
+
+
+def test_resolve_entity_kind_three_segment_still_works(conn):
+    """三段式「单据.分录.子分录」+ `kind="entity"`：带单据前缀不受拒绝规则影响，正常放行。"""
+    conn.execute(
+        "INSERT INTO entity(form_key,key,name,level,parent_key,table_name) "
+        "VALUES(?,?,?,?,?,?)",
+        ("cqkd_assetcard", "cqkd_subentry", "抵押物明细", "subentry", "cqkd_entry", "t_sub"),
+    )
+    conn.commit()
+    key = "cqkd_assetcard.cqkd_entry.cqkd_subentry"
+    d = resolve_fields.resolve_fields(conn, [key], kind="entity")
+    assert "invalid_request" not in d
+    items = d["resolved"][key]
+    assert items and len(items) == 1
+    assert items[0]["kind"] == "subentry" and items[0]["parent_key"] == "cqkd_entry"
+
+
+def test_resolve_entity_kind_bare_key_unaffected(conn):
+    """裸 key（无点号）+ `kind="entity"`：不触发拒绝规则，行为与之前一致。"""
+    d = resolve_fields.resolve_fields(conn, ["cqkd_entry"], kind="entity")
+    assert "invalid_request" not in d
+    items = d["resolved"]["cqkd_entry"]
+    assert items and all(it["kind"] in ("header", "entry", "subentry") for it in items)
+
+
+def test_render_invalid_request(conn):
+    """文本视图对 invalid_request 给出 ⛔ 标记与 hint 原文。"""
+    conn.execute(
+        "INSERT INTO entity(form_key,key,name,level,parent_key,table_name) "
+        "VALUES(?,?,?,?,?,?)",
+        ("cqkd_assetcard", "cqkd_subentry", "抵押物明细", "subentry", "cqkd_entry", "t_sub"),
+    )
+    conn.commit()
+    key = "cqkd_entry.cqkd_subentry"
+    d = resolve_fields.resolve_fields(conn, [key], kind="entity")
+    text = resolve_fields.render_resolve_fields(d)
+    assert "⛔" in text
+    assert d["invalid_request"][key]["hint"] in text
+
+
+def test_cli_resolve_entity_invalid_request(tmp_path: Path, capsys):
+    """CLI `resolve --kind entity` 对两段式无单据前缀的输入，输出里带 invalid_request。"""
+    from cosmic_kb.cli.main import main
+
+    db = make_kb(tmp_path)
+    conn2 = store.open_kb(db)
+    conn2.execute(
+        "INSERT INTO entity(form_key,key,name,level,parent_key,table_name) "
+        "VALUES(?,?,?,?,?,?)",
+        ("cqkd_assetcard", "cqkd_subentry", "抵押物明细", "subentry", "cqkd_entry", "t_sub"),
+    )
+    conn2.commit()
+    conn2.close()
+    rc = main([
+        "resolve", "cqkd_entry.cqkd_subentry", "--db", str(db), "--json", "--kind", "entity",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["invalid_request"]["cqkd_entry.cqkd_subentry"]["reason"] == "missing_form_key"
+
+
+def test_mcp_tool_resolve_fields_entity_invalid_request(tmp_path: Path, monkeypatch):
+    """MCP `tool_resolve_fields(kind="entity")` 拒绝行为与 report 层同口径。"""
+    from cosmic_kb.mcp import server as mcp_server
+
+    db = make_kb(tmp_path)
+    conn2 = store.open_kb(db)
+    conn2.execute(
+        "INSERT INTO entity(form_key,key,name,level,parent_key,table_name) "
+        "VALUES(?,?,?,?,?,?)",
+        ("cqkd_assetcard", "cqkd_subentry", "抵押物明细", "subentry", "cqkd_entry", "t_sub"),
+    )
+    conn2.commit()
+    conn2.close()
+    monkeypatch.setenv("COSMIC_KB_DB", str(db))
+    got = mcp_server.tool_resolve_fields(["cqkd_entry.cqkd_subentry"], kind="entity")
+    assert got["invalid_request"]["cqkd_entry.cqkd_subentry"]["reason"] == "missing_form_key"
+
+
+def test_render_mismatched_kind(conn):
+    """文本视图对 mismatched_kind 给出可读提示，点出请求种类与实际种类。"""
+    d = resolve_fields.resolve_fields(conn, ["cqkd_entry"], kind="field")
+    text = resolve_fields.render_resolve_fields(d)
+    assert "field" in text and "entry" in text and "⚠" in text
+
+
+def test_cli_resolve_kind_mismatch(tmp_path: Path, capsys):
+    """CLI `resolve --kind field` 对实为容器 key 的输入，输出里带种类纠错提示。"""
+    from cosmic_kb.cli.main import main
+
+    db = make_kb(tmp_path)
+    rc = main(["resolve", "cqkd_entry", "--db", str(db), "--json", "--kind", "field"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["mismatched_kind"]["cqkd_entry"]["requested_kind"] == "field"
+
+
+def test_mcp_tool_resolve_fields_kind_mismatch(tmp_path: Path, monkeypatch):
+    """MCP `tool_resolve_fields(kind=...)` 种类纠错穿透，与 report 层同口径。"""
+    from cosmic_kb.mcp import server as mcp_server
+
+    db = make_kb(tmp_path)
+    monkeypatch.setenv("COSMIC_KB_DB", str(db))
+    got = mcp_server.tool_resolve_fields(["cqkd_entry"], kind="field")
+    assert got["mismatched_kind"]["cqkd_entry"]["requested_kind"] == "field"
+
+
+# ── kind="plugin"：插件类名反查绑定单据（真实断层：只有类名、无 form_key 时 bill 用不了）──
+
+def test_resolve_plugin_exact_fqn_hits_plugin_table(conn):
+    """① 精确全限定名命中 `plugin` 表：fixture 里 `CollateralOp` 同时在 plugin+binding 两表，
+    plugin 表优先，带出 form_key/operation_key/operation_name/enabled。"""
+    items = resolve_fields.resolve_fields(
+        conn, ["cqspb.assets.CollateralOp"], kind="plugin")["resolved"]["cqspb.assets.CollateralOp"]
+    assert items and len(items) == 1
+    it = items[0]
+    assert it["kind"] == "plugin"
+    assert it["class_name"] == "cqspb.assets.CollateralOp"
+    assert it["form_key"] == "cqkd_assetcard" and it["form_name"] == "资产卡片"
+    assert it["operation_key"] == "audit" and it["operation_name"] == "审核"
+    assert it["enabled"] is True
+    assert "binding_status" not in it
+
+
+def test_resolve_plugin_simple_name_falls_back(conn):
+    """② 裸简单类名（无包名）：精确匹配落空后退化为按末段类名过滤，结果与全限定名一致。"""
+    items = resolve_fields.resolve_fields(
+        conn, ["CollateralOp"], kind="plugin")["resolved"]["CollateralOp"]
+    assert items and len(items) == 1
+    assert items[0]["class_name"] == "cqspb.assets.CollateralOp"
+    assert items[0]["form_key"] == "cqkd_assetcard"
+
+
+def test_resolve_plugin_binding_only_fallback(conn):
+    """③ `plugin` 表零命中、只在 `binding` 表桥接上：`plugin_type`/`operation_key` 留空
+    （不臆造未登记的元数据运行信息），`binding_status`/`confidence` 有值。"""
+    conn.execute(
+        "INSERT INTO binding(class_name,form_key,plugin_type,status,source_relpath,confidence,note) "
+        "VALUES(?,?,?,?,?,?,?)",
+        ("cqspb.assets.ConvertHook", "cqkd_assetcard", "convert", "linked_by_name",
+         "cqspb/assets/ConvertHook.java", 0.8, ""),
+    )
+    conn.commit()
+    items = resolve_fields.resolve_fields(
+        conn, ["cqspb.assets.ConvertHook"], kind="plugin")["resolved"]["cqspb.assets.ConvertHook"]
+    assert items and len(items) == 1
+    it = items[0]
+    assert it["form_key"] == "cqkd_assetcard"
+    assert it["plugin_type"] is None and it["operation_key"] is None
+    assert it["binding_status"] == "linked_by_name" and it["confidence"] == 0.8
+
+
+def test_resolve_plugin_unbound_in_source(conn):
+    """④ `plugin`/`binding` 两表都查不到，但 `source_class` 确认类存在且是插件子类：
+    `resolved[key]` 仍是 `None`，`unbound_in_source[key]` 诚实标注源文件位置+插件基类。"""
+    conn.execute(
+        "INSERT INTO source_class(fqn,simple,package,relpath,module,is_orphan,orphan_role,plugin_base) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        ("cqspb.assets.OrphanValidator", "OrphanValidator", "cqspb.assets",
+         "cqspb/assets/OrphanValidator.java", "cqkd_assets", 1, "plugin", "AbstractValidator"),
+    )
+    conn.commit()
+    d = resolve_fields.resolve_fields(conn, ["cqspb.assets.OrphanValidator"], kind="plugin")
+    assert d["resolved"]["cqspb.assets.OrphanValidator"] is None
+    unb = d["unbound_in_source"]["cqspb.assets.OrphanValidator"]
+    assert unb["relpath"] == "cqspb/assets/OrphanValidator.java"
+    assert unb["plugin_base"] == "AbstractValidator"
+    assert "hint" in unb and unb["hint"]
+
+
+def test_resolve_plugin_completely_unknown_class(conn):
+    """⑤ 类名连 `source_class` 里都没有（可能记错类名）：`resolved[key]` 为 `None`，
+    不产出 `unbound_in_source` 噪声（与④区分：这里连类本身都钉不出）。"""
+    d = resolve_fields.resolve_fields(conn, ["NoSuchPlugin"], kind="plugin")
+    assert d["resolved"]["NoSuchPlugin"] is None
+    assert "unbound_in_source" not in d
+
+
+def test_render_resolve_plugin_and_unbound(conn):
+    """⑥ `render_resolve_fields` 对 `kind="plugin"` 命中项与 `unbound_in_source` 都能正常渲染
+    不报错，关键字段出现在输出文本里。"""
+    conn.execute(
+        "INSERT INTO source_class(fqn,simple,package,relpath,module,is_orphan,orphan_role,plugin_base) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        ("cqspb.assets.OrphanValidator", "OrphanValidator", "cqspb.assets",
+         "cqspb/assets/OrphanValidator.java", "cqkd_assets", 1, "plugin", "AbstractValidator"),
+    )
+    conn.commit()
+    d = resolve_fields.resolve_fields(
+        conn, ["cqspb.assets.CollateralOp", "cqspb.assets.OrphanValidator"], kind="plugin")
+    text = resolve_fields.render_resolve_fields(d)
+    assert "cqspb.assets.CollateralOp" in text and "cqkd_assetcard" in text
+    assert "审核" in text
+    assert "cqspb.assets.OrphanValidator" in text and "AbstractValidator" in text
+
+
+def test_cli_resolve_kind_plugin(tmp_path: Path, capsys):
+    """CLI `resolve --kind plugin` 参数穿透。"""
+    from cosmic_kb.cli.main import main
+
+    db = make_kb(tmp_path)
+    rc = main([
+        "resolve", "cqspb.assets.CollateralOp", "--db", str(db), "--json", "--kind", "plugin",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    items = data["resolved"]["cqspb.assets.CollateralOp"]
+    assert items[0]["form_key"] == "cqkd_assetcard"
+
+
+def test_mcp_tool_resolve_fields_kind_plugin(tmp_path: Path, monkeypatch):
+    """MCP `tool_resolve_fields(kind="plugin")` 与 report 层同口径。"""
+    from cosmic_kb.mcp import server as mcp_server
+
+    db = make_kb(tmp_path)
+    monkeypatch.setenv("COSMIC_KB_DB", str(db))
+    got = mcp_server.tool_resolve_fields(["cqspb.assets.CollateralOp"], kind="plugin")
+    items = got["resolved"]["cqspb.assets.CollateralOp"]
+    assert items[0]["form_key"] == "cqkd_assetcard" and items[0]["operation_key"] == "audit"

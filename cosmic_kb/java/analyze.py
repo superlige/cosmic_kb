@@ -361,7 +361,7 @@ def _has_propagable_param(method_node) -> bool:
 
 def _standalone_env(
     pg: "ProjectGraph", node: "ClassNode", md: "ax.MethodDecl",
-    const, known: frozenset[str], default_entity: str | None,
+    const, known: dict[str, str | None], default_entity: str | None,
 ) -> "fa._Env":
     """按 `_analyze_standalone` 同口径为单个方法（重载）建分析 env（不注入 prop）。
 
@@ -419,7 +419,7 @@ class _PropInfo:
 
 def _propagate_reverse_props(
     pg: "ProjectGraph", callers: dict[tuple[str, str], list[tuple[str, str, "ax.Invocation"]]],
-    const, known: frozenset[str], bound_entity: dict[str, set[str]],
+    const, known: dict[str, str | None], bound_entity: dict[str, set[str]],
     wanted: set[tuple[str, str]],
 ) -> dict[tuple[str, str], _PropInfo]:
     """沿可解析调用边做保守固定点传播。
@@ -496,7 +496,7 @@ def _propagate_reverse_props(
 
 
 def _backfill_reverse_calls(
-    result: AnalysisResult, pg: "ProjectGraph", const, known: frozenset[str],
+    result: AnalysisResult, pg: "ProjectGraph", const, known: dict[str, str | None],
     bound_entity: dict[str, set[str]],
 ) -> None:
     """孤立方法反向调用图回填（doc §5 #1）。
@@ -557,20 +557,28 @@ def _backfill_reverse_calls(
             r.confidence = round(min(r.confidence, cap), 3)
 
 
-def _known_entities(models: list["MetaModel"]) -> frozenset[str]:
-    """全部已知实体/单据标识（form key + 实体 key + 转换上下游），供 ORM 实参校验。"""
-    out: set[str] = set()
+def _known_entities(models: list["MetaModel"]) -> dict[str, str | None]:
+    """全部已知实体/单据标识（form key + 实体 key + 转换上下游）→ 层级。
+
+    供 ORM 实参校验（`in` 判断，dict 与原 frozenset 等价）+ `dataEntity.set(key,...)`
+    整体赋值层级判定（只有 entry/subentry 才有意义，表单 key/表头实体/转换上下游一律
+    None）。同一 key 若跨表单出现层级冲突（理论存在，未见真实样本），保守置 None，
+    退化回 header 兜底，不猜错。
+    """
+    levels: dict[str, set[str | None]] = {}
+
+    def _add(key: str | None, level: str | None) -> None:
+        if key:
+            levels.setdefault(key, set()).add(level)
+
     for m in models:
-        if m.key:
-            out.add(m.key)
+        _add(m.key, None)
         for e in m.entities:
-            if e.key:
-                out.add(e.key)
+            _add(e.key, e.level if e.level in ("entry", "subentry") else None)
         if m.convert is not None:
             for x in (m.convert.source_entity, m.convert.target_entity):
-                if x:
-                    out.add(x)
-    return frozenset(out)
+                _add(x, None)
+    return {k: (next(iter(vs)) if len(vs) == 1 else None) for k, vs in levels.items()}
 
 
 def _do_params(method_node) -> frozenset[str]:
@@ -693,7 +701,7 @@ class _RetResolver:
     default_entity 重算其返回上下文。memo 避免重复解析，stack 防递归环。
     """
 
-    def __init__(self, pg: "ProjectGraph", const, known: frozenset[str],
+    def __init__(self, pg: "ProjectGraph", const, known: dict[str, str | None],
                  plugin_fqn: str, entry_form: str | None, convert_source: str | None) -> None:
         self.pg = pg
         self.const = const
@@ -768,7 +776,7 @@ def _seg(pg: "ProjectGraph", caller_fqn: str, target) -> str:
 
 def _walk_event(
     pg: "ProjectGraph", plugin_fqn: str, event_method: str,
-    entry_form: str | None, convert_source: str | None, const, known: frozenset[str],
+    entry_form: str | None, convert_source: str | None, const, known: dict[str, str | None],
 ):
     """从事件方法跨类 BFS，逐节点抽字段读写 + 传播来源实体。
 
@@ -815,7 +823,7 @@ def _walk_event(
 
 def _analyze_bound_plugin(
     pg: "ProjectGraph", node: "ClassNode", plugin_type: str, entry_form: str | None,
-    convert_source: str | None, op_type: str | None, const, known: frozenset[str],
+    convert_source: str | None, op_type: str | None, const, known: dict[str, str | None],
     plugin_base: dict[str, str], covered: set[tuple[str, str]], result: AnalysisResult,
 ) -> None:
     base = plugin_base.get(node.simple)
@@ -842,7 +850,7 @@ def _analyze_bound_plugin(
 def _emit_event(
     pg: "ProjectGraph", plugin_fqn: str, plugin_type: str, event_method: str, phase: str,
     entry_form: str | None, convert_source: str | None, op_type: str | None,
-    const, known: frozenset[str], covered: set[tuple[str, str]], result: AnalysisResult,
+    const, known: dict[str, str | None], covered: set[tuple[str, str]], result: AnalysisResult,
 ) -> None:
     """从一个入口（事件/根方法）跨类回溯，归集字段读写 + 落库判定 + 写入 result。"""
     records, seen = _walk_event(pg, plugin_fqn, event_method, entry_form, convert_source, const, known)
@@ -878,7 +886,7 @@ def _emit_event(
 
 
 def _analyze_unbound_plugin(
-    pg: "ProjectGraph", node: "ClassNode", base: str, const, known: frozenset[str],
+    pg: "ProjectGraph", node: "ClassNode", base: str, const, known: dict[str, str | None],
     covered: set[tuple[str, str]], result: AnalysisResult,
 ) -> None:
     """未绑定元数据但继承苍穹插件基类的类（调度 AbstractTask / WebApi / 工作流 等）作跨类入口。
@@ -902,7 +910,7 @@ def _analyze_unbound_plugin(
 
 
 def _analyze_standalone(
-    pg: "ProjectGraph", node: "ClassNode", const, known: frozenset[str],
+    pg: "ProjectGraph", node: "ClassNode", const, known: dict[str, str | None],
     plugin_base: dict[str, str], bound_entity: dict[str, set[str]],
     covered: set[tuple[str, str]], result: AnalysisResult,
 ) -> bool:

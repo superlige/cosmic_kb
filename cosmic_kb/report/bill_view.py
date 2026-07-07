@@ -31,10 +31,10 @@ def bill_view(conn, key: str) -> dict[str, Any] | None:
         "SELECT entity_key,key,name,db_column,field_type,kind,level FROM field WHERE form_key=?",
         (key,)).fetchall()]
     operations = [dict(r) for r in conn.execute(
-        "SELECT key,name,operation_type,resolved_from,has_plugin FROM operation "
-        "WHERE form_key=? ORDER BY has_plugin DESC,key", (key,)).fetchall()]
+        "SELECT key,name,operation_type,resolved_from,has_operation_plugin FROM operation "
+        "WHERE form_key=? ORDER BY has_operation_plugin DESC,key", (key,)).fetchall()]
     plugins = [dict(r) for r in conn.execute(
-        "SELECT class_name,plugin_type,source,operation_key,operation_name FROM plugin "
+        "SELECT class_name,plugin_type,source,operation_key,operation_name,enabled FROM plugin "
         "WHERE form_key=?", (key,)).fetchall()]
     bindings = [dict(r) for r in conn.execute(
         "SELECT class_name,plugin_type,status,source_relpath,confidence,note FROM binding "
@@ -91,7 +91,11 @@ def bill_view(conn, key: str) -> dict[str, Any] | None:
     # 轴 A · 场景/插件类型分流：把平铺插件清单按 plugin_type 切成带语义的车道（叠加视图，
     # 不替换 plugins 平铺）。binding 命中态挂到插件上，便于渲染层标「未命中源码」风险。
     # 平台预制插件（kd.bos.*）不进车道，但计数诚实呈现（红线 #4，不静默丢）。
-    plugin_lanes = _build_plugin_lanes(plugins, bindings)
+    # 三态分流：enabled=0（确认 Enabled=false）是唯一确定"当前不会执行"的信号，整体挪出车道，
+    # 单独归入 disabled_plugins；unknown（NULL）不擅自当禁用处理，仍留在车道里（红线 #4）。
+    disabled_plugins = [p for p in plugins if p.get("enabled") == 0]
+    lane_input = [p for p in plugins if p.get("enabled") != 0]
+    plugin_lanes = _build_plugin_lanes(lane_input, bindings)
     platform_plugins_excluded = sum(1 for p in plugins if p.get("source") == "platform")
 
     # 扩展别名（form.is_extension=1）：内容已并入 extends 指向的原厂 form_key（见
@@ -108,6 +112,7 @@ def bill_view(conn, key: str) -> dict[str, Any] | None:
         "fields": fields,
         "operations": operations,
         "plugins": plugins,
+        "disabled_plugins": [_slim_plugin(p) for p in disabled_plugins],
         "plugin_lanes": plugin_lanes,
         "platform_plugins_excluded": platform_plugins_excluded,
         "bindings": bindings,
@@ -119,6 +124,7 @@ def bill_view(conn, key: str) -> dict[str, Any] | None:
             "entity_count": len(entities), "field_count": len(fields),
             "operation_count": len(operations), "plugin_count": len(plugins),
             "touched_fields": len(field_touch),
+            "disabled_plugin_count": len(disabled_plugins),
         },
     }
 
@@ -160,6 +166,7 @@ def _build_plugin_lanes(
             "source": p["source"], "operation_key": p.get("operation_key"),
             "operation_name": p.get("operation_name"),
             "binding_risk": st if st in ("missing", "ambiguous") else None,
+            "enabled": p.get("enabled"),   # unknown(None) 仍可能出现在车道里，如实带出不臆断
         })
         slot["count"] += 1
     return [buckets[lid] for lid in lane_order if lid in buckets]
@@ -196,12 +203,12 @@ def _slim_entity(e: dict[str, Any]) -> dict[str, Any]:
 
 
 def _slim_op(o: dict[str, Any]) -> dict[str, Any]:
-    return {k: o.get(k) for k in ("key", "name", "operation_type", "has_plugin")}
+    return {k: o.get(k) for k in ("key", "name", "operation_type", "has_operation_plugin")}
 
 
 def _slim_plugin(p: dict[str, Any]) -> dict[str, Any]:
     return {k: p.get(k) for k in
-            ("class_name", "plugin_type", "source", "operation_key", "operation_name")}
+            ("class_name", "plugin_type", "source", "operation_key", "operation_name", "enabled")}
 
 
 def _slim_binding(b: dict[str, Any]) -> dict[str, Any]:
@@ -292,6 +299,8 @@ def _build_bill_compact(
         # 平铺 plugins 段，各带 plugin_type，LLM 自行归位）。体积极小，不进 ladder cap。
         "plugin_lanes": _slim_lanes(bv["plugin_lanes"]),
         "platform_plugins_excluded": bv.get("platform_plugins_excluded", 0),
+        # 已禁用插件（Enabled=false）独立列出，不与车道混同；通常很少，整列内联不进 ladder cap。
+        "disabled_plugins": bv.get("disabled_plugins", []),
         "bindings": [_slim_binding(b) for b in binds[:cap_bindings]],
         "bindings_total": len(binds),
         "risk_bindings": [_slim_binding(b) for b in bv["risk_bindings"]],  # 通常很少，整列内联
@@ -323,7 +332,8 @@ def _build_bill_compact(
                 "谁改的/在哪个事件函数/是否落库』逐字段用 `trace 单据.字段`（entity_touch 每行已给 trace 锚点）。"
                 "插件按场景车道分流见 `plugin_lanes`（操作/界面/列表/反写/转换，op+form 主力在前，带语义文档路由）；"
                 "逐插件明细在平铺 `plugins`（各带 plugin_type，按此归位）——只含单据绑定插件，孤儿类不在此。"
-                "平台预制插件 kd.bos.*（source=platform）不进车道（`platform_plugins_excluded` 计数），非二开排障目标。")
+                "平台预制插件 kd.bos.*（source=platform）不进车道（`platform_plugins_excluded` 计数），非二开排障目标。"
+                "已禁用插件（Enabled=false）同样不进车道，独立列在 `disabled_plugins`（当前不会被执行，仅供追溯）。")
     else:
         note += ("单据概览（默认瘦身投影）：不含逐字段元数据 `fields` 与按实体分组的读写触达 `entity_touch`——"
                 "字段名核对改用 `resolve_fields`（批量更省），某字段谁改的/是否落库改用 `trace 单据.字段`；"
@@ -331,7 +341,8 @@ def _build_bill_compact(
                 "`\"entity_touch@0\"` 单独翻页取回（不问自答，取回全部证据两不误）。"
                 "插件按场景车道分流见 `plugin_lanes`（操作/界面/列表/反写/转换，带语义文档路由）；"
                 "逐插件明细在平铺 `plugins`——只含单据绑定插件，孤儿类不在此。"
-                "平台预制插件 kd.bos.*（source=platform）不进车道（`platform_plugins_excluded` 计数）。")
+                "平台预制插件 kd.bos.*（source=platform）不进车道（`platform_plugins_excluded` 计数）。"
+                "已禁用插件（Enabled=false）同样不进车道，独立列在 `disabled_plugins`（当前不会被执行，仅供追溯）。")
     if capped:
         note += ("各列表真实总数在 `*_total`，被 cap 截掉的段带 `*_next_cursor`，"
                  "用 `bill(key, cursor=该值)` 再调可逐页**取回全部被截条目**（不丢数）；"
@@ -431,6 +442,8 @@ def render_bill(bv: dict[str, Any], *, max_list: int = 30) -> str:
     lines.append(
         f"  实体 {st['entity_count']}  字段 {st['field_count']}  操作 {st['operation_count']}  "
         f"插件 {st['plugin_count']}  有插件触达的字段 {st['touched_fields']}"
+        + (f"（其中 {st['disabled_plugin_count']} 个已禁用，见下方历史插件小节）"
+           if st.get("disabled_plugin_count") else "")
     )
 
     if bv.get("note"):
@@ -439,9 +452,10 @@ def render_bill(bv: dict[str, Any], *, max_list: int = 30) -> str:
 
     if bv["operations"]:
         lines.append("")
-        lines.append("【操作集】（★ = 有自定义操作插件，排障优先看）")
+        lines.append("【操作集】（★ = 有自定义操作插件，排障优先看；"
+                     "仅统计操作插件，表单插件按钮内部分支不计入）")
         for o in bv["operations"]:
-            star = "★" if o["has_plugin"] else " "
+            star = "★" if o["has_operation_plugin"] else " "
             lines.append(f"  {star} {o['key'] or '?':<18} {o['name'] or '':<10} [{o['operation_type'] or '?'}]")
 
     if bv.get("plugin_lanes"):
@@ -461,6 +475,14 @@ def render_bill(bv: dict[str, Any], *, max_list: int = 30) -> str:
             lines.append("")
             lines.append(f"  （另有 {bv['platform_plugins_excluded']} 个平台预制插件 kd.bos.* 未列入车道"
                          "：平台提供、无源码、非二开排障目标）")
+
+    if bv.get("disabled_plugins"):
+        lines.append("")
+        lines.append(f"【已禁用/历史插件】（{len(bv['disabled_plugins'])}，Enabled=false，"
+                     "当前不会被执行，仅供追溯历史逻辑）")
+        for p in bv["disabled_plugins"]:
+            op = f" ←{p['operation_key']}" if p.get("operation_key") else ""
+            lines.append(f"  [{p['plugin_type']}] {p['class_name']} ({p['source']}){op}  [停用]")
 
     if bv["field_touch"]:
         lines.append("")

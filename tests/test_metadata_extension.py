@@ -91,6 +91,54 @@ def test_strip_vendor_plugins_noop_when_empty():
     assert strip_vendor_plugins(m) is m  # 无插件时直接返回原对象，不多余拷贝
 
 
+def test_strip_vendor_plugins_keeps_explicitly_disabled():
+    """真实翻车：`kd.cf.lgc.ht.opplugin.AdjustAmountOpplugin` 在原厂层被显式禁用
+    （`<Enabled>false</Enabled>`），旧逻辑无条件清空原厂插件会把这条确定性信号也丢掉，
+    KB 里只剩别处(如继承拷贝、无 Enabled 标签)的同类名条目，误报成 enabled=null（未知）
+    而非"已确认禁用"。`enabled is False` 的原厂插件必须保留；enabled=True/None（无源码、
+    追不到执行体）继续按拍板丢弃。"""
+    from cosmic_kb.metadata.model import MetaPlugin
+
+    vendor = MetaModel(
+        key="cqkd_billadjust", name="账单调整", model_type="BillFormModel", form_type="bill", isv=None,
+        plugins=[
+            MetaPlugin(class_name="kd.cf.lgc.ht.opplugin.AdjustAmountOpplugin",
+                       plugin_type="op", source="project", enabled=False),
+            MetaPlugin(class_name="kd.bos.form.plugin.Foo", plugin_type="form", source="platform", enabled=None),
+            MetaPlugin(class_name="kd.bd.master.CustomerSavePlugin", plugin_type="op", source="project", enabled=True),
+        ],
+    )
+    stripped = strip_vendor_plugins(vendor)
+    assert [p.class_name for p in stripped.plugins] == ["kd.cf.lgc.ht.opplugin.AdjustAmountOpplugin"]
+    assert stripped.plugins[0].enabled is False
+    assert vendor.plugins[0].enabled is False  # 原对象不被就地修改
+
+
+def test_merge_vendor_extension_keeps_vendor_disabled_plugin():
+    """merge_vendor_extension 汇总 plugins 时须带上 vendor 侧（已被 strip 收窄到仅剩确认
+    禁用条目）+ 扩展侧，而不是无条件清零 vendor 那一半。"""
+    from cosmic_kb.metadata.model import MetaPlugin
+
+    header = MetaEntity("BaseEntity", "bd_x", "X", "h1", "header", None, "t_x")
+    vendor = strip_vendor_plugins(MetaModel(
+        key="bd_x", name="X", model_type="BaseFormModel", form_type="basedata", isv=None,
+        entities=[header],
+        plugins=[MetaPlugin(class_name="kd.cf.lgc.ht.opplugin.AdjustAmountOpplugin",
+                             plugin_type="op", source="project", enabled=False)],
+    ))
+    ext_header = MetaEntity("BaseEntity", "cqkd_x_ext", "X扩展", "eh1", "header", None, None)
+    ext = MetaModel(
+        key="cqkd_x_ext", name=None, model_type=None, form_type="basedata", isv="cqkd",
+        inherit_path=["root"], entities=[ext_header],
+        plugins=[MetaPlugin(class_name="cqspb.XExtPlugin", plugin_type="form", source="project")],
+    )
+    merged = merge_vendor_extension(vendor, [ext])
+    names = {p.class_name for p in merged.plugins}
+    assert names == {"kd.cf.lgc.ht.opplugin.AdjustAmountOpplugin", "cqspb.XExtPlugin"}
+    disabled = next(p for p in merged.plugins if p.class_name == "kd.cf.lgc.ht.opplugin.AdjustAmountOpplugin")
+    assert disabled.enabled is False
+
+
 # ── merge_vendor_extension：端到端（真实样例）───────────────────────────────
 
 @needs_sample

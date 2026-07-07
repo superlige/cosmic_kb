@@ -9,7 +9,6 @@
     cosmic_kb build <源码根> <dym|zip|dir...>   # 阶段4：建/重建 Cosmic KB（SQLite+FTS5）
     cosmic_kb report map | overview             # 阶段4：项目地图 / 接手者理解报告（读 KB）
     cosmic_kb web [--port --host --open]        # 阶段4.5：本地 Web 展示（读 KB，仅本机 localhost）
-    cosmic_kb ask "<自然语言问题>"              # 阶段9：NL→意图→查 KB 取证（确定性证据包）
 
 后续阶段在此挂载更多子命令（mcp ...）。
 """
@@ -694,29 +693,6 @@ def _cmd_source(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_ask(args: argparse.Namespace) -> int:
-    """阶段9：自然语言提问 → 确定性证据包（NL→意图→查 KB→Context Builder）。"""
-    from ..graph import store
-    from ..semantic import resolver
-    from ..context import builder
-
-    db, rc = _ensure_kb(args)
-    if rc:
-        return rc
-    conn = store.open_kb(db)
-    try:
-        rq = resolver.resolve(conn, args.question)
-        ctx = builder.build_context(conn, rq)
-        if args.json:
-            print(builder.to_json(ctx))
-        else:
-            print(builder.render_context(ctx, max_list=args.max_list))
-        # 需消歧时返回非零退出码，方便脚本/Skill 判断"还要再问一轮"。
-        return 3 if ctx.get("status") == "need_clarification" else 0
-    finally:
-        conn.close()
-
-
 def _cmd_web(args: argparse.Namespace) -> int:
     """阶段4.5：起本机 Web 服务展示项目地图/理解报告（读 KB，仅本机 localhost）。"""
     from ..web import server
@@ -1071,7 +1047,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     resolve = sub.add_parser(
         "resolve",
-        help="标识核对：字段/表头实体/分录/子分录/单据(表单)标识→真实元数据中文名+坐标"
+        help="标识核对：字段/表头实体/分录/子分录/单据(表单)/插件类名标识→真实元数据中文名+坐标"
              "（比 trace 便宜，防命名惯例臆断，钉不出回 null）",
     )
     resolve.add_argument(
@@ -1080,9 +1056,12 @@ def build_parser() -> argparse.ArgumentParser:
              "（可批量核对；支持复合限定符精确匹配，与 trace 同一套点号坐标写法："
              "单据.字段 / 分录.字段 / 单据.分录.字段）")
     resolve.add_argument(
-        "--kind", choices=["field", "entity", "form"],
-        help="只返回某一种候选（field=字段/entity=分录容器/form=单据），"
-             "避免字段名与单据/分录 key 同名时混入噪声")
+        "--kind", choices=["field", "entity", "form", "plugin"],
+        help="只返回某一种候选（field=字段/entity=分录容器/form=单据/plugin=插件类名反查绑定），"
+             "避免字段名与单据/分录 key 同名时混入噪声；"
+             "kind=entity 时两段式「分录.字段」限定符若无单据前缀会被拒绝（invalid_request），"
+             "需要写「单据.分录.字段」三段式；"
+             "kind=plugin 时 keys 按插件类名（简单名/全限定名）处理，不走点号坐标限定符协议")
     _add_report_common(resolve)
     resolve.set_defaults(func=_cmd_resolve)
 
@@ -1127,17 +1106,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_report_common(source)
     source.set_defaults(func=_cmd_source)
 
-    # ── 阶段9：自然语言提问 → 确定性证据包（查 KB 取证，不调 LLM）─────────────
-    ask = sub.add_parser(
-        "ask", help="阶段9：自然语言提问→意图解析→查 KB 取证（字段谁改的/单据钻取/插件解释）",
-    )
-    ask.add_argument(
-        "question",
-        help="一句话提问，如 「资产卡片抵押状态是谁改的？」「cqkd_assetcard 这张单有哪些插件？」"
-             "「CollateralService 这个类干嘛的？」；也可直接给标识或点号坐标")
-    _add_report_common(ask)
-    ask.set_defaults(func=_cmd_ask)
-
     # ── 阶段4.5：web（本地 localhost 展示层，读 KB）─────────────────────────
     web = sub.add_parser(
         "web", help="阶段4.5：本地 Web 展示项目地图/理解报告（仅本机 localhost，读 KB）",
@@ -1162,7 +1130,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ── 段二接入：MCP 服务器（把取证命令暴露成 MCP 工具供 LLM 宿主调用）─────────
     mcp = sub.add_parser(
-        "mcp", help="段二接入：起 MCP 服务器，让 LLM 宿主挂 Skill 后调 ask/trace/bill 等取证工具",
+        "mcp", help="段二接入：起 MCP 服务器，让 LLM 宿主挂 Skill 后调 trace/bill 等取证工具",
     )
     mcp.add_argument(
         "--db", default=None,

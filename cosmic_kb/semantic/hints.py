@@ -17,9 +17,13 @@
 
 from __future__ import annotations
 
+from ..java import event_extractor
+
 # 事件方法名 → 苍穹语义文档主题 stem（cosmic_semantics(topic) 取全文）。
-# 事件方法名是强信号：propertyChanged 必是表单联动、beforeDoOperation 必是操作事务，
-# 与具体 plugin_type 无关也能定。下方 _PLUGIN_TYPE_TOPIC 只在事件方法名兜不住时回落。
+# 事件方法名是强信号，与具体 plugin_type 无关也能定；但 beforeDoOperation/afterDoOperation/
+# itemClick 这类方法名在不同 plugin_type 下语义不同（下方 event_topic() 的 Tier 0 用
+# event_extractor 权威校验后才会用到这张表兜底），本表不再收录它们，避免硬编码出与
+# event_extractor 矛盾的默认值。
 _EVENT_TOPIC = {
     # —— 表单界面事件（字段联动 / 赋值 / 监听）——
     "propertyChanged": "plugin-form",
@@ -30,10 +34,7 @@ _EVENT_TOPIC = {
     "afterAddRow": "plugin-form",
     "beforeDeleteRow": "plugin-form",
     "click": "plugin-form",
-    "itemClick": "plugin-form",
     # —— 操作 / 事务事件（保存/提交/审核/校验，是否入库高发区）——
-    "beforeDoOperation": "plugin-operation",
-    "afterDoOperation": "plugin-operation",
     "beforeExecuteOperationTransaction": "plugin-operation",
     "beginOperationTransaction": "plugin-operation",
     "afterExecuteOperationTransaction": "plugin-operation",
@@ -64,6 +65,7 @@ _PLUGIN_TYPE_TOPIC = {
     "print": "plugin-print",
     "openapi": "plugin-openapi",
     "webapi": "plugin-openapi",
+    "validator": "plugin-operation",
 }
 
 
@@ -96,7 +98,21 @@ def plugin_lane(plugin_type: str | None) -> tuple[str, str, str]:
 
 
 def event_topic(event_method: str | None = None, plugin_type: str | None = None) -> str | None:
-    """事件方法/插件类型 → 苍穹语义文档主题 stem；无可路由（纯工具方法等）返回 None。"""
+    """事件方法/插件类型 → 苍穹语义文档主题 stem；无可路由（纯工具方法等）返回 None。
+
+    Tier 0：`plugin_type` 落在 `event_extractor.EVENT_TABLE` 的种类集合里时，用
+    `event_extractor.classify_method()` 权威校验该方法名是否真是这个种类插件的生命周期事件——
+    这解决了 `beforeDoOperation`/`afterDoOperation`（表单插件界面侧回调，从未出现在操作插件
+    事务事件表）、`itemClick`（表单工具栏 vs 列表工具栏语义不同）这类"方法名相同、
+    不同 plugin_type 下语义不同"的场景，比全局方法名强信号表更可信。
+    Tier 1/2：Tier 0 未命中（种类未知、或该方法不是该种类的生命周期事件）时，回落到方法名
+    强信号表 `_EVENT_TOPIC`，再回落到 plugin_type 表 `_PLUGIN_TYPE_TOPIC`。
+    """
+    if plugin_type and event_method and plugin_type in event_extractor.EVENT_TABLE:
+        if event_extractor.classify_method(plugin_type, event_method) is not None:
+            topic = _PLUGIN_TYPE_TOPIC.get(plugin_type)
+            if topic:
+                return topic
     if event_method and event_method in _EVENT_TOPIC:
         return _EVENT_TOPIC[event_method]
     if plugin_type and plugin_type in _PLUGIN_TYPE_TOPIC:

@@ -318,6 +318,21 @@ public class AmArrayOp extends AbstractOperationServicePlugIn {
 """
 
 
+# 分录整体赋值（真实翻车场景）：事件入参取到表头包后，把整个分录集合通过 set(entry_key,
+# collection) 一次性挂上去，而不是逐字段 setValue——key 是分录实体 key（cqkd_entry），
+# 不是表头字段，trace/bill 的层级判定与「该 key 在元数据里的定义坐标」查询都要认成 entry。
+ENTRY_SET_OP = """package cqspb.am;
+import kd.bos.entity.plugin.AbstractOperationServicePlugIn;
+public class AmEntrySetOp extends AbstractOperationServicePlugIn {
+  public void beforeExecuteOperationTransaction(BeforeOperationArgs e) {
+    DynamicObject dataEntity = e.getDataEntities()[0];
+    DynamicObjectCollection rows = buildRows();
+    dataEntity.set("cqkd_entry", rows);
+  }
+}
+"""
+
+
 def _w(p: Path, text: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(text.encode("utf-8"))
@@ -371,6 +386,7 @@ def _build(tmp_path: Path):
     _w(src / "AmHelperPlugin.java", HELPER_PLUGIN)
     _w(src / "AmListParamPlugin.java", LISTPARAM_PLUGIN)
     _w(src / "AmValidator.java", VALIDATOR_PLUGIN)
+    _w(src / "AmEntrySetOp.java", ENTRY_SET_OP)
     scan = scanner.scan(src)
 
     ents = [MetaEntity("BillEntity", "cqkd_bill", "单据头", "1", "header", None, "t"),
@@ -381,7 +397,8 @@ def _build(tmp_path: Path):
     ops = [MetaOperation("submit", "提交", "submit", None, None, resolved_from="self"),
            MetaOperation("calc", "计算", "donothing", None, None, resolved_from="self"),
            MetaOperation("calc2", "计算2", "donothing", None, None, resolved_from="self"),
-           MetaOperation("cst", "常量", "submit", None, None, resolved_from="self")]
+           MetaOperation("cst", "常量", "submit", None, None, resolved_from="self"),
+           MetaOperation("entryset", "分录整体赋值", "submit", None, None, resolved_from="self")]
     plugins = [
         MetaPlugin("cqspb.am.AmFormPlugin", "form", "project"),
         MetaPlugin("cqspb.am.AmSubmitOp", "op", "project", operation_key="submit"),
@@ -395,6 +412,7 @@ def _build(tmp_path: Path):
         MetaPlugin("cqspb.am.AmArrayOp", "op", "project", operation_key="submit"),
         MetaPlugin("cqspb.am.AmHelperPlugin", "form", "project"),
         MetaPlugin("cqspb.am.AmListParamPlugin", "form", "project"),
+        MetaPlugin("cqspb.am.AmEntrySetOp", "op", "project", operation_key="entryset"),
     ]
     m1 = MetaModel(key="cqkd_bill", name="资产单", model_type="BillFormModel",
                    form_type="bill", isv="cqkd", app_key="cqkd_am",
@@ -609,13 +627,13 @@ def test_field_trace_coarse_only_filtering(tmp_path: Path):
 
 
 def test_bill_view_report(tmp_path: Path):
-    """单据视图：操作集 has_plugin、字段触达 + 实体分组。"""
+    """单据视图：操作集 has_operation_plugin、字段触达 + 实体分组。"""
     db, _ = _build(tmp_path)
     conn = store.open_kb(db)
     try:
         bv = bill_view.bill_view(conn, "cqkd_bill")
         submit = next(o for o in bv["operations"] if o["key"] == "submit")
-        assert submit["has_plugin"] == 1
+        assert submit["has_operation_plugin"] == 1
         assert "cqkd_head" in bv["field_touch"]
         # 字段触达按实体分组：表头实体下含 cqkd_head。
         header = next(g for g in bv["entity_touch"] if g["entity_key"] is None)
@@ -693,10 +711,12 @@ def test_lambda_stream_capture(tmp_path: Path):
 
 
 def test_parse_locator():
-    """层级显式点号查询：按段数判定坐标。"""
+    """层级显式点号查询：按段数判定坐标。两段式只锁单据、不猜层级（level=None）——
+    分录整体赋值容器 key 只登记在 entity 表，真实层级是 entry/subentry，若强行猜
+    "header" 会在 trace 精确桶里查无匹配、误落"可能命中"（2026-07 修复）。"""
     p = field_trace.parse_locator
     assert p("cqkd_amount") == ("cqkd_amount", None, None, None)
-    assert p("cqkd_bill.cqkd_head") == ("cqkd_head", "cqkd_bill", None, "header")
+    assert p("cqkd_bill.cqkd_head") == ("cqkd_head", "cqkd_bill", None, None)
     assert p("cqkd_bill.cqkd_entry.cqkd_entryf") == ("cqkd_entryf", "cqkd_bill", "cqkd_entry", "entry")
     assert p("f.e.s.fld") == ("fld", "f", "s", "subentry")
 
@@ -806,6 +826,91 @@ def test_orm_variants_source():
     assert by["f2"].entity == "cqkd_y"
 
 
+def test_root_receiver_entry_whole_assignment_not_header():
+    """dataEntity.set("<entry_key>", collection) 是分录整体赋值，不是表头字段写入。
+
+    接收者上下文原先只看变量坐标（dataEntity 落在 `_ROOT_NAMES` 根包名单，判 header 是其中一条
+    路径）就无条件判 header，不管 key 在元数据里到底是普通字段还是分录/子分录实体整体 key（真实
+    翻车：`cqkd_zdgl` 是 entry 级实体 key，被误判成表头字段写入）。"""
+    from cosmic_kb.java import ast_index as ax, field_access as fa
+    from cosmic_kb.java.constants import ConstantTable
+    src = (
+        "package p; public class C {\n"
+        "  public void m(DynamicObject dataEntity, DynamicObjectCollection rows) {\n"
+        "    dataEntity.set(\"cqkd_zdgl\", rows);\n"
+        "    dataEntity.set(\"cqkd_amount\", 1);\n"
+        "  }\n}\n"
+    )
+    root = ax.parse_tree(src)
+    td = list(ax.iter_type_declarations(root))[0]
+    md = list(ax.iter_methods(td))[0]
+    env = fa._Env(
+        const=ConstantTable(),
+        known_entities={"cqkd_zdgl": "entry"},
+        do_vars=ax.dynamicobject_vars(md.node),
+    )
+    accs, _ = fa.analyze_method(md.body, env)
+    by = {a.field_key: a for a in accs}
+    # 整体赋值命中 known_entities 的 entry 级 key：归 entry，entry_key 自引用。
+    assert by["cqkd_zdgl"].level == "entry"
+    assert by["cqkd_zdgl"].entry_key == "cqkd_zdgl"
+    # 不在 known_entities 里的普通字段：维持原有 header 兜底。
+    assert by["cqkd_amount"].level == "header"
+    assert by["cqkd_amount"].entry_key is None
+
+
+def test_root_receiver_unknown_level_falls_back_to_header():
+    """known_entities 查不到该 key（未知/层级冲突置 None）：保守退化回 header，不猜错。"""
+    from cosmic_kb.java import ast_index as ax, field_access as fa
+    from cosmic_kb.java.constants import ConstantTable
+    src = (
+        "package p; public class C {\n"
+        "  public void m(DynamicObject dataEntity) {\n"
+        "    dataEntity.set(\"cqkd_ambiguous\", 1);\n"
+        "  }\n}\n"
+    )
+    root = ax.parse_tree(src)
+    td = list(ax.iter_type_declarations(root))[0]
+    md = list(ax.iter_methods(td))[0]
+    env = fa._Env(
+        const=ConstantTable(),
+        known_entities={"cqkd_ambiguous": None},
+        do_vars=ax.dynamicobject_vars(md.node),
+    )
+    accs, _ = fa.analyze_method(md.body, env)
+    by = {a.field_key: a for a in accs}
+    assert by["cqkd_ambiguous"].level == "header"
+    assert by["cqkd_ambiguous"].entry_key is None
+
+
+def test_orm_loaded_var_entry_whole_assignment_not_header():
+    """同一纠偏不止服务 `_ROOT_NAMES` 根包名——ORM `loadSingle` 取到的表头包变量、
+    事件入参 `e.getDataEntity()` 取到的表头包变量随后 `.set(entry_key, collection)`
+    整体赋值，同样要按 known_entities 纠偏成 entry/subentry，来源实体沿用该变量本身
+    已解出的实体（不是 default_entity）。"""
+    from cosmic_kb.java import ast_index as ax, field_access as fa
+    from cosmic_kb.java.constants import ConstantTable
+    src = (
+        "package p; public class C {\n"
+        "  public void m() {\n"
+        "    DynamicObject contract = BusinessDataServiceHelper.loadSingle(1L, \"cqkd_ht\");\n"
+        "    contract.set(\"cqkd_zdgl\", buildRows());\n"
+        "  }\n}\n"
+    )
+    root = ax.parse_tree(src)
+    td = list(ax.iter_type_declarations(root))[0]
+    md = list(ax.iter_methods(td))[0]
+    env = fa._Env(
+        const=ConstantTable(), known_entities={"cqkd_zdgl": "entry"},
+        do_vars=ax.dynamicobject_vars(md.node),
+    )
+    accs, _ = fa.analyze_method(md.body, env)
+    by = {a.field_key: a for a in accs}
+    assert by["cqkd_zdgl"].level == "entry"
+    assert by["cqkd_zdgl"].entry_key == "cqkd_zdgl"
+    assert by["cqkd_zdgl"].entity == "cqkd_ht"   # 沿用 contract 变量已解出的来源实体
+
+
 def test_cross_class_full_coord_propagation(tmp_path: Path):
     """跨类全坐标传播：入口把分录行传进 service，service 内写入保留分录层级 + 来源。"""
     db, _ = _build(tmp_path)
@@ -817,6 +922,54 @@ def test_cross_class_full_coord_propagation(tmp_path: Path):
             "AND field_key='cqkd_entryf' AND form_key='cqkd_bill'").fetchone()
         assert r is not None
         assert r["level"] == "entry" and r["entry_key"] == "cqkd_entry"
+    finally:
+        conn.close()
+
+
+def test_entry_whole_assignment_end_to_end_consistent(tmp_path: Path):
+    """端到端回归（决策3a+3b 同一样本）：AmEntrySetOp 对表头包整体赋值分录集合
+    `dataEntity.set("cqkd_entry", rows)`——写入记录的层级判定（field_access.level）
+    与「该 key 的元数据定义坐标查询」（trace occurrences）两边结论必须一致，都是 entry，
+    不能一边说 entry 一边在 occurrences 里查不到坐标（3b 修复前 occurrences 恒为空，
+    因为 cqkd_entry 只登记在 entity 表，从不在 field 表）。"""
+    db, _ = _build(tmp_path)
+    conn = store.open_kb(db)
+    try:
+        r = conn.execute(
+            "SELECT level,entry_key,form_key FROM field_access WHERE plugin_fqn='cqspb.am.AmEntrySetOp' "
+            "AND field_key='cqkd_entry'").fetchone()
+        assert r is not None
+        assert r["level"] == "entry" and r["entry_key"] == "cqkd_entry" and r["form_key"] == "cqkd_bill"
+
+        ft = field_trace.field_trace(conn, "cqkd_entry", form_key="cqkd_bill")
+        occ = [o for o in ft["occurrences"] if o["source"] == "entity_container"]
+        assert occ, "cqkd_entry 是分录容器 key，occurrences 应能查到 entity 表定义坐标"
+        assert occ[0]["level"] == "entry"
+        writer = next(
+            w for g in ft["groups"] for w in g["writers"]
+            if w["plugin_fqn"] == "cqspb.am.AmEntrySetOp"
+        )
+        assert writer["level"] == "entry"
+    finally:
+        conn.close()
+
+
+def test_entry_whole_assignment_via_two_part_locator(tmp_path: Path):
+    """回归：CLI/MCP 实际入口传的是"单据.字段"字符串（如 `trace("cqkd_bill.cqkd_entry")`），
+    要走 `parse_locator` 再喂 `field_trace`——不能只测直接传 form_key= 的函数调用（那条路径
+    parse_locator 的猜测层级根本没参与）。此前 parse_locator 对两段式硬猜 level="header"，
+    容器 key 真实层级是 entry，`_is_exact` 按 header 硬匹配把写入行错误挤进 possible 桶。"""
+    db, _ = _build(tmp_path)
+    conn = store.open_kb(db)
+    try:
+        fk, form_key, entry_key, level = field_trace.parse_locator("cqkd_bill.cqkd_entry")
+        ft = field_trace.field_trace(conn, fk, form_key=form_key, entry_key=entry_key, level=level)
+        assert ft["summary"]["possible"] == 0, "容器整体赋值不该落进「可能命中」桶"
+        writer = next(
+            w for g in ft["groups"] for w in g["writers"]
+            if w["plugin_fqn"] == "cqspb.am.AmEntrySetOp"
+        )
+        assert writer["level"] == "entry"
     finally:
         conn.close()
 

@@ -708,10 +708,10 @@ function renderBill(bv) {
     `插件 ${st.plugin_count} · 有插件触达的字段 ${st.touched_fields}`));
 
   if (bv.operations.length) {
-    out.appendChild(el("h3", null, "操作集（★ 有自定义插件，排障优先）"));
+    out.appendChild(el("h3", null, "操作集（★ 有自定义操作插件，排障优先；仅统计操作插件，表单插件按钮内部分支不计入）"));
     const ul = el("ul", "ops");
-    bv.operations.forEach((o) => ul.appendChild(el("li", o.has_plugin ? "hot" : "",
-      `${o.has_plugin ? "★ " : ""}${esc(o.key)} 「${esc(o.name || "")}」[${esc(o.operation_type || "?")}]`)));
+    bv.operations.forEach((o) => ul.appendChild(el("li", o.has_operation_plugin ? "hot" : "",
+      `${o.has_operation_plugin ? "★ " : ""}${esc(o.key)} 「${esc(o.name || "")}」[${esc(o.operation_type || "?")}]`)));
     out.appendChild(ul);
   }
   // 轴 A · 插件清单按场景车道分流（单据绑定插件；孤儿类走后续类型目录旁路）。

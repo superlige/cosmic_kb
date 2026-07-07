@@ -235,10 +235,29 @@ def _collect_materials(
             "field_name": r["name"], "level": r["level"],
             "entity_key": r["entity_key"],
             "entity_name": entity_names.get((r["form_key"], r["entity_key"])),
-            "kind": r["kind"],
+            "kind": r["kind"], "parent_key": None, "source": "field",
         }
         for r in conn.execute(
             "SELECT form_key,name,level,entity_key,kind FROM field WHERE key=? "
+            "ORDER BY form_key,level", (field_key,),
+        ).fetchall()
+    ]
+    # 分录/子分录容器本身的定义坐标——field_key 传的是整个分录/子分录实体 key（如
+    # `dataEntity.set("cqkd_zdgl", collection)` 整体赋值场景）时，这个 key 只登记在 entity
+    # 表，从不在 field 表，上面那段查询恒为空。补一次 entity 表按 key 查询，`source` 标
+    # `entity_container` 区分两类命中；`entity_key`/`entity_name` 沿用「所属容器」语义，
+    # 取父容器（parent_key），与字段侧对称（容器不属于自己）。
+    occurrences += [
+        {
+            "form_key": r["form_key"], "form_name": form_names.get(r["form_key"]),
+            "field_name": r["name"], "level": r["level"],
+            "entity_key": r["parent_key"],
+            "entity_name": entity_names.get((r["form_key"], r["parent_key"])),
+            "kind": r["level"] or "entry", "parent_key": r["parent_key"],
+            "source": "entity_container",
+        }
+        for r in conn.execute(
+            "SELECT form_key,name,level,parent_key FROM entity WHERE key=? "
             "ORDER BY form_key,level", (field_key,),
         ).fetchall()
     ]
@@ -1020,7 +1039,13 @@ def parse_locator(text: str) -> tuple[str, str | None, str | None, str | None]:
     """把层级显式的点号查询解析成 (field_key, form_key, entry_key, level)，纯按段数判定：
 
       字段              → (field, None, None, None)   裸字段；若跨单据有歧义，trace 会反问单据
-      单据.字段          → (field, 单据, None, "header")
+      单据.字段          → (field, 单据, None, None)   只锁单据，层级不猜——分录整体赋值容器 key
+                          （如 `cqkd_zdgl`，只登记在 entity 表、真实层级是 entry/subentry）也走
+                          这个两段写法，若强行猜 "header" 会在精确桶里查无匹配、误落"可能命中"
+                          （2026-07 修复：曾经猜 header，`_is_exact` 的 level 硬匹配把真实层级
+                          是 entry 的容器写入行错误挤进 possible 桶，filter 回显的 header 还会
+                          误导人以为该层级真查无结果）。留 None 后 `_is_exact` 只按单据过滤，
+                          该单据内该 key 有几个层级就分几组，不会拿错层级去比对。
       单据.分录.字段      → (field, 单据, 分录, "entry")
       单据.分录.子分录.字段 → (field, 单据, 子分录, "subentry")   （中段=父分录，仅供阅读）
     """
@@ -1030,7 +1055,7 @@ def parse_locator(text: str) -> tuple[str, str | None, str | None, str | None]:
     if len(parts) == 3:
         return parts[2], parts[0], parts[1], "entry"
     if len(parts) == 2:
-        return parts[1], parts[0], None, "header"
+        return parts[1], parts[0], None, None
     return (parts[0] if parts else text.strip()), None, None, None
 
 
@@ -1167,9 +1192,10 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
         for o in ft["occurrences"]:
             ek = f"·{o['entity_key']}" if o["entity_key"] else ""
             en = f"「{o['entity_name']}」" if o.get("entity_name") else ""
+            tag = "容器·" if o.get("source") == "entity_container" else ""
             lines.append(
                 f"  «{o['form_key'] or '?'}»{('「'+o['form_name']+'」') if o.get('form_name') else ''}  "
-                f"{o['field_name'] or ''} [{_LEVEL_LABEL.get(o['level'], o['level'])}{ek}{en}] ({o['kind']})"
+                f"{tag}{o['field_name'] or ''} [{_LEVEL_LABEL.get(o['level'], o['level'])}{ek}{en}] ({o['kind']})"
             )
 
     if ft.get("status") == "need_clarification":

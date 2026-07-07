@@ -80,7 +80,7 @@ def overview(conn) -> dict[str, Any]:
         "       (SELECT COUNT(*) FROM entity e WHERE e.form_key=f.key) entity_count,"
         "       (SELECT COUNT(*) FROM field fl WHERE fl.form_key=f.key) field_count,"
         "       (SELECT COUNT(*) FROM plugin p WHERE p.form_key=f.key) plugin_count,"
-        "       (SELECT COUNT(*) FROM operation o WHERE o.form_key=f.key AND o.has_plugin=1)"
+        "       (SELECT COUNT(*) FROM operation o WHERE o.form_key=f.key AND o.has_operation_plugin=1)"
         "         op_with_plugin_count "
         "FROM form f ORDER BY field_count DESC"
     ).fetchall()]
@@ -147,7 +147,7 @@ def overview(conn) -> dict[str, Any]:
         "FROM field_access WHERE access='write' AND field_key IS NOT NULL "
         "GROUP BY field_key ORDER BY plugins DESC, field_key LIMIT 20")]
     ops_with_plugin = conn.execute(
-        "SELECT COUNT(*) FROM operation WHERE has_plugin=1").fetchone()[0]
+        "SELECT COUNT(*) FROM operation WHERE has_operation_plugin=1").fetchone()[0]
     field_analysis = {
         "available": java.get("available", True),
         "analyzed_plugins": java.get("analyzed_plugins", 0),

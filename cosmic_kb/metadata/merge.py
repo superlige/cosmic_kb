@@ -21,10 +21,18 @@ if TYPE_CHECKING:
 
 
 def strip_vendor_plugins(vendor: "MetaModel") -> "MetaModel":
-    """清空原厂模型的插件——无源码，对 KB 无意义（用户拍板）。"""
-    if not vendor.plugins:
+    """清空原厂模型里"无源码、追不到执行体"的插件（用户拍板 2026-07-02）。
+
+    唯一例外：`enabled is False`（元数据里明确 `<Enabled>false</Enabled>`）的原厂插件
+    予以保留——"这个钩子当前不会执行"是元数据本身给出的确定性信号，与有没有源码无关；
+    真实翻车案例：`kd.cf.lgc.ht.opplugin.AdjustAmountOpplugin` 在某单据原厂层被禁用，
+    旧逻辑整条丢弃后，KB 里若还留有该类名的其它绑定（如扩展继承下来的同名条目、
+    未携带 Enabled 标签）会被误报成 `enabled=null`（未知），而不是"已确认禁用"。
+    """
+    keep = [p for p in vendor.plugins if p.enabled is False]
+    if len(keep) == len(vendor.plugins):
         return vendor
-    return replace(vendor, plugins=[])
+    return replace(vendor, plugins=keep)
 
 
 def _header_entity(model: "MetaModel") -> "MetaEntity | None":
@@ -39,14 +47,15 @@ def merge_vendor_extension(vendor: "MetaModel", extensions: list["MetaModel"]) -
         entities  = vendor.entities + 扩展实体（去掉扩展自己的表头行，分录重新挂到原厂表头）
         fields    = vendor.fields + 扩展字段（entity_key 指向扩展表头的重写成原厂表头 key）
         operations = vendor.operations + 全部扩展的 operations（原厂标准操作一并保留语义）
-        plugins   = 仅扩展 plugins（原厂插件已被视为"无源码、对 KB 无意义"，不并入）
+        plugins   = vendor 侧（通常已被 `strip_vendor_plugins` 收窄到仅剩 enabled=False 的
+                    确认禁用条目，其余无源码插件已丢弃）+ 全部扩展 plugins
         is_extension=False, extends=None（它现在是"最终权威内容"，不是别名）
     """
     vendor_header = _header_entity(vendor)
     entities = list(vendor.entities)
     fields = list(vendor.fields)
     operations = list(vendor.operations)
-    plugins: list = []
+    plugins: list = list(vendor.plugins)
     warnings = list(vendor.warnings)
     seen_field_keys = {(f.entity_key, f.key) for f in fields if f.key}
     sources = [vendor.source_file] if vendor.source_file else []

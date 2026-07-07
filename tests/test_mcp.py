@@ -27,38 +27,6 @@ def kb_env(tmp_path: Path, monkeypatch):
     return db
 
 
-def test_tool_ask_same_as_builder(kb_env):
-    """tool_ask 复用 resolver.resolve + builder.build_context（不重写取证逻辑）；唯一差异是
-    字段意图的 evidence 经 MCP 换成紧凑投影 trace_compact（防 host 截断），其余逐键相同。"""
-    from cosmic_kb.semantic import resolver
-    from cosmic_kb.context import builder
-    from cosmic_kb.report import field_trace
-
-    got = mcp_server.tool_ask("cqkd_collateralstatus")
-    conn = store.open_kb(kb_env)
-    try:
-        rq = resolver.resolve(conn, "cqkd_collateralstatus")
-        want = builder.build_context(conn, rq)
-        compact = field_trace.trace_compact(
-            conn, rq.field_key, form_key=rq.form_key, entry_key=rq.entry_key, level=rq.level)
-    finally:
-        conn.close()
-    assert got["intent"] == "field_who_changed"
-    # 除 evidence 外逐键相同（advice/status/query 等取证逻辑未重写）。
-    assert {k: v for k, v in got.items() if k != "evidence"} == \
-           {k: v for k, v in want.items() if k != "evidence"}
-    # evidence 是紧凑投影（写读拆分 + 按类合并），不再是富 trace 的 groups[].writers 行结构。
-    assert got["evidence"] == compact
-    assert got["evidence"]["access"] == "all"
-
-
-def test_tool_ask_clarification(kb_env):
-    """同名字段跨单据 → 证据包退化为消歧候选，绝不替用户拍板。"""
-    got = mcp_server.tool_ask("金额是谁改的？")
-    assert got.get("status") == "need_clarification"
-    assert got.get("candidates")
-
-
 def test_tool_trace_same_as_report(kb_env):
     """tool_trace 走紧凑投影 trace_compact（防 host 截断），与 report 同口径、零重写。"""
     from cosmic_kb.report import field_trace
@@ -124,14 +92,16 @@ def test_tool_bill_missing_form(kb_env):
 def test_open_raises_when_kb_missing(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("COSMIC_KB_DB", str(tmp_path / "nope.db"))
     with pytest.raises(RuntimeError):
-        mcp_server.tool_ask("cqkd_collateralstatus")
+        mcp_server.tool_trace("cqkd_collateralstatus")
+    with pytest.raises(RuntimeError):
+        mcp_server.tool_bill("cqkd_assetcard")
 
 
 def test_tools_registry_matches():
-    """TOOLS 注册表收敛到 5 个排障核心工具（read_source 已于 2026-07-05 退役、method_calls 也已
-    退役，防漏注册）。"""
+    """TOOLS 注册表收敛到 4 个排障核心工具（read_source/method_calls/ask 均已整体退役，
+    防漏注册）。"""
     assert set(mcp_server.TOOLS) == {
-        "ask", "trace", "bill",
+        "trace", "bill",
         "resolve_fields", "cosmic_semantics"}
     for fn in mcp_server.TOOLS.values():
         assert callable(fn)

@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from ..metadata.model import MetaModel
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
-KB_SCHEMA_VERSION = "14"
+KB_SCHEMA_VERSION = "16"
 
 # DROP 顺序（FTS 虚拟表与各表；DROP TABLE 对 search 同样有效，会连带清掉 FTS 影子表）。
 _OBJECTS = [
@@ -162,7 +162,8 @@ def _populate(
             for p in m.plugins:
                 uid = _plugin_uid(m.key, p)
                 plugins.append((uid, m.key, p.class_name, p.plugin_type, p.source,
-                                p.operation_key, p.operation_name))
+                                p.operation_key, p.operation_name,
+                                (1 if p.enabled else 0) if p.enabled is not None else None))
                 if p.class_name:
                     edges.append(("plugin", uid, "class", p.class_name, "bound_to", 1.0, None))
                     search.append(("plugin", p.class_name, p.operation_name or "", m.key or ""))
@@ -205,7 +206,8 @@ def _populate(
         for p in m.plugins:
             uid = _plugin_uid(m.key, p)
             plugins.append((uid, m.key, p.class_name, p.plugin_type, p.source,
-                            p.operation_key, p.operation_name))
+                            p.operation_key, p.operation_name,
+                            (1 if p.enabled else 0) if p.enabled is not None else None))
             edges.append(("form", m.key, "plugin", uid, "has_plugin", 1.0, None))
             if p.class_name:
                 edges.append(("plugin", uid, "class", p.class_name, "bound_to", 1.0, None))
@@ -215,10 +217,11 @@ def _populate(
     conn.executemany("INSERT INTO entity VALUES(?,?,?,?,?,?)", entities)
     conn.executemany("INSERT INTO field VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", fields)
     conn.executemany("INSERT INTO field_combo_item VALUES(?,?,?)", combo_items)
-    conn.executemany("INSERT INTO plugin VALUES(?,?,?,?,?,?,?)", plugins)
+    conn.executemany("INSERT INTO plugin VALUES(?,?,?,?,?,?,?,?)", plugins)
     conn.executemany("INSERT INTO convert_rule VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", convert_rules)
 
-    # ── operation（操作集；has_plugin 标是否有自定义操作插件，落库判定/排查入口用）──
+    # ── operation（操作集；has_operation_plugin 标是否有自定义操作插件绑定，落库判定/
+    #    排查入口用；只统计 plugin_type='op'，不含表单插件按 operationKey 分支间接处理）──
     operations = []
     for m in models:
         op_keys_with_plugin = {

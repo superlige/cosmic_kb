@@ -70,7 +70,7 @@
 原因很直接：`trace` 这类查询命中多个插件/坐标时，一次返回就是几十条 JSON（类名、方法名、
 行号、置信度、截断游标……），肉眼扫读很累也容易看漏。正常用法是装好 MCP（见下一节），
 让 agent 帮你调工具、读证据、组织成"谁改的/在哪/落不落库"这样的中文结论。命令行（`trace`/
-`bill`/`ask`/`web`）仍然保留，适合你想自己写脚本、或不方便接 agent 的场合，但不是日常首选。
+`bill`/`resolve`/`web`）仍然保留，适合你想自己写脚本、或不方便接 agent 的场合，但不是日常首选。
 
 ---
 
@@ -84,7 +84,7 @@
 >   `pyproject.toml`）—— 按下面 0~4 步来，核心命令是 `pip install -e ".[...]"`。
 > - **B. 只有一个 `.whl` 文件**（比如别人用 `python -m build --wheel` 产出、发给你的
 >   `cosmic_kb-<版本>-py3-none-any.whl`）—— **跳过下面的 `-e "."` 命令**，改用
->   `pip install "<whl文件路径>[parse,fuzzy,mcp]"`（把方括号 extras 直接接在
+>   `pip install "<whl文件路径>[parse,mcp]"`（把方括号 extras 直接接在
 >   文件路径后面），不需要整个仓库，也不需要 `pyproject.toml`。详见文末「分发给同事」一节。
 
 ### 0）确认电脑上有 Python
@@ -131,7 +131,7 @@ python -m venv .venv
 ### 3）安装本工具
 
 ```powershell
-pip install -e ".[parse,fuzzy,mcp]"
+pip install -e ".[parse,mcp]"
 ```
 
 > 这条命令只适用于**场景 A**（你手上是整个源码文件夹）。如果你拿到的是**场景 B** 的
@@ -147,14 +147,13 @@ pip install -e ".[parse,fuzzy,mcp]"
   jar 装进仓库，源码变了要重新装一次。
 - `"."`：代表"当前目录"，也就是要安装**当前这个项目自己**（它旁边有个 `pyproject.toml`，相当于
   Java 项目里的 `pom.xml`，声明了这个包叫什么、依赖什么）。
-- `"[parse,fuzzy,mcp]"`：方括号里是**可选功能组**（类似 Maven 的 optional dependency /
+- `"[parse,mcp]"`：方括号里是**可选功能组**（类似 Maven 的 optional dependency /
   profile），逗号分隔，只有列在这里的组才会被装上。下表说明每组是干什么的、要不要装：
 
 | 可选组 | 作用 | 建议 |
 |--------|------|------|
 | `parse` | Java 静态分析引擎（字段级排障、`trace`/`bill` 等旗舰功能都靠它解析 Java 源码） | **必装** |
 | `encoding` | 字符编码自动探测，个别文件不是 UTF-8 时的兜底（现在源码基本都是 UTF-8，用不上也不影响主流程） | 可选 |
-| `fuzzy` | `ask` 自然语言提问时"中文名↔字段标识"的模糊匹配 | 可选（不装功能会降级但仍可用） |
 | `mcp` | 让本工具能被 AI agent（Claude Code/Desktop、Cursor、Codex…）当作 MCP 工具调用 | **要接 agent 就必装** |
 | `dev` | 跑本工具自带的自测（`pytest`），只有你要改本工具源码/验收时才需要 | 仅开发/验收用 |
 
@@ -344,7 +343,7 @@ KB** 最稳。
 - 「这个项目的字段扫描覆盖率怎么样，有没有扫不到的地方？」→ agent 会调 `coverage`（信任优先）。
 
 这些都是**普通对话**，不是固定命令模板——只要问题里带着字段/单据/插件这类信息，agent 就有
-线索去调工具取证。它会自动调 `ask/trace/bill/resolve_fields/cosmic_semantics` 这 5 个 MCP 工具
+线索去调工具取证。它会自动调 `trace/bill/resolve_fields/cosmic_semantics` 这 4 个 MCP 工具
 取证、带类·方法·行号·三态置信度作答——**苍穹领域纪律（三态置信度、不臆造、入库
 判断）已经随 MCP `instructions` 注入宿主，任意 agent 都自带，不需要额外装 Skill。**
 
@@ -376,7 +375,6 @@ KB** 最稳。
 | `cosmic_kb trace "单据.[分录.[子分录.]]字段"` | **旗舰**：字段→谁读/写了它、哪个事件函数、是否落库、源码行号 |
 | `cosmic_kb bill "单据标识"` | 单据钻取：表单/操作/列表插件绑定一次列全 + 字段触达/风险点 |
 | `cosmic_kb resolve <标识>...` | 字段/表头实体/分录/子分录/单据(表单)→真实中文名+坐标（堵命名惯例瞎猜，钉不出回 `null`） |
-| `cosmic_kb ask "<问题>"` | 自然语言提问→意图解析→查 KB 取证（同名歧义会反问，不替你拍板） |
 | `cosmic_kb report map` | 项目地图：多信号模块识别 + 包结构健康度 |
 | `cosmic_kb report overview` | 排障概览：字段级定位入口/规模/风险热点 |
 | `cosmic_kb source <相对源文件路径>` | 人工终端读源码（野生编码正确解码 + 自动标注字段中文名）；仅 CLI，段二 agent 走 MCP 已改用宿主自带 reader + `resolve_fields` |
@@ -385,8 +383,8 @@ KB** 最稳。
 | `cosmic_kb dynwrites` | **信任优先**：字段 key 钉不出的动态读写，按"该读方法"去重列出 |
 | `cosmic_kb web` | 本地浏览器（仅 `127.0.0.1`）：输字段→表格→跳源码，含「扫描可信度」页签 |
 
-`coverage`/`scan-compare`/`dynwrites`/`source` 只在 CLI 提供；MCP 只精简暴露给 agent 5 个主
-路径工具（`ask`/`trace`/`bill`/`resolve_fields`/`cosmic_semantics`），见上一节。
+`coverage`/`scan-compare`/`dynwrites`/`source` 只在 CLI 提供；MCP 只精简暴露给 agent 4 个主
+路径工具（`trace`/`bill`/`resolve_fields`/`cosmic_semantics`），见上一节。
 
 命令行输出的是原始证据，字段较多、需要自己对照理解（含义见
 [`docs/参考手册/返回值字段词典.md`](docs/参考手册/返回值字段词典.md)）；`cosmic_kb --help` / `cosmic_kb <子命令> --help`
@@ -403,7 +401,7 @@ pip install build
 python -m build --wheel     # 产出 dist\cosmic_kb-<版本>-py3-none-any.whl
 ```
 
-对方 `pip install "cosmic_kb-<版本>-py3-none-any.whl[parse,fuzzy,mcp]"` 即可，
+对方 `pip install "cosmic_kb-<版本>-py3-none-any.whl[parse,mcp]"` 即可，
 不需要整仓库。离线/内网场景的整包 zip 兜底见 `scripts/make_dist.ps1` + `scripts/安装说明.md`。
 
 ---

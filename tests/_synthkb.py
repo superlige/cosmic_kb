@@ -54,11 +54,11 @@ def make_kb(tmp_path: Path) -> Path:
         ],
     )
     conn.executemany(
-        "INSERT INTO plugin(uid,form_key,class_name,plugin_type,source,operation_key,operation_name) "
-        "VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO plugin(uid,form_key,class_name,plugin_type,source,operation_key,operation_name,enabled) "
+        "VALUES(?,?,?,?,?,?,?,?)",
         [
             ("p1", "cqkd_assetcard", "cqspb.assets.CollateralOp", "op", "project",
-             "audit", "审核"),
+             "audit", "审核", 1),
         ],
     )
     conn.executemany(
@@ -72,7 +72,7 @@ def make_kb(tmp_path: Path) -> Path:
         ],
     )
     conn.executemany(
-        "INSERT INTO operation(form_key,key,name,operation_type,resolved_from,has_plugin) "
+        "INSERT INTO operation(form_key,key,name,operation_type,resolved_from,has_operation_plugin) "
         "VALUES(?,?,?,?,?,?)",
         [
             ("cqkd_assetcard", "audit", "审核", "audit", "self", 1),

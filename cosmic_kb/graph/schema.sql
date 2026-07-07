@@ -82,7 +82,9 @@ CREATE TABLE plugin (
     plugin_type     TEXT,                 -- form/list/op/writeback
     source          TEXT,                 -- project/platform/unknown
     operation_key   TEXT,
-    operation_name  TEXT
+    operation_name  TEXT,
+    enabled         INTEGER               -- 三态：1=启用/0=禁用/NULL=unknown（<Enabled> 标签解析而来；
+                                           -- convert 插件恒为 NULL，CRPlugin 结构本无 per-plugin Enabled）
 );
 
 -- ── 源码类（namespace 索引 + bridge 孤儿）──────────────────────────────────
@@ -134,7 +136,12 @@ CREATE TABLE operation (
     name            TEXT,
     operation_type  TEXT,                 -- OperationType（save/audit/donothing/…）
     resolved_from   TEXT,                 -- self/template/unknown（可信度来源）
-    has_plugin      INTEGER DEFAULT 0     -- 是否有自定义操作插件绑定（排查入口）
+    -- 是否有自定义**操作插件**（plugin_type='op'）绑定（排查入口）。只统计操作插件，
+    -- 不含表单插件（plugin_type='form'）内部按 operationKey 字符串分支间接处理该操作的
+    -- 情况——那需要 Java 方法体解析，工作量大，本轮不做。字段名故意带 `_operation_`
+    -- 前缀自解释，避免与 `edge` 表 `kind='has_plugin'`（通用"表单 has_plugin 插件"关系边，
+    -- 完全不同的概念）混淆。
+    has_operation_plugin INTEGER DEFAULT 0
 );
 
 -- ── 插件方法（阶段5：事件函数 / helper + 落库相位）──────────────────────────
@@ -234,7 +241,9 @@ CREATE TABLE kb_meta (
 CREATE INDEX idx_form_module      ON form(module);
 CREATE INDEX idx_form_key         ON form(key);
 CREATE INDEX idx_entity_form      ON entity(form_key);
+CREATE INDEX idx_entity_key       ON entity(key);   -- resolve_fields/trace occurrences 按 key 查容器
 CREATE INDEX idx_field_form       ON field(form_key);
+CREATE INDEX idx_field_key        ON field(key);    -- resolve_fields/trace occurrences 按 key 查字段
 CREATE INDEX idx_plugin_form      ON plugin(form_key);
 CREATE INDEX idx_plugin_class     ON plugin(class_name);
 CREATE INDEX idx_class_module     ON source_class(module);

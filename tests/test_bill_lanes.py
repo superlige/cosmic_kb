@@ -28,16 +28,16 @@ def _add_plugins(db: Path) -> None:
     conn = sqlite3.connect(str(db))
     try:
         conn.executemany(
-            "INSERT INTO plugin(uid,form_key,class_name,plugin_type,source,operation_key,operation_name) "
-            "VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO plugin(uid,form_key,class_name,plugin_type,source,operation_key,operation_name,enabled) "
+            "VALUES(?,?,?,?,?,?,?,?)",
             [
-                ("p_form", "cqkd_assetcard", "cqspb.assets.CardFormPlugin", "form", "project", None, None),
-                ("p_list", "cqkd_assetcard", "cqspb.assets.CardListPlugin", "list", "project", None, None),
-                ("p_conv", "cqkd_assetcard", "cqspb.assets.CardConvertPlugin", "convert", "project", None, None),
-                ("p_xyz", "cqkd_assetcard", "cqspb.assets.WeirdPlugin", "xyz", "project", None, None),
+                ("p_form", "cqkd_assetcard", "cqspb.assets.CardFormPlugin", "form", "project", None, None, 1),
+                ("p_list", "cqkd_assetcard", "cqspb.assets.CardListPlugin", "list", "project", None, None, 1),
+                ("p_conv", "cqkd_assetcard", "cqspb.assets.CardConvertPlugin", "convert", "project", None, None, 1),
+                ("p_xyz", "cqkd_assetcard", "cqspb.assets.WeirdPlugin", "xyz", "project", None, None, 1),
                 # 平台预制 kd.bos.*（source=platform）：应被排除在车道外、只计数。
                 ("p_plat", "cqkd_assetcard", "kd.bos.business.plugin.CodeRuleOp", "op", "platform",
-                 "save", "保存"),
+                 "save", "保存", 1),
             ],
         )
         # 给 form 插件一条 missing binding，验证 binding_risk 挂上。
@@ -148,6 +148,61 @@ def test_compact_lane_index_is_light(kb):
         assert "plugins" not in ln           # 轻量：不复制逐插件行
     assert "plugins" in res and res["plugins"]   # 逐插件明细仍在平铺段
     assert _wire_len(res) <= _COMPACT_BUDGET
+
+
+def test_disabled_plugin_excluded_from_lanes_and_listed_separately(kb):
+    """Enabled=false 的插件整体挪出车道，单独归入 disabled_plugins；平铺 plugins 仍保留（不静默丢）。"""
+    conn = _conn(kb)
+    try:
+        conn.execute(
+            "INSERT INTO plugin(uid,form_key,class_name,plugin_type,source,operation_key,operation_name,enabled) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            ("p_disabled", "cqkd_assetcard", "cqspb.assets.OldFormPlugin", "form", "project",
+             None, None, 0),
+        )
+        conn.commit()
+        bv = B.bill_view(conn, "cqkd_assetcard")
+        compact = B.bill_compact(conn, "cqkd_assetcard")
+    finally:
+        conn.close()
+
+    form_lane = next(ln for ln in bv["plugin_lanes"] if ln["lane_id"] == "form")
+    assert all(p["class_name"] != "cqspb.assets.OldFormPlugin" for p in form_lane["plugins"])
+
+    disabled = {p["class_name"]: p for p in bv["disabled_plugins"]}
+    assert "cqspb.assets.OldFormPlugin" in disabled
+    assert disabled["cqspb.assets.OldFormPlugin"]["enabled"] == 0
+
+    # 平铺 plugins 完整清单仍保留（红线 #4：不静默丢证据）。
+    assert any(p["class_name"] == "cqspb.assets.OldFormPlugin" for p in bv["plugins"])
+    assert bv["stats"]["disabled_plugin_count"] == 1
+
+    assert any(p["class_name"] == "cqspb.assets.OldFormPlugin" for p in compact["disabled_plugins"])
+
+    text = B.render_bill(bv)
+    assert "已禁用/历史插件" in text
+    assert "cqspb.assets.OldFormPlugin" in text
+    assert "[停用]" in text
+
+
+def test_unknown_enabled_not_treated_as_disabled(kb):
+    """enabled 为 NULL（未知）不能被当成禁用——仍留在车道里，不进 disabled_plugins。"""
+    conn = _conn(kb)
+    try:
+        conn.execute(
+            "INSERT INTO plugin(uid,form_key,class_name,plugin_type,source,operation_key,operation_name) "
+            "VALUES(?,?,?,?,?,?,?)",
+            ("p_unknown", "cqkd_assetcard", "cqspb.assets.UnknownEnabledPlugin", "list", "project",
+             None, None),
+        )
+        conn.commit()
+        bv = B.bill_view(conn, "cqkd_assetcard")
+    finally:
+        conn.close()
+
+    list_lane = next(ln for ln in bv["plugin_lanes"] if ln["lane_id"] == "list")
+    assert any(p["class_name"] == "cqspb.assets.UnknownEnabledPlugin" for p in list_lane["plugins"])
+    assert all(p["class_name"] != "cqspb.assets.UnknownEnabledPlugin" for p in bv["disabled_plugins"])
 
 
 def test_render_bill_text_has_lanes(kb):

@@ -95,7 +95,10 @@ class _Env:
     convert_source: str | None = None        # 转换插件源单实体
     # 形参名→完整数据包坐标 (level, entry_key, entity, is_collection)，跨方法/跨类传播（按实参↔形参）。
     param_ctx: dict[str, tuple] = field(default_factory=dict)
-    known_entities: frozenset[str] = frozenset()  # 元数据已知实体/单据集（校验 ORM 实参）
+    # 元数据已知实体/单据 key → 层级（只有 entry/subentry 有意义，其余含表单 key 一律
+    # None）；校验 ORM 实参是否已知实体，也用于判定 dataEntity.set(key,...) 是整体赋值
+    # 分录/子分录还是表头字段写入。
+    known_entities: dict[str, str | None] = field(default_factory=dict)
     do_vars: frozenset[str] = frozenset()    # DynamicObject 形参/局部/循环变量名（兜底识别）
     do_params: frozenset[str] = frozenset()  # 其中的 DynamicObject 形参名（无 init，先于循环播种）
     do_array_params: frozenset[str] = frozenset()  # DynamicObject[] 数组/变长形参（一组表头行，按集合处理）
@@ -120,6 +123,10 @@ class _Env:
     iter_vars: frozenset[str] = frozenset()
     # 局部变量名→其初始化表达式节点：用于判「拼接键」（`String setKey = CON.X + "_" + type`）。
     local_inits: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.known_entities, dict):
+            self.known_entities = {key: None for key in self.known_entities}
 
 
 @dataclass
@@ -238,12 +245,12 @@ def extract_field_access(
     *, do_vars: set[str] | None = None, default_entity: str | None = None,
     convert_source: str | None = None,
     param_ctx: dict[str, tuple[str, str | None, str | None]] | None = None,
-    known_entities: frozenset[str] | None = None,
+    known_entities: dict[str, str | None] | None = None,
 ) -> list[FieldAccess]:
     """抽取一个方法体内的全部字段读写（便捷封装；只要 accesses）。"""
     env = _Env(
         const=const, default_entity=default_entity, convert_source=convert_source,
-        param_ctx=param_ctx or {}, known_entities=known_entities or frozenset(),
+        param_ctx=param_ctx or {}, known_entities=known_entities or {},
         do_vars=frozenset(do_vars or ()),
     )
     return analyze_method(method_body, env)[0]
@@ -813,10 +820,12 @@ def _classify_access(
 
     # ── 习语 B：DynamicObject 数据包 set/get ──────────────────────────────
     if name in _DO_WRITE or name in _DO_READ:
-        ctx = _resolve_do_ctx(obj, doc_ctx, coll_ctx, env)
+        # key 字面量不依赖层级判定，先解出来——_resolve_do_ctx 的 _ROOT_NAMES 分支要用它
+        # 校验 key 在元数据里是不是分录/子分录整体实体 key（而非表头字段），见该函数注释。
+        kr = _refine_null_key(inv, env.const.resolve_arg(inv, 0), env)
+        ctx = _resolve_do_ctx(obj, doc_ctx, coll_ctx, env, kr.value if kr else None)
         if ctx is None:
             return None
-        kr = _refine_null_key(inv, env.const.resolve_arg(inv, 0), env)
         if kr is None:   # 既非字段 key、又非可归因的拼接/动态表达式 → 不记录（保持原行为）
             return None
         is_write = name in _DO_WRITE
@@ -830,8 +839,32 @@ def _classify_access(
 
 def _resolve_do_ctx(
     object_text: str, doc_ctx: dict[str, _Ctx], coll_ctx: dict[str, _Ctx], env: _Env,
+    key_literal: str | None = None,
 ) -> _Ctx | None:
-    """判定一个 DynamicObject set/get 的接收者上下文（层级 + 分录 key + 来源实体）。"""
+    """判定一个 DynamicObject set/get 的接收者上下文（层级 + 分录 key + 来源实体）。
+
+    `key_literal` 是本次 set/get 的字段 key 实参字面量（跨方法/局部变量已解出时才有）。
+    接收者上下文判到 header 的来源不止一处（根包变量名兜底 / doc_ctx 里已登记的表头包变量，
+    如事件入参 `e.getDataEntity()` 取到的整包、ORM `loadSingle` 结果），它们无一例外只看
+    接收者变量的坐标，不管 set/get 的 key 到底是什么——但 `dataEntity.set("cqkd_zdgl",
+    collection)` 这类整体赋值，key 本身就是分录/子分录实体 key（元数据里定义在 entity 表，
+    不是字段），不是表头字段写入。这里统一在得到原始 ctx 后做一次纠偏：只要判到 header
+    且 key 精确命中 `env.known_entities` 的 entry/subentry，就改判为该层级（entry_key=key
+    自引用，来源实体沿用原 ctx 的实体，与 `getDynamicObjectCollection(k)` 场景的既有惯例
+    一致）；查不到/层级冲突（`known_entities.get(key)` 为 None）维持原判，不猜错。
+    """
+    ctx = _resolve_do_ctx_raw(object_text, doc_ctx, coll_ctx, env)
+    if ctx is not None and ctx.level == "header" and key_literal is not None:
+        entry_level = env.known_entities.get(key_literal)
+        if entry_level in ("entry", "subentry"):
+            return _Ctx(entry_level, key_literal, ctx.entity, note=ctx.note)
+    return ctx
+
+
+def _resolve_do_ctx_raw(
+    object_text: str, doc_ctx: dict[str, _Ctx], coll_ctx: dict[str, _Ctx], env: _Env,
+) -> _Ctx | None:
+    """`_resolve_do_ctx` 的原始判定逻辑（不含 known_entities 纠偏），按接收者变量坐标定层级。"""
     base_raw = object_text.split(".", 1)[0].strip().split("(", 1)[0].strip()
     has_index = bool(re.search(r"\[.*?\]$", base_raw))
     base = re.sub(r"\[.*?\]$", "", base_raw)   # 去数组下标 entities[0] → entities
