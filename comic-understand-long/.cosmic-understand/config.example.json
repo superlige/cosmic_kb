@@ -1,8 +1,0 @@
-{
-  "okCosmicConfig": ".cosmic-understand\\ok-cosmic.json",
-  "defaultProjectRoot": "D:\\kingdee\\asset_management_sys",
-  "scan": {
-    "includeExtensions": [".java", ".xml", ".dym", ".json", ".properties"],
-    "excludeDirs": [".git", ".gradle", "build", "target", "out", "node_modules"]
-  }
-}
