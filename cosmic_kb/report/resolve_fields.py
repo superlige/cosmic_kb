@@ -331,7 +331,9 @@ def _kind_mismatch(
     return mm
 
 
-def resolve_fields(conn, keys: list[str], *, kind: str | None = None) -> dict[str, Any]:
+def resolve_fields(
+    conn, keys: list[str], *, kind: str | list[str | None] | None = None,
+) -> dict[str, Any]:
     """字段/分录容器/单据标识 → 真实元数据中文名+实体坐标。钉不出回 None（不臆造）。
 
     `key` 支持复合限定符——`"单据.字段"`/`"分录.字段"`/`"单据.分录.字段"`（与 `trace` 的点号
@@ -345,6 +347,14 @@ def resolve_fields(conn, keys: list[str], *, kind: str | None = None) -> dict[st
     （`mismatched_form`，两者互斥触发，不处理二者共存——种类都不对时先纠种类，用户/模型改对
     种类后再跑一次自然会走到 `mismatched_form` 那一级）。
 
+    **`kind` 也接受与 `keys` 等长的列表**（2026-07-08，真实翻车复盘）：批量传入的 key 常常分属
+    不同层级——比如同时传单据号字面量、分录容器 key、字段 key 三个不同的标识——此时传单个
+    `kind` 字符串会被广播到全部 key，必然对不上其中至少一个（模型曾把 `["cqkd_ht","cqkd_zdgl",
+    "cqkd_qs"]` 全标 `kind="field"`，实际分别是 form/entity/field 三个不同种类，导致前两个全部
+    落入 `mismatched_kind`）。分属不同层级时改传等长列表逐位对应，如
+    `kind=["form","entity","field"]`；某位不确定就填 `None`（该 key 三路全查，不限定）。列表长度
+    与 `keys` 不一致会直接 `ValueError`（形状错误，拒绝静默截断/循环补齐）。
+
     `kind="entity"` 时两段式「分录.字段」限定符不允许省略单据前缀：命中 `invalid_request[key]`
     （`reason="missing_form_key"`），`resolved[key]` 给 `None`，不给候选——需改传三段式
     「单据.分录.字段」（见模块 docstring）。
@@ -355,13 +365,23 @@ def resolve_fields(conn, keys: list[str], *, kind: str | None = None) -> dict[st
     插件子类"时，`resolved[key]` 仍给 `None`，但 `unbound_in_source[key]` 会诚实标注该类的
     源文件位置与插件基类（"钉不出绑定"与"钉不出类本身"是两种不同的 unknown，不能混为一谈）。
     """
+    if isinstance(kind, list):
+        if len(kind) != len(keys):
+            raise ValueError(
+                f"kind 列表长度({len(kind)})必须与 keys 长度({len(keys)})一致，"
+                "逐位对应同位置 key 的种类；不确定就填 None，不要用单个 kind 广播给不同层级的 key。"
+            )
+        kinds = kind
+    else:
+        kinds = [kind] * len(keys)
+
     lex = build_lexicon(conn)
     resolved: dict[str, list[dict[str, Any]] | None] = {}
     mismatched: dict[str, dict[str, Any]] = {}
     mismatched_kind: dict[str, dict[str, Any]] = {}
     invalid_request: dict[str, dict[str, Any]] = {}
     unbound_in_source: dict[str, dict[str, Any]] = {}
-    for key in keys:
+    for key, kind in zip(keys, kinds):
         if kind == "plugin":
             # 类名本身带包名点号，不能套用「单据.字段」限定符协议，整串按裸类名处理。
             items = _plugin_items_for(key, conn, lex)

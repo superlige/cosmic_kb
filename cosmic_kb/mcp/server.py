@@ -34,7 +34,10 @@ INSTRUCTIONS = (
     "（`单据.字段`/`分录.字段`/`单据.分录.字段`）再传参，不得只传裸 key 甩给工具猜；确实判断不出"
     "归属时才允许裸 key。`kind=\"entity\"` 的两段式必须带单据前缀，否则工具直接拒绝"
     "（`invalid_request`）。`kind=\"plugin\"` 例外：类名不必组装点号坐标，整串按类名处理。\n"
-    "- 一次批量传入本轮读到的所有陌生标识，不得只核实一部分、其余凭字面翻译。\n"
+    "- 一次批量传入本轮读到的所有陌生标识，不得只核实一部分、其余凭字面翻译；批量里的 key 分属"
+    "不同层级（如同时有单据号/分录容器/字段）时，`kind` 必须传与 keys 等长的列表逐位对应"
+    "（如 `[\"form\",\"entity\",\"field\"]`），不得传单个字符串广播——那会把不匹配的层级全部"
+    "错判成 `mismatched_kind`。\n"
     "- 下拉/枚举字段看 `combo_items`、引用字段看 `ref_entity` 后才能下结论，不得凭存储值或字段"
     "命名猜含义。\n"
     "- trace/bill 返回体先查顶层 `pagination.complete`，为 false 时按 `pending` 里的 "
@@ -151,8 +154,11 @@ def tool_bill(
         conn.close()
 
 
+_Kind = Literal["field", "entity", "form", "plugin"]
+
+
 def tool_resolve_fields(
-    keys: list[str], kind: Literal["field", "entity", "form", "plugin"] | None = None,
+    keys: list[str], kind: _Kind | list[_Kind | None] | None = None,
 ) -> dict[str, Any]:
     """标识批量核对为元数据真实中文名（O(1) 打词典，比 trace 便宜，不查谁改了它）。覆盖字段/
     表头实体/分录/子分录/单据(表单)/插件类名六类——读到任意一类标识都必须先核对，命名惯例不算证据。
@@ -162,6 +168,13 @@ def tool_resolve_fields(
     `getDynamicObjectCollection("cqkd_entry")`）→ `"entity"`；字段读写（如
     `getString("cqkd_amount")`）→ `"field"`。同一 key 可能同时是单据号和字段 key，不传则三路
     全查、需自己再筛。
+
+    **本批 `keys` 分属不同层级时，`kind` 必须传与 `keys` 等长的列表逐位对应**（如
+    `keys=["cqkd_ht","cqkd_zdgl","cqkd_qs"]` 分别是单据号/分录容器/字段三个不同层级，须传
+    `kind=["form","entity","field"]`），不得传单个字符串广播——单个 `kind` 只在整批 key 确定
+    同属一个层级时才用（如批量核对一串字段名都传 `kind="field"`）。传单个字符串却混入不同层级
+    的 key 会导致部分 key 落入 `mismatched_kind`（诚实报错，但等于白跑一次）。列表某位不确定就填
+    `None`（该位置三路全查）；列表长度与 `keys` 不一致会报错拒绝。
 
     `kind="entity"` 的两段式「分录.字段」必须带单据前缀（`"单据.分录.字段"`），否则返回
     `invalid_request`（`reason="missing_form_key"`），不会替你从全局候选里挑一个。

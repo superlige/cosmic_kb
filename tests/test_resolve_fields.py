@@ -390,6 +390,105 @@ def test_resolve_kind_entity_excludes_field(conn):
     assert items and all(it["kind"] in ("header", "entry", "subentry") for it in items)
 
 
+# ── kind 逐 key 列表（2026-07-08，真实翻车复盘）────────────────────────────────
+# 起因：模型批量传入单据号/分录容器/字段三个不同层级的 key，却用单个 kind="field" 广播给
+# 全部三个，导致前两个全部落入 mismatched_kind（诚实报错但等于白跑一次）。补上「kind 传
+# 与 keys 等长列表、逐位对应」的能力，从接口形状上让这类广播错误可以被结构性避免。
+
+def test_resolve_kind_list_per_key_mixed_levels(conn):
+    """`kind=["form","entity","field"]` 逐位对应三个不同层级的 key，一次全部命中，
+    不再需要靠单个 kind 字符串broadcast 导致的 mismatched_kind。"""
+    d = resolve_fields.resolve_fields(
+        conn, ["cqkd_assetcard", "cqkd_entry", "cqkd_collateralstatus"],
+        kind=["form", "entity", "field"],
+    )
+    assert "mismatched_kind" not in d
+    assert {it["kind"] for it in d["resolved"]["cqkd_assetcard"]} == {"form"}
+    assert {it["kind"] for it in d["resolved"]["cqkd_entry"]} == {"entry"}
+    assert {it["kind"] for it in d["resolved"]["cqkd_collateralstatus"]} == {"field"}
+
+
+def test_resolve_kind_list_none_placeholder_means_unrestricted(conn):
+    """列表某位传 `None`：该位置三路全查，不限定种类（与不传 kind 时该 key 的行为一致）。"""
+    d = resolve_fields.resolve_fields(
+        conn, ["cqkd_assetcard", "cqkd_collateralstatus"], kind=["form", None],
+    )
+    assert {it["kind"] for it in d["resolved"]["cqkd_assetcard"]} == {"form"}
+    assert {it["kind"] for it in d["resolved"]["cqkd_collateralstatus"]} == {"field"}
+
+
+def test_resolve_kind_list_length_mismatch_raises(conn):
+    """`kind` 列表长度与 `keys` 不一致：拒绝静默截断/循环补齐，直接 ValueError。"""
+    with pytest.raises(ValueError, match="长度"):
+        resolve_fields.resolve_fields(
+            conn, ["cqkd_assetcard", "cqkd_entry"], kind=["form", "entity", "field"])
+
+
+def test_resolve_kind_scalar_broadcast_still_reproduces_old_mismatch(conn):
+    """回归护栏：单个 kind 字符串仍按老行为广播给全部 key（不该悄悄变成逐位），
+    混入不同层级时仍会触发 mismatched_kind——证明列表能力是新增的选项而非破坏旧用法。"""
+    d = resolve_fields.resolve_fields(
+        conn, ["cqkd_assetcard", "cqkd_entry"], kind="form")
+    assert "cqkd_entry" in d["mismatched_kind"]
+
+
+def test_mcp_tool_resolve_fields_kind_list_per_key(tmp_path: Path, monkeypatch):
+    """MCP `tool_resolve_fields(kind=[...])` 逐 key 列表穿透，与 report 层同口径。"""
+    from cosmic_kb.mcp import server as mcp_server
+
+    db = make_kb(tmp_path)
+    monkeypatch.setenv("COSMIC_KB_DB", str(db))
+    got = mcp_server.tool_resolve_fields(
+        ["cqkd_assetcard", "cqkd_entry", "cqkd_collateralstatus"],
+        kind=["form", "entity", "field"],
+    )
+    assert "mismatched_kind" not in got
+    assert {it["kind"] for it in got["resolved"]["cqkd_entry"]} == {"entry"}
+
+
+def test_cli_resolve_kind_list_per_key(tmp_path: Path, capsys):
+    """CLI `resolve --kind form entity field` 多值逐位对应，穿透到 report 层。"""
+    from cosmic_kb.cli.main import main
+
+    db = make_kb(tmp_path)
+    rc = main([
+        "resolve", "cqkd_assetcard", "cqkd_entry", "cqkd_collateralstatus",
+        "--db", str(db), "--json", "--kind", "form", "entity", "field",
+    ])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert "mismatched_kind" not in data
+    assert {it["kind"] for it in data["resolved"]["cqkd_entry"]} == {"entry"}
+
+
+def test_cli_resolve_kind_list_length_mismatch_reports_error(tmp_path: Path, capsys):
+    """CLI 侧长度不一致：打印错误信息、返回码 2，不崩栈。"""
+    from cosmic_kb.cli.main import main
+
+    db = make_kb(tmp_path)
+    rc = main([
+        "resolve", "cqkd_assetcard", "cqkd_entry",
+        "--db", str(db), "--json", "--kind", "form", "entity", "field",
+    ])
+    assert rc == 2
+    assert "长度" in capsys.readouterr().err
+
+
+def test_cli_resolve_kind_list_none_placeholder(tmp_path: Path, capsys):
+    """CLI `--kind form none`：第二位 none 占位表示不限定种类。"""
+    from cosmic_kb.cli.main import main
+
+    db = make_kb(tmp_path)
+    rc = main([
+        "resolve", "cqkd_assetcard", "cqkd_collateralstatus",
+        "--db", str(db), "--json", "--kind", "form", "none",
+    ])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert {it["kind"] for it in data["resolved"]["cqkd_assetcard"]} == {"form"}
+    assert {it["kind"] for it in data["resolved"]["cqkd_collateralstatus"]} == {"field"}
+
+
 def test_cli_resolve_kind_form(tmp_path: Path, capsys):
     """CLI `resolve --kind form` 参数穿透。"""
     from cosmic_kb.cli.main import main

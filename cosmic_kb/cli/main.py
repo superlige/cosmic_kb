@@ -599,14 +599,24 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
     if rc:
         return rc
     conn = store.open_kb(db)
+    kind = args.kind
+    if kind and len(kind) > 1:
+        kind = [None if k == "none" else k for k in kind]  # 逐位对应 keys，"none" 占位表示该位不限定
+    elif kind:
+        kind = kind[0]
+    else:
+        kind = None
     try:
-        d = resolve_fields.resolve_fields(conn, args.keys, kind=args.kind)
-        if args.json:
-            print(json.dumps(d, ensure_ascii=False, indent=2))
-        else:
-            print(resolve_fields.render_resolve_fields(d, max_list=args.max_list))
+        d = resolve_fields.resolve_fields(conn, args.keys, kind=kind)
+    except ValueError as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 2
     finally:
         conn.close()
+    if args.json:
+        print(json.dumps(d, ensure_ascii=False, indent=2))
+    else:
+        print(resolve_fields.render_resolve_fields(d, max_list=args.max_list))
     return 0
 
 
@@ -1056,12 +1066,14 @@ def build_parser() -> argparse.ArgumentParser:
              "（可批量核对；支持复合限定符精确匹配，与 trace 同一套点号坐标写法："
              "单据.字段 / 分录.字段 / 单据.分录.字段）")
     resolve.add_argument(
-        "--kind", choices=["field", "entity", "form", "plugin"],
+        "--kind", nargs="+", choices=["field", "entity", "form", "plugin", "none"],
         help="只返回某一种候选（field=字段/entity=分录容器/form=单据/plugin=插件类名反查绑定），"
-             "避免字段名与单据/分录 key 同名时混入噪声；"
+             "避免字段名与单据/分录 key 同名时混入噪声；只传一个值时广播给全部 keys（要求整批同层级）。"
+             "keys 分属不同层级时传与 keys 等长的多个值逐位对应（如 --kind form entity field），"
+             "某位不确定填 none（该位三路全查，不广播限定）；"
              "kind=entity 时两段式「分录.字段」限定符若无单据前缀会被拒绝（invalid_request），"
              "需要写「单据.分录.字段」三段式；"
-             "kind=plugin 时 keys 按插件类名（简单名/全限定名）处理，不走点号坐标限定符协议")
+             "kind=plugin 时对应 key 按插件类名（简单名/全限定名）处理，不走点号坐标限定符协议")
     _add_report_common(resolve)
     resolve.set_defaults(func=_cmd_resolve)
 
