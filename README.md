@@ -347,9 +347,37 @@ KB** 最稳。
 取证、带类·方法·行号·三态置信度作答——**苍穹领域纪律（三态置信度、不臆造、入库
 判断）已经随 MCP `instructions` 注入宿主，任意 agent 都自带，不需要额外装 Skill。**
 
-> Claude Code 用户如果想多要一层增强（更结构化的排障模板），可以手动把
-> [`comic-understand-long/`](comic-understand-long/SKILL.md) 复制到 `.claude/skills/` 下，
-> 详见 `scripts/安装说明.md` §7；这是可选项，不装也不影响上面的问答能力。
+### （可选）Claude Code 装 Skill：更结构化的排障模板
+
+上面接好 MCP 就已经能带证据、带三态置信度作答——语义纪律随 MCP `instructions` 自动注入宿主，
+任意 agent 不装额外东西也能用。如果你用的是 **Claude Code**，还可以再装一层 Skill
+（[`comic-understand-long/`](comic-understand-long/SKILL.md)，本包自带），多拿到：
+
+- **固定回答模板**：字段排障用"结论先行 → 写入点按置信度排序 → 未定位部分单列 → 下一步
+  建议"，插件解释用"结论 → 写入字段 → 风险点 → 下一步建议"，不用每次自己现组织怎么呈现证据。
+- **理解工作流顺序建议**：先建项目全貌（`report map`/`report overview`）→ 字段追溯
+  （`resolve_fields` 核对标识 → `trace` 取证 → 判事件/入库）→ 插件解释（`bill` 核对绑定 →
+  读源码 → 核对字段标识）→ 操作影响（枚举 `bill` 操作集，逐个套字段模板），照着顺序调工具，
+  不用自己摸索先查哪个、要不要补哪一步。
+- **苍穹语义路由表**：常见插件类型/事件边界/SDK 符号该查哪个 `cosmic_semantics` topic，
+  一张表列全，不用空参逐个试探。
+- **易错纪律**：入库判断标准（`setValue`/`DynamicObject.set` 不等于入库）、DynamicObject
+  路径判定（避免同名字段跨主实体/分录/子分录/基础资料串实体）、多 ISV 前缀不一致时的归属
+  判断，都写进了固定纪律里，不靠临场记忆。
+
+这些都是**呈现层增强**，不改变取证工具本身的调用方式，也不是必需——不装 Skill，`trace`/
+`bill`/`resolve_fields`/`cosmic_semantics` 照样能用，只是回答格式和查询顺序靠 agent 自己临场
+组织。其他 agent（Codex、CodeBuddy、Qoder、Trae…）读不了这个私有 Skill 格式，靠的是 MCP
+`instructions` 那条通用线，不需要也没法装这个。
+
+安装（复制到 Claude Code 认的 Skill 目录，装完新开一个会话即可生效）：
+
+```powershell
+# 项目级：只在这个苍穹项目里生效
+Copy-Item -Recurse -Force comic-understand-long "<你的苍穹项目根>\.claude\skills\comic-understand-long"
+# 或用户级：对你本机所有项目生效
+Copy-Item -Recurse -Force comic-understand-long "$HOME\.claude\skills\comic-understand-long"
+```
 
 ---
 
