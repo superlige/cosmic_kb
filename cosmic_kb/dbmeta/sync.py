@@ -32,9 +32,10 @@ if TYPE_CHECKING:
     from ..metadata.model import MetaModel
     from .config import DbConfig
 
-# 平台厂商自己的 ISV，任何苍穹环境通用排除。区别于"环境特有的第三方模块 ISV"
-# （如某次实测见到的 ysq）——那类不能硬编码，换个客户环境可能没有、也可能是别的名字。
-_HARDCODED_EXCLUDED_ISV = {"kingdee"}
+# 平台厂商自己的 ISV，任何苍穹环境通用排除。`ysq` 用户已实测确认（2026-07-13）也是原厂
+# 自带标识（非本项目二开），并入通用排除；区别于"环境特有的第三方模块 ISV"——那类才不能
+# 硬编码，换个客户环境可能没有、也可能是别的名字。
+_HARDCODED_EXCLUDED_ISV = {"kingdee", "ysq"}
 
 
 class IsvAmbiguousError(RuntimeError):
@@ -50,8 +51,9 @@ class IsvAmbiguousError(RuntimeError):
             listing = "、".join(f"{isv}({count}个表单)" for isv, count in candidates)
             msg = f"无法唯一确定本项目二开 ISV，候选：{listing}；请显式指定 --isv"
         else:
+            excluded = "、".join(sorted(_HARDCODED_EXCLUDED_ISV))
             msg = (
-                "库里没有找到除 kingdee 外的任何 ISV，请检查 --db-config 连接配置，"
+                f"库里没有找到除 {excluded} 外的任何 ISV，请检查 --db-config 连接配置，"
                 "或显式指定 --isv"
             )
         super().__init__(msg)
@@ -63,7 +65,8 @@ def resolve_isv(
     """确定本项目自己的二开 ISV。
 
     `explicit` 给了直接采信（不查库校验——信任用户，省一次往返）。否则查库现存
-    ISV 分布，排除空值 + 平台通用内建 `kingdee`；剩 1 个直接用；剩 >1 个先用
+    ISV 分布，排除空值 + 平台通用内建 `_HARDCODED_EXCLUDED_ISV`（`kingdee`/`ysq`）；
+    剩 1 个直接用；剩 >1 个先用
     `local_prefixes`（本地已知 key 前缀，去尾下划线）尝试匹配，唯一命中则用；
     否则/候选为空，一律 `IsvAmbiguousError`，绝不在多个候选里静默猜一个。
     """

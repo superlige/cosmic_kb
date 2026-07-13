@@ -84,39 +84,39 @@ def test_resolve_isv_explicit_wins_no_db_query():
     assert sync.resolve_isv(ExplodingReader(), explicit="cqkd", local_prefixes=()) == "cqkd"
 
 
-def test_resolve_isv_auto_when_single_candidate_after_excluding_kingdee():
-    r = _FakeSyncReader(isv_counts={"kingdee": 500, "cqkd": 340})
+def test_resolve_isv_auto_when_single_candidate_after_excluding_hardcoded():
+    r = _FakeSyncReader(isv_counts={"kingdee": 500, "ysq": 12, "cqkd": 340})
     assert sync.resolve_isv(r, explicit=None, local_prefixes=()) == "cqkd"
 
 
 def test_resolve_isv_disambiguates_via_local_prefix_match():
-    r = _FakeSyncReader(isv_counts={"kingdee": 500, "cqkd": 340, "ysq": 12})
+    r = _FakeSyncReader(isv_counts={"kingdee": 500, "cqkd": 340, "abcvendor": 12})
     assert sync.resolve_isv(r, explicit=None, local_prefixes=["cqkd_"]) == "cqkd"
 
 
 def test_resolve_isv_ambiguous_even_with_local_material_when_multiple_prefixes_match():
-    r = _FakeSyncReader(isv_counts={"kingdee": 500, "cqkd": 340, "ysq": 12})
+    r = _FakeSyncReader(isv_counts={"kingdee": 500, "cqkd": 340, "abcvendor": 12})
     with pytest.raises(sync.IsvAmbiguousError) as exc:
-        sync.resolve_isv(r, explicit=None, local_prefixes=["cqkd_", "ysq_"])
-    assert "cqkd" in str(exc.value) and "ysq" in str(exc.value)
+        sync.resolve_isv(r, explicit=None, local_prefixes=["cqkd_", "abcvendor_"])
+    assert "cqkd" in str(exc.value) and "abcvendor" in str(exc.value)
 
 
 def test_resolve_isv_raises_ambiguous_error_with_candidates_and_counts_when_no_local_material():
-    r = _FakeSyncReader(isv_counts={"kingdee": 500, "cqkd": 340, "ysq": 12})
+    r = _FakeSyncReader(isv_counts={"kingdee": 500, "cqkd": 340, "abcvendor": 12})
     with pytest.raises(sync.IsvAmbiguousError) as exc:
         sync.resolve_isv(r, explicit=None, local_prefixes=())
     msg = str(exc.value)
     assert "cqkd" in msg and "340" in msg
-    assert "ysq" in msg and "12" in msg
-    assert exc.value.candidates == [("cqkd", 340), ("ysq", 12)]  # 按表单数降序
+    assert "abcvendor" in msg and "12" in msg
+    assert exc.value.candidates == [("cqkd", 340), ("abcvendor", 12)]  # 按表单数降序
 
 
-def test_resolve_isv_raises_when_zero_candidates_after_excluding_kingdee():
-    r = _FakeSyncReader(isv_counts={"kingdee": 500})
+def test_resolve_isv_raises_when_zero_candidates_after_excluding_hardcoded():
+    r = _FakeSyncReader(isv_counts={"kingdee": 500, "ysq": 12})
     with pytest.raises(sync.IsvAmbiguousError) as exc:
         sync.resolve_isv(r, explicit=None, local_prefixes=())
     assert exc.value.candidates == []
-    assert "kingdee" in str(exc.value)
+    assert "kingdee" in str(exc.value) and "ysq" in str(exc.value)
 
 
 # ── 2. sync_own_isv_metadata ─────────────────────────────────────────────
