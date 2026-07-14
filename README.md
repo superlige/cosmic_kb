@@ -72,7 +72,7 @@ CodeBuddy、Qoder…）。它会用用户级隔离运行时装好**固定版本*
 
 <!-- INSTALL-TOKEN:START —— 由 scripts/make_dist.ps1 按版本自动生成，请勿手改 -->
 ```text
-请为当前项目安装并初始化 cosmic-kb==0.1.5。
+请为当前项目安装并初始化 cosmic-kb==0.1.6。
 1) 仅从 https://pypi.org/simple 安装，用 %USERPROFILE%\.cosmic_kb\runtime 用户级隔离环境（不污染系统 Python / 项目 venv）；缺 Python 3.10+ 先征得我同意再装，无 winget 则停止并给我官方安装入口。
 2) 装固定版本 cosmic-kb[complete]（含 parse/encoding/mcp/postgres）。
 3) 运行该环境里的 cosmic_kb bootstrap plan --project "<当前项目根>" --agent auto --json，把返回的 questions 逐条问我确认。

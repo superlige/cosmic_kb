@@ -22,6 +22,6 @@ KB 是两段之间的契约：段一写 KB，段二读 KB。
 
 from __future__ import annotations
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 __all__ = ["__version__"]
