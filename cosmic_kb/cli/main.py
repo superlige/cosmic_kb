@@ -871,6 +871,223 @@ def _cmd_db_meta(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_skill_agents(args: argparse.Namespace) -> tuple[list[str], bool]:
+    """Resolve the skill adapter selection and report whether auto detection was used."""
+    from ..skills.installer import detect_agents, resolve_agents
+
+    requested = args.agent or ["auto"]
+    auto = requested == ["auto"]
+    detected = detect_agents(project=Path(args.project), scope=args.scope) if auto else None
+    return resolve_agents(requested, detected=detected), auto
+
+
+def _print_skill_result(payload: dict) -> None:
+    """Render human-readable install/status output; JSON is handled by the caller."""
+    action = {"install": "安装", "status": "检查", "uninstall": "卸载"}[payload["command"]]
+    print(f"# Cosmic KB Skills {action}结果")
+    print(f"范围: {payload['scope']}  项目: {payload['project']}")
+    if payload.get("dry_run"):
+        print("模式: dry-run（未写入文件）")
+    print("")
+    for agent in payload["agents"]:
+        print(f"[{agent['agent']}] {agent['status']}  {agent['root']}")
+        for skill in agent["skills"]:
+            detail = f"  {skill['name']}: {skill['status']} → {skill['path']}"
+            if skill.get("error"):
+                detail += f" ({skill['error']})"
+            print(detail)
+        for index, step in enumerate(agent.get("manual_steps", []), 1):
+            print(f"  TRAE 手动步骤 {index}: {step}")
+        print("")
+
+
+def _cmd_skill_install(args: argparse.Namespace) -> int:
+    from ..skills.installer import SkillResourceError, install
+
+    try:
+        agents, auto = _resolve_skill_agents(args)
+        if not agents:
+            message = "未自动检测到 CodeBuddy、Qoder 或 TRAE；请使用 --agent all 或显式指定宿主。"
+            if args.json:
+                print(json.dumps({"command": "install", "error": "no_agent_detected",
+                                  "message": message}, ensure_ascii=False, indent=2))
+            else:
+                print(f"错误: {message}", file=sys.stderr)
+            return 2
+        payload, rc = install(
+            agents, scope=args.scope, project=Path(args.project), dry_run=args.dry_run
+        )
+        payload["selection"] = "auto" if auto else "explicit"
+    except (ValueError, SkillResourceError) as exc:
+        if args.json:
+            print(json.dumps({"command": "install", "error": type(exc).__name__,
+                              "message": str(exc)}, ensure_ascii=False, indent=2))
+        else:
+            print(f"错误: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        _print_skill_result(payload)
+    return rc
+
+
+def _cmd_skill_status(args: argparse.Namespace) -> int:
+    from ..skills.installer import SkillResourceError, status
+
+    try:
+        agents, auto = _resolve_skill_agents(args)
+        if not agents:
+            message = "未自动检测到 CodeBuddy、Qoder 或 TRAE；请使用 --agent all 或显式指定宿主。"
+            if args.json:
+                print(json.dumps({"command": "status", "error": "no_agent_detected",
+                                  "message": message}, ensure_ascii=False, indent=2))
+            else:
+                print(f"错误: {message}", file=sys.stderr)
+            return 2
+        payload, rc = status(agents, scope=args.scope, project=Path(args.project))
+        payload["selection"] = "auto" if auto else "explicit"
+    except (ValueError, SkillResourceError) as exc:
+        if args.json:
+            print(json.dumps({"command": "status", "error": type(exc).__name__,
+                              "message": str(exc)}, ensure_ascii=False, indent=2))
+        else:
+            print(f"错误: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        _print_skill_result(payload)
+    return rc
+
+
+def _cmd_skill_uninstall(args: argparse.Namespace) -> int:
+    from ..skills.installer import uninstall
+
+    try:
+        agents, auto = _resolve_skill_agents(args)
+        if not agents:
+            message = "未自动检测到 CodeBuddy、Qoder 或 TRAE；请使用 --agent all 或显式指定宿主。"
+            if args.json:
+                print(json.dumps({"command": "uninstall", "error": "no_agent_detected",
+                                  "message": message}, ensure_ascii=False, indent=2))
+            else:
+                print(f"错误: {message}", file=sys.stderr)
+            return 2
+        payload, rc = uninstall(
+            agents, scope=args.scope, project=Path(args.project), dry_run=args.dry_run
+        )
+        payload["selection"] = "auto" if auto else "explicit"
+    except ValueError as exc:
+        if args.json:
+            print(json.dumps({"command": "uninstall", "error": type(exc).__name__,
+                              "message": str(exc)}, ensure_ascii=False, indent=2))
+        else:
+            print(f"错误: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        _print_skill_result(payload)
+    return rc
+
+
+def _print_bootstrap_plan(payload: dict) -> None:
+    env = payload["environment"]
+    print("# Cosmic KB Bootstrap · plan（只读探测）")
+    print(f"项目: {payload['project']}")
+    print(f"运行时: Python {env['python_version']} @ {env['python']}  · cosmic-kb {env['package_version']}")
+    print(f"命中宿主: {', '.join(env['detected_agents']) or '（无）'}  → 选定: {', '.join(env['selected_agents']) or '（无）'}")
+    kb = payload["kb"]
+    print(f"KB: {kb['path']}  {'已存在' if kb['exists'] else '待建'}")
+    cand = payload["candidates"]
+    print(f"源码根候选: {', '.join(cand['source_roots']) or '（未探到）'}")
+    print(f"元数据: db_config={cand['db_config'] or '无'}  文件={len(cand['metadata_files'])} 个")
+    if payload["questions"]:
+        print("\n需确认（apply 前回答）:")
+        for q in payload["questions"]:
+            print(f"  ? [{q['id']}] {q['ask']}")
+    print("\n将执行:")
+    for i, act in enumerate(payload["planned_actions"], 1):
+        print(f"  {i}. {act}")
+    if payload["manual_actions"]:
+        print("\n人工须知:")
+        for act in payload["manual_actions"]:
+            print(f"  · {act}")
+
+
+def _print_bootstrap_apply(payload: dict) -> None:
+    print("# Cosmic KB Bootstrap · apply")
+    print(f"项目: {payload['project']}  · KB: {payload['kb']}  · 元数据: {payload['metadata_mode']}")
+    if payload.get("dry_run"):
+        print("模式: dry-run（未写入）")
+    print("")
+    for step in payload["steps"]:
+        line = f"  [{step['step']}] {step['status']}"
+        for key in ("kb", "path", "reason", "rc"):
+            if key in step:
+                line += f"  {key}={step[key]}"
+        print(line)
+    summary = payload["summary"]
+    print("")
+    print("✅ 全部完成" if summary["ok"] else f"⚠ 未完成步骤: {', '.join(summary['failed_steps'])}")
+    for line in payload["reconnect"]:
+        print(f"  重连: {line}")
+
+
+def _cmd_bootstrap_plan(args: argparse.Namespace) -> int:
+    from ..bootstrap import orchestrator
+
+    payload = orchestrator.plan(
+        args.project, source_root=args.source_root, meta=args.meta,
+        db_config=args.db_config, agents=args.agent,
+    )
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        _print_bootstrap_plan(payload)
+    return 0
+
+
+def _cmd_bootstrap_apply(args: argparse.Namespace) -> int:
+    from ..bootstrap import orchestrator
+
+    payload, rc = orchestrator.apply(
+        args.project, source_root=args.source_root, meta=args.meta,
+        db_config=args.db_config, isv=args.isv, vendor=args.vendor,
+        template_dir=args.template_dir, follow_symlinks=args.follow_symlinks,
+        agents=args.agent, force_mcp=args.force_mcp,
+        prompt_db_password=args.prompt_db_password, run_coverage=args.coverage,
+        rebuild=args.rebuild, dry_run=args.dry_run,
+    )
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif "error" in payload:
+        print(f"错误: {payload.get('message', payload['error'])}", file=sys.stderr)
+    else:
+        _print_bootstrap_apply(payload)
+    return rc
+
+
+def _cmd_bootstrap_status(args: argparse.Namespace) -> int:
+    from ..bootstrap import orchestrator
+
+    payload = orchestrator.status(
+        args.project, source_root=args.source_root, db=args.kb_db, agents=args.agent,
+    )
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print("# Cosmic KB Bootstrap · status")
+        print(f"项目: {payload['project']}  · KB: {payload['kb']['path']} {'✓' if payload['kb']['exists'] else '✗'}")
+        m = payload["manifest"]
+        print(f"install.json: {'✓ ' + str(m['version']) if m['exists'] else '✗ 缺失（需用安装口令启动 Bootstrap）'}")
+        print(f"Skills: {payload['skills'] or '（无命中宿主）'}")
+        print(f"MCP 已注册: {'✓' if payload['mcp'].get('registered') else '✗'}")
+        print(f"下一步: {payload['next_step'] or '（全部就绪）'}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cosmic_kb",
@@ -885,6 +1102,41 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="检查 skill_assets 资产接线是否就位")
     doctor.set_defaults(func=_cmd_doctor)
+
+    # ── Agent Skill 分发：CodeBuddy / Qoder 直接安装，TRAE 生成官方导入包 ─────
+    skill = sub.add_parser("skill", help="安装、检查或卸载 CodeBuddy、Qoder、TRAE 的 Cosmic KB Skills")
+    skill.set_defaults(func=lambda _args: (skill.print_help() or 0))
+    skill_sub = skill.add_subparsers(dest="skill_command")
+
+    def _add_skill_common(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument(
+            "--agent", nargs="+", choices=["auto", "all", "codebuddy", "qoder", "trae"],
+            default=["auto"],
+            help="目标宿主，可多选；默认 auto 自动检测，all 表示全部",
+        )
+        command_parser.add_argument(
+            "--scope", choices=["user", "project"], default="user",
+            help="操作范围（默认 user；TRAE 始终使用用户级导入包）",
+        )
+        command_parser.add_argument(
+            "--project", default=str(Path.cwd()),
+            help="project 范围的项目根目录（默认当前目录）",
+        )
+        command_parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+
+    skill_install = skill_sub.add_parser("install", help="安装两份 Cosmic KB Skills（同名文件直接更新）")
+    _add_skill_common(skill_install)
+    skill_install.add_argument("--dry-run", action="store_true", help="仅显示目标，不创建或写入文件")
+    skill_install.set_defaults(func=_cmd_skill_install)
+
+    skill_status = skill_sub.add_parser("status", help="按 SHA-256 检查 Skill 是否缺失或过期")
+    _add_skill_common(skill_status)
+    skill_status.set_defaults(func=_cmd_skill_status)
+
+    skill_uninstall = skill_sub.add_parser("uninstall", help="卸载两份 Cosmic KB Skills，不影响其他 Skill")
+    _add_skill_common(skill_uninstall)
+    skill_uninstall.add_argument("--dry-run", action="store_true", help="仅显示目标，不删除文件")
+    skill_uninstall.set_defaults(func=_cmd_skill_uninstall)
 
     ingest = sub.add_parser(
         "ingest",
@@ -1184,6 +1436,55 @@ def build_parser() -> argparse.ArgumentParser:
         "--follow-symlinks", action="store_true", help="--discover 用：扫源码时跟随符号链接"
     )
     db_meta.set_defaults(func=_cmd_db_meta)
+
+    # ── 对话式安装 Bootstrap 编排器（plan/apply/status）──────────────────────
+    bootstrap = sub.add_parser(
+        "bootstrap",
+        help="对话式安装编排：plan 只读探测 → apply 建库+装Skill+注册MCP+四工具校验 → status 查进度",
+    )
+    bootstrap.set_defaults(func=lambda _args: (bootstrap.print_help() or 0))
+    bsub = bootstrap.add_subparsers(dest="bootstrap_command")
+
+    def _add_bootstrap_common(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--agent", nargs="+", choices=["auto", "all", "codebuddy", "qoder", "trae"],
+            default=None, help="目标宿主，可多选；默认 auto 自动检测",
+        )
+        p.add_argument("--project", default=str(Path.cwd()), help="项目根（默认当前目录）")
+        p.add_argument("--json", action="store_true", help="输出机器可读 JSON（agent 首选）")
+
+    bs_plan = bsub.add_parser("plan", help="只读探测：环境/候选/已有产物/冲突 + questions/actions")
+    _add_bootstrap_common(bs_plan)
+    bs_plan.add_argument("--source-root", dest="source_root", default=None, help="Java 源码根")
+    bs_plan.add_argument("--meta", nargs="+", default=None, help="dym/cr/整包zip 或含它们的目录")
+    bs_plan.add_argument("--db-config", dest="db_config", default=None, help="dbmeta 连接配置（cosmic_db.json）")
+    bs_plan.set_defaults(func=_cmd_bootstrap_plan)
+
+    bs_apply = bsub.add_parser("apply", help="按序建库+装Skill+注册MCP+校验（每步幂等、可续跑）")
+    _add_bootstrap_common(bs_apply)
+    bs_apply.add_argument("source_root", help="Java 源码根")
+    bs_apply.add_argument("meta", nargs="*", help="dym/cr/整包zip 或目录（配合 --db-config 可省略）")
+    bs_apply.add_argument("--db-config", dest="db_config", default=None, help="dbmeta 连接配置（直连库建库）")
+    bs_apply.add_argument("--isv", default=None, help="显式指定本项目二开 ISV（跳过自动消歧）")
+    bs_apply.add_argument("--vendor", nargs="+", default=None, metavar="FNUMBER", help="手动追加拉取的原厂 fnumber")
+    bs_apply.add_argument("--template-dir", dest="template_dir", default=None, help="继承根模板目录")
+    bs_apply.add_argument("--follow-symlinks", dest="follow_symlinks", action="store_true", help="扫源码跟随符号链接")
+    bs_apply.add_argument(
+        "--prompt-db-password", dest="prompt_db_password", action="store_true",
+        help="终端隐藏输入底层库口令（单进程用完只进环境变量，绝不写入任何文件）",
+    )
+    bs_apply.add_argument("--force-mcp", dest="force_mcp", action="store_true", help="同名 MCP 配置冲突时先备份再替换")
+    bs_apply.add_argument("--coverage", action="store_true", help="doctor 后附带跑一次覆盖率")
+    bs_apply.add_argument("--rebuild", action="store_true", help="KB 已存在也强制重建（默认续跑跳过）")
+    bs_apply.add_argument("--dry-run", action="store_true", help="只演练不写入")
+    bs_apply.set_defaults(func=_cmd_bootstrap_apply)
+
+    bs_status = bsub.add_parser("status", help="读 install.json + 各步产物，报告进度与下一步")
+    _add_bootstrap_common(bs_status)
+    bs_status.add_argument("--source-root", dest="source_root", default=None, help="Java 源码根（定位 KB 用）")
+    # dest 特意不叫 db：避免 main() 的通用 _resolve_db 从 cwd 抢先发现别的 KB，覆盖 --source-root。
+    bs_status.add_argument("--db", dest="kb_db", default=None, help="KB 路径（默认按 --project/--source-root 就近发现）")
+    bs_status.set_defaults(func=_cmd_bootstrap_status)
 
     return parser
 

@@ -2,8 +2,7 @@
 
 定位：本子包是「大模型接入」的薄适配层，不做任何分析逻辑——只把 `cosmic_kb` 已有的
 取证命令（`trace/bill/resolve_fields/cosmic_semantics`）包成 MCP（Model Context Protocol）
-工具，让 LLM 宿主（Claude Code / Claude Desktop / 任意 MCP 客户端）挂上 `comic-understand-long`
-Skill 后，自己调工具取证、自己做自然语言推理。
+工具，让 LLM 宿主挂上 `cosmic-kb-understand` Skill 后，自己调工具取证、自己做自然语言推理。
 
 为什么这么设计（对齐 CLAUDE.md 红线 #6「两段式解耦，KB 是契约」）：
 - 取证逻辑只有一份，落在段一（`report.*` + `java`/`graph` 直查）；MCP 工具返回值与

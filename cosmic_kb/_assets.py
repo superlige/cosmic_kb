@@ -9,6 +9,7 @@
     cosmic_kb/semantics/references/   苍穹插件 + SDK 语义文档（cosmic_semantics 工具回传源）
     cosmic_kb/semantics/rules/        反模式 / 幻觉名黑名单
     cosmic_kb/metadata/templates/     继承根模板（bos_billtpl / bos_basetpl，操作 oid 回填用）
+    cosmic_kb/skills/*/SKILL.md        CodeBuddy / Qoder / TRAE 通用工作流 Skill
 
 非随包（运行期可选 / 仅开发态）：
     skill_assets/ok-cosmic-docs.db    9MB SDK 离线文档库，运行期暂未消费，踢出 wheel；
@@ -35,7 +36,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # ── 运行期资产：importlib.resources 定位（随 wheel 走，不依赖同级目录布局）──────
 def references_root() -> Traversable:
-    """苍穹语义 references 目录（adv/ + base/plugin/ + base/sdk/）。"""
+    """苍穹语义 references 目录（base/plugin/ 插件类型 + base/sdk/ 原生 SDK）。"""
     return files("cosmic_kb.semantics") / "references"
 
 
@@ -66,7 +67,7 @@ def _walk_md(root: Traversable, prefix: str = "") -> Iterator[tuple[str, Travers
 def iter_reference_topics() -> Iterator[tuple[str, Traversable]]:
     """遍历所有语义主题（references + rules），产出 (相对路径不含扩展名, 文件)。
 
-    相对路径首段即分组（adv / base / rules…），供 cosmic_semantics 按组列清单。
+    相对路径首段即分组（base / rules…），供 cosmic_semantics 按组列清单。
     """
     yield from _walk_md(references_root(), prefix="")
     yield from _walk_md(rules_root(), prefix="rules/")

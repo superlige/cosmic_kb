@@ -1,11 +1,11 @@
 ---
 name: cosmic-kb-setup
-description: "安装、初始化、重建、更新和诊断金蝶云苍穹项目的 cosmic_kb。用于检查 Python 与 cosmic_kb 命令、通过只读数据库或 dym/cr/zip 元数据构建 KB、生成和检查 cosmic_db.json、运行 doctor/coverage、定位 KB 不存在或版本不符、配置或检查 MCP 并提醒重连。不要用于解释字段读写、插件行为、操作影响或业务链路；KB 和 MCP 可用后的理解任务使用 cosmic-kb-understand。"
+description: "为已安装 cosmic_kb 的环境初始化、重建、升级、诊断金蝶云苍穹项目的本地 KB。先从 %USERPROFILE%\\.cosmic_kb\\install.json 取 cosmic_kb 的调用路径（不假设在 PATH），再通过只读数据库或 dym/cr/zip 元数据构建 KB、生成和检查 cosmic_db.json、运行 doctor/coverage、定位 KB 不存在或版本不符、配置或检查 MCP 并提醒重连。install.json 不存在时明确回复需要先用安装口令启动 Bootstrap，不在本 Skill 里自行安装 cosmic_kb。不要用于解释字段读写、插件行为、操作影响或业务链路；KB 和 MCP 可用后的理解任务使用 cosmic-kb-understand。"
 ---
 
-# Cosmic KB 安装与初始化
+# Cosmic KB 初始化与诊断
 
-把当前苍穹项目准备成可由 Agent 取证的本地 KB。完成安装检查、元数据选择、建库、诊断和 MCP 接入；不要在本 Skill 中解释业务字段或插件行为。
+把当前苍穹项目准备成可由 Agent 取证的本地 KB。本 Skill 假设 cosmic_kb **已经安装**（由安装口令触发的 Bootstrap 完成），只负责已装环境的项目初始化、建库、诊断和 MCP 接入；不负责首次安装 cosmic_kb，也不要在本 Skill 中解释业务字段或插件行为。
 
 ## 安全边界
 
@@ -16,15 +16,26 @@ description: "安装、初始化、重建、更新和诊断金蝶云苍穹项目
 5. 重建前确认目标 KB 路径。默认原地更新当前项目 KB，不创建来源不明的临时库。
 6. 命令参数以当前 `cosmic_kb --help` 和子命令帮助为准；遇到版本差异先检查帮助，不要猜参数。
 
+## 前置：从 install.json 定位 cosmic_kb
+
+本 Skill **不负责安装 cosmic_kb**。安装由「安装口令」触发的 Bootstrap 完成，它会把 CLI 调用信息写进用户级清单 `%USERPROFILE%\.cosmic_kb\install.json`。开工前先据此确定要用哪个 cosmic_kb：
+
+1. 读取 `%USERPROFILE%\.cosmic_kb\install.json`（PowerShell：`Get-Content "$env:USERPROFILE\.cosmic_kb\install.json" | ConvertFrom-Json`）。
+2. **清单不存在或读不出**：说明 cosmic_kb 还没通过 Bootstrap 装好。此时**明确回复用户"需要先用安装口令启动 Bootstrap 安装 cosmic_kb，本 Skill 只负责已装环境的初始化"**，给出获取安装口令的入口（项目 README / PyPI 项目页），然后**停止**——不要在本 Skill 里 pip install、下载或以任何方式自行安装 cosmic_kb。
+3. **清单存在**：取 `cli` 字段（一个命令数组，如 `["<runtime>\\Scripts\\cosmic_kb.exe"]` 或 `["<python>", "-m", "cosmic_kb.cli.main"]`）作为后续所有命令的调用前缀，**不要假设 `cosmic_kb` 就在 PATH 上**。核对 `version` 是否为用户期望版本；不符时提示用户按安装口令重跑 Bootstrap 升级，本 Skill 不自行升级运行时。
+
+> 下文命令统一写成 `cosmic_kb <...>`，实际执行时替换为 install.json `cli` 字段拼出的调用前缀。
+
 ## 固定流程
 
 ### 1. 检查环境
 
-1. 确认当前工作目录是用户要处理的苍穹项目根或明确记录项目根路径。
-2. 运行 `python --version`，要求 Python 3.10 或更高版本。
-3. 运行 `cosmic_kb --version`。命令不存在时，根据当前分发物安装带解析和 MCP 能力的包。
-4. 运行 `cosmic_kb --help`，确认 `build`、`db-meta`、`doctor` 和 MCP 入口存在。
-5. 检查项目内已有的 `cosmic_kb.db`、`cosmic_db.json` 和 MCP 配置，避免无意覆盖用户自定义路径。
+1. 确认当前工作目录是用户要处理的苍穹项目根，或明确记录项目根路径。
+2. 用 install.json 里的调用前缀运行 `cosmic_kb --version`，确认与清单 `version` 一致。
+3. 运行 `cosmic_kb --help`，确认 `build`、`db-meta`、`doctor` 和 MCP 入口存在。
+4. 检查项目内已有的 `cosmic_kb.db`、`cosmic_db.json` 和 MCP 配置，避免无意覆盖用户自定义路径。
+
+> `cosmic_kb --version` 跑不通（即便 install.json 存在）：说明清单指向的运行时已损坏或被删。报告实际错误，提示用户按安装口令重跑 Bootstrap 修复运行时，不要自行安装。
 
 ### 2. 选择元数据来源
 
@@ -102,15 +113,18 @@ cosmic_kb build "<Java源码根>" "<导出文件目录或zip路径>"
 
 ### 6. 配置并检查 MCP
 
-1. 确认 MCP server 启动命令使用当前环境里可执行的 `cosmic_kb` 或 Python 模块入口。
+1. MCP server 启动命令使用 install.json 记录的运行时（`cosmic_kb-mcp` 或 `python -m cosmic_kb.cli.main mcp`），不要假设在 PATH。
 2. 确认 MCP 指向刚验证的 KB；使用非默认路径时设置 `COSMIC_KB_DB` 或相应 `--db` 参数。
 3. 根据当前 Agent 支持的项目配置文件或设置界面注册 `cosmic_kb` MCP。不要假定所有 Agent 使用同一个配置路径。
 4. 能进行实际调用时，至少检查工具列表包含 `resolve_fields`、`trace`、`bill` 和 `cosmic_semantics`。
 5. 首次建库、重建 KB 或修改 MCP 代码后，明确提醒用户重连 MCP 或重启当前 Agent；常驻进程不会自动加载新内容。
 
+> 若 Bootstrap 已用 `cosmic_kb bootstrap apply` 注册并校验过 MCP，本步只需复核指向的 KB 是否为当前项目，并提醒重连。
+
 ## 故障处理
 
-- `cosmic_kb` 命令不存在：确认虚拟环境是否激活、安装是否成功、Scripts 目录是否在 PATH。
+- install.json 不存在：cosmic_kb 尚未通过 Bootstrap 安装，提示用户用安装口令启动 Bootstrap，本 Skill 不自行安装。
+- `cosmic_kb` 命令跑不通：核对 install.json 的 `cli`/`python` 路径是否仍存在、运行时是否被删；必要时提示按安装口令重跑 Bootstrap 修复，不猜 PATH。
 - KB 不存在或版本不符：核对工作目录和 `COSMIC_KB_DB`，随后对目标项目重新执行 `build`。
 - 数据库检查失败：报告准确错误文本，区分网络、认证、schema、权限和驱动问题；不要让用户公开口令。
 - 元数据为空或覆盖率异常：核对 ISV、schema、源码根和导出文件范围，再决定是否重建。
@@ -120,14 +134,15 @@ cosmic_kb build "<Java源码根>" "<导出文件目录或zip路径>"
 ## 结果格式
 
 ```text
-安装状态：<成功/部分成功/失败>
+初始化状态：<成功/部分成功/失败>
+cosmic_kb 来源：<install.json 路径 + 版本；或"未安装，需安装口令启动 Bootstrap">
 项目根：<绝对路径>
 源码根：<绝对路径>
 元数据来源：<只读数据库/本地 dym-cr-zip>
 KB 路径：<绝对路径>
 
 校验结果：
-  - Python：<版本与状态>
+  - install.json：<存在与版本/缺失>
   - cosmic_kb：<版本与状态>
   - build：<结果摘要>
   - doctor：<结果摘要>
@@ -138,13 +153,15 @@ KB 路径：<绝对路径>
   - <权限、路径、覆盖率或连接问题；没有写“无”>
 
 用户必须执行：
-  - <设置口令、粘贴配置、重连 MCP 等；没有写“无”>
+  - <用安装口令启动 Bootstrap、设置口令、粘贴配置、重连 MCP 等；没有写“无”>
 
 下一步：<重连后可提出的字段或插件理解问题>
 ```
 
 ## 完成检查
 
+- install.json 不存在时没有自行安装 cosmic_kb，而是明确要求用户用安装口令启动 Bootstrap。
+- 所有命令都用 install.json 记录的调用路径，没有假设 `cosmic_kb` 在 PATH。
 - 没有在对话、配置或日志中暴露数据库口令。
 - 元数据来源、源码根和 KB 目标路径均已明确。
 - `build` 后实际运行了 `doctor`，没有只检查文件存在。

@@ -25,6 +25,9 @@ encoding = ["charset-normalizer>=3.0"]
 mcp = ["mcp>=1.0"]
 # 底层库元数据源：直连苍穹平台库（只读）取原厂/扩展元数据。当前实现 PostgreSQL
 postgres = ["psycopg2-binary>=2.9"]
+# 首装收敛：一次装齐段一+段二的完整能力（Java 解析 / 编码探测 / MCP / 只读库）。
+# 对话式安装口令固定装这一组，保证首装依赖集合固定、可复现。自引用保持与各分组同步。
+complete = ["cosmic-kb[parse,encoding,mcp,postgres]"]
 # 开发与验收
 dev = ["pytest>=7"]
 
@@ -40,11 +43,13 @@ include = ["cosmic_kb*"]
 # - web/static/*：本地 Web 前端（阶段4.5）
 # - semantics/references|rules：苍穹语义文档（cosmic_semantics 工具回传源，分发改造下沉进包）
 # - metadata/templates/*.dym：继承根模板（操作 oid 回填运行期依赖）
+# - skills/*/SKILL.md：CodeBuddy/Qoder/TRAE 共用的 Agent Skills
 [tool.setuptools.package-data]
 "cosmic_kb.graph" = ["*.sql"]
 "cosmic_kb.web" = ["static/*"]
 "cosmic_kb.semantics" = ["references/**/*.md", "rules/**/*.md"]
 "cosmic_kb.metadata" = ["templates/*.dym"]
+"cosmic_kb.skills" = ["*/SKILL.md"]
 
 [tool.setuptools.dynamic]
 version = { attr = "cosmic_kb.__version__" }
