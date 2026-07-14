@@ -86,6 +86,21 @@ CodeBuddy、Qoder…）。它会用用户级隔离运行时装好**固定版本*
 `bootstrap apply` 幂等、可断点续跑：**重建 KB** 就是原地重跑一次（源码/元数据更新后），已建好的
 步骤自动跳过；`bootstrap status` 看当前进度。
 
+**国内无 VPN、访问 `pypi.org` 慢或超时时**：把上面那段安装口令照发给 agent，只需在开头补一句
+「请把其中的 `https://pypi.org/simple` 换成国内镜像 `https://pypi.tuna.tsinghua.edu.cn/simple`」，
+其余步骤不变（清华，或阿里云 `https://mirrors.aliyun.com/pypi/simple/`、中科大
+`https://pypi.mirrors.ustc.edu.cn/simple/`、腾讯云 `https://mirrors.cloud.tencent.com/pypi/simple/`
+任一均可）。镜像从 PyPI 同步新版本一般有几分钟~几小时延迟——若提示「找不到 cosmic-kb==<版本>」，
+是镜像还没同步到，稍等片刻，或先只用官方源装这一个包（`-i https://pypi.org/simple`）、依赖仍走镜像。
+
+不接 agent、想自己在终端装时，等价命令：
+
+```powershell
+pip install "cosmic-kb[complete]" -i https://pypi.tuna.tsinghua.edu.cn/simple
+# 想省掉每次 -i，可把镜像设成默认源：
+# pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
 **两处例外，agent 代劳不了：**
 
 - **数据库口令**：不要把密码打进对话（可能被记录）。让 agent 生成完 `cosmic_db.json` 模板后，
@@ -94,9 +109,58 @@ CodeBuddy、Qoder…）。它会用用户级隔离运行时装好**固定版本*
 - **Qoder / Trae 这类只在图形化设置面板里粘贴 MCP JSON 的客户端**：粘贴进设置页这一步没有命令
   行入口，agent 没法替你点鼠标，按 [`接入 agent 与 MCP`](docs/参考手册/接入agent与MCP.md) 手动粘一次即可。
 
-> **包尚未上 PyPI（或你在内网离线环境）时**：先按 [`手动安装详细教程`](docs/参考手册/手动安装详细教程.md)
-> 用本仓源码/wheel 装好包，`bootstrap` 之后的建库、注册、校验流程完全一致。想弄清每一步在
-> 干什么、或不想用固定口令，也可以让 agent 直接读本 README + 下面几篇详解照做。
+> 包已发布在 PyPI：<https://pypi.org/project/cosmic-kb/>（`pip install cosmic-kb`，国内用上面的镜像）。
+> **纯内网、连国内镜像都上不了的离线环境**：先按 [`手动安装详细教程`](docs/参考手册/手动安装详细教程.md)
+> 用本仓源码/wheel 装好包（或在有网机器 `pip download "cosmic-kb[complete]" -d ./pkgs -i <镜像>`
+> 下好全部 wheel 拷过去 `pip install --no-index --find-links=./pkgs cosmic-kb`），`bootstrap` 之后的
+> 建库、注册、校验流程完全一致。想弄清每一步在干什么、或不想用固定口令，也可以让 agent 直接读本
+> README + 下面几篇详解照做。
+
+---
+
+## 装好之后怎么用？直接用大白话问你的 agent
+
+安装完成（KB 已建、MCP 已注册、四个工具校验通过）后，**日常用法就一句话：像平时那样用中文
+问你的 agent，别自己去背命令**。agent 会自己判断该调 `trace`/`bill`/`resolve_fields`/
+`cosmic_semantics` 里的哪个、把返回的证据读成人话回你。你只管问业务问题，比如：
+
+**① 字段级排障——"这个值是谁改的、落没落库"**
+
+```text
+cqkd_zkd 这张单的 cqkd_amount 字段是谁改的？改完落库了吗？在源码第几行？
+应收单头上的 billstatus 状态字段，有哪些插件会写它、分别在什么事件里触发？
+```
+> agent 会调 `trace "单据.字段"`，回你「哪个插件类·哪个方法·什么事件·是否落库·源码行号」这条
+> 完整证据链，判不准的会如实标 `unknown`，不会替你编。
+
+**② 摸清一张单据——"这张单挂了哪些插件、都在哪些操作上"**
+
+```text
+cqkd_zkd 这张单据都绑了哪些插件？每个操作（提交/审核/…）分别触发哪些插件？
+```
+> agent 会调 `bill "单据标识"`，一次列出表单插件 / 操作集 / 每个操作绑定的插件，不用你在设计器里
+> 来回切页面拼。
+
+**③ 核对陌生源码——"这段代码/这个字段到底是什么意思"**
+
+把一段看不懂的苍穹插件源码、或一串英文字段标识丢给 agent：
+
+```text
+（贴一段插件源码h让agent读取源码文件）这段代码在干什么？里面的 cqkd_zkd、srctransid 是什么字段？
+这个插件绑在哪个单据的哪个操作上？afterCreateNewData 这个事件什么时候触发？
+```
+> agent 会调 `resolve_fields` 把英文标识核对成真实中文名 + 元数据定义（分录层级、字段类型、
+> 下拉枚举的中文含义、基础资料引用指向哪张单据），再调 `cosmic_semantics` 核对苍穹私有插件类型 /
+> 事件时机 / 原厂 SDK 用法——防止它拿普通 Java 经验硬猜苍穹私有框架、猜错还不自知。
+
+**几个实用提醒：**
+
+- **源码或元数据更新后要重建 KB**：让 agent 重跑一次 `cosmic_kb bootstrap apply`（幂等，已建步骤自动
+  跳过），或直接说「源码更新了，帮我重建 KB」。改了直连底层库的元数据同理。
+- **MCP 改动 / 重装后**要**重启或重连 agent** MCP 才生效（bootstrap 完成时也会提醒）。
+- **想自己在终端查、不经过 agent**：全部命令见 [`命令行速查`](docs/参考手册/命令行速查.md)，常用的就是
+  `cosmic_kb trace/bill/resolve/source/coverage`（`cosmic_kb --help` 看全部）。
+- **接好后更细的问法示例**见 [`接入 agent 与 MCP`](docs/参考手册/接入agent与MCP.md)。
 
 ---
 
