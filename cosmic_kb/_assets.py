@@ -1,4 +1,4 @@
-"""资产定位 —— 苍穹语义文档（references/rules）、继承根模板、SDK 文档库。
+"""资产定位 —— 苍穹语义文档（references/rules）、继承根模板。
 
 阶段 0 的"资产复用"在这里集中收口；**分发改造后（docs/设计方案/分发与多agent接入方案.md §4）**，
 运行期资产一律走 `importlib.resources`，不再靠"项目根 = 本包上一级目录"的同级目录假设。
@@ -10,15 +10,10 @@
     cosmic_kb/semantics/rules/        反模式 / 幻觉名黑名单
     cosmic_kb/metadata/templates/     继承根模板（bos_billtpl / bos_basetpl，操作 oid 回填用）
     cosmic_kb/skills/*/SKILL.md        CodeBuddy / Qoder / TRAE 通用工作流 Skill
-
-非随包（运行期可选 / 仅开发态）：
-    skill_assets/ok-cosmic-docs.db    9MB SDK 离线文档库，运行期暂未消费，踢出 wheel；
-                                      需要时用环境变量 COSMIC_KB_DOCS_DB 指向，或开发态回退源码树。
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from importlib.resources import files
 try:  # 3.11+ 在此；3.10 回退到 importlib.abc
@@ -95,33 +90,17 @@ def read_topic(topic: str) -> str | None:
     return None
 
 
-def docs_db_path() -> Path | None:
-    """SDK 文档库（ok-cosmic-docs.db）定位：环境变量优先，否则回退源码树（仅开发态）。
-
-    该库运行期暂未被消费、且 9MB 不随 wheel 分发；返回 None 表示未配置/不存在。
-    """
-    env = os.environ.get("COSMIC_KB_DOCS_DB")
-    if env:
-        p = Path(env)
-        return p if p.is_file() else None
-    dev = PROJECT_ROOT / "skill_assets" / "ok-cosmic-docs.db"
-    return dev if dev.is_file() else None
-
-
 @dataclass(frozen=True)
 class AssetStatus:
-    """单个资产的存在性检查结果。`optional=True` 的资产缺失不算 doctor 失败。"""
+    """单个资产的存在性检查结果（随包数据缺失即视为安装损坏）。"""
 
     name: str
     present: bool
     detail: str
-    optional: bool = False
 
     @property
     def label(self) -> str:
-        if self.present:
-            return "OK"
-        return "OPTIONAL" if self.optional else "MISSING"
+        return "OK" if self.present else "MISSING"
 
 
 def _traversable_ok(trav: Traversable) -> bool:
@@ -136,14 +115,10 @@ def check_assets() -> list[AssetStatus]:
 
     ref_n = sum(1 for _ in iter_reference_topics())
     tpl_ok = _traversable_ok(templates_root())
-    db = docs_db_path()
 
     return [
         AssetStatus("semantics", _traversable_ok(references_root()),
                     f"references+rules 共 {ref_n} 篇语义文档（随包）"),
         AssetStatus("templates", tpl_ok,
                     "继承根模板 bos_billtpl/bos_basetpl（随包，操作 oid 回填用）"),
-        AssetStatus("ok-cosmic-docs.db", db is not None,
-                    str(db) if db else "未配置（设 COSMIC_KB_DOCS_DB 启用 SDK 文档查询）",
-                    optional=True),
     ]

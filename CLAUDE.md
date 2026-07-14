@@ -69,7 +69,7 @@
 pip install -e ".[parse,encoding,dev,mcp]"  # 解析+编码+测试+MCP（mcp 可选）
 pytest -q                                # 跑测试（当前 460 passed, 4 skipped）
 cosmic_kb --version                      # 版本
-cosmic_kb doctor                         # 资产体检（需 skill_assets/ok-cosmic-docs.db）
+cosmic_kb doctor                         # 资产体检（随包 semantics/templates 是否就位）
 cosmic_kb ingest "<项目源码根>"          # 阶段1：摄取 + 覆盖率/可信度报告（--json 可留档）
 cosmic_kb meta "<dym|cr 或整包 zip>"     # 阶段2：解析元数据(含转换规则 .cr)，分类计数/JSON 快照
 cosmic_kb bridge "<项目源码根>" "<dym|zip|目录>"  # 阶段3：ClassName↔源码桥接报告（--json）

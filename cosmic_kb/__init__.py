@@ -17,7 +17,7 @@ KB 是两段之间的契约：段一写 KB，段二读 KB。
     report    阶段1/4  覆盖率报告、项目地图、接手者理解报告
     cli       全阶段  命令行入口（含 `cosmic_kb --version` 冒烟命令）
 
-阶段 0 仅搭好以上骨架与资产接线（skill_assets）；各子包的实现随阶段填充。
+阶段 0 仅搭好以上骨架与随包资产接线（semantics/templates）；各子包的实现随阶段填充。
 """
 
 from __future__ import annotations

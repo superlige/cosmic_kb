@@ -2,7 +2,7 @@
 
 已实现命令：
     cosmic_kb --version       # 版本输出
-    cosmic_kb doctor          # 检查 skill_assets 资产接线
+    cosmic_kb doctor          # 检查随包资产（semantics/templates）接线
     cosmic_kb ingest <路径>   # 阶段1：摄取源码 + 解析覆盖率/可信度报告
     cosmic_kb meta <dym|zip|dir...>  # 阶段2：解析 dym / 整包 / 多包 / 目录元数据
     cosmic_kb bridge <源码根> <dym|zip|dir...>  # 阶段3：元数据 ClassName ↔ 源码桥接
@@ -41,8 +41,8 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     for status in statuses:
         print(f"{status.label:<10}{status.name:<20}{status.detail}")
 
-    # 只有**非可选**资产缺失才算体检失败（ok-cosmic-docs.db 运行期暂未消费，缺它不阻断）。
-    missing = [s for s in statuses if not s.present and not s.optional]
+    # 随包数据（semantics/templates）应始终就位，任何一项缺失都算体检失败。
+    missing = [s for s in statuses if not s.present]
     print("")
     if missing:
         print(f"缺失关键资产 {len(missing)} 项（随包数据应已就位，缺失多为安装损坏）。")
@@ -1100,7 +1100,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
 
-    doctor = sub.add_parser("doctor", help="检查 skill_assets 资产接线是否就位")
+    doctor = sub.add_parser("doctor", help="检查随包资产（semantics/templates）是否就位")
     doctor.set_defaults(func=_cmd_doctor)
 
     # ── Agent Skill 分发：CodeBuddy / Qoder 直接安装，TRAE 生成官方导入包 ─────

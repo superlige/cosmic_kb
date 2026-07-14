@@ -132,7 +132,7 @@ def _step_doctor(*, run_coverage: bool, kb_path=None) -> dict[str, Any]:
     from .. import _assets
 
     statuses = _assets.check_assets()
-    missing = [s.name for s in statuses if not s.present and not s.optional]
+    missing = [s.name for s in statuses if not s.present]
     result: dict[str, Any] = {
         "step": "doctor",
         "status": "failed" if missing else "done",
