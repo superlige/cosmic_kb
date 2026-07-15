@@ -201,6 +201,43 @@ def _enrich_rows(rows: list[dict[str, Any]], plugin_home: dict[str, list]) -> No
         r["semantics_topic"] = hints.event_topic(r.get("event_method"), r.get("plugin_type"))
 
 
+# note 里点名的操作坐标条数上限（提示语要短；全量坐标从 bill 的每操作计数即可枚举）。
+_TRIG_NOTE_COORDS = 3
+
+
+def _op_trigger_note(conn, rows: list[dict[str, Any]]) -> str | None:
+    """写入点来自**操作插件**且对应操作存在程序化触发点时，生成一句 note 提示（隐藏坑 #1）。
+
+    场景："字段被审核插件改了，但没人手动审核过"——写入点挂在操作 X 的插件上，而操作 X
+    是别处代码 executeOperate 触发的。明细**不内联**（2026-07-15 与用户拍板：改走
+    `trace(单据.操作, kind="operation")` 按需查询），trace 字段坐标只留最小发现性信号：
+    note 点名确切的操作坐标 + 各自触发点计数，agent 顺手就能发起下一跳。
+    """
+    classes = sorted({r["plugin_fqn"] for r in rows
+                      if r.get("plugin_type") == "op" and r.get("plugin_fqn")
+                      and r.get("access") == "write"})
+    if not classes:
+        return None
+    ph = ",".join("?" * len(classes))
+    binds = conn.execute(
+        f"SELECT DISTINCT form_key,operation_key FROM plugin WHERE plugin_type='op' "
+        f"AND operation_key IS NOT NULL AND form_key IS NOT NULL AND class_name IN ({ph}) "
+        f"ORDER BY form_key,operation_key", classes).fetchall()
+    coords: list[str] = []
+    for b in binds:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM operation_trigger WHERE target_form_key=? AND op_key=?",
+            (b["form_key"], b["operation_key"])).fetchone()[0]
+        if n:
+            coords.append(f"\"{b['form_key']}.{b['operation_key']}\"（{n} 处）")
+    if not coords:
+        return None
+    shown = "、".join(coords[:_TRIG_NOTE_COORDS]) + ("等" if len(coords) > _TRIG_NOTE_COORDS else "")
+    return (f"⚡ 部分写入点来自操作插件，且对应操作存在**程序化触发点**（别处代码 "
+            f"executeOperate/invokeOperation 触发，设计器不展示）：{shown}——排查\"没人手动"
+            f"执行操作，字段怎么变了\"时，用 trace(该操作坐标, kind=\"operation\") 查触发链。")
+
+
 def _collect_materials(
     conn, field_key: str, *,
     form_key: str | None = None, entry_key: str | None = None, level: str | None = None,
@@ -488,6 +525,10 @@ def _collect_materials(
         redirect = (f"⚑ {form_key} 是扩展别名，内容已并入原厂单据 {extends_target}，"
                     f"请改查 {extends_target}.{field_key}")
         note = f"{redirect}；{note}" if note else redirect
+
+    trig_note = _op_trigger_note(conn, all_rows)   # 操作插件写入点 → 操作坐标提示（隐藏坑 #1）
+    if trig_note:
+        note = f"{note} {trig_note}" if note else trig_note
 
     # 已给 form_key（精确/半精确查询）时，对外只暴露本单据(+分录/层级)范围内的定义坐标——
     # 其他单据的同名字段定义对"已经知道查哪张单据"的排障者是纯噪音（用户 2026-07-05 指出

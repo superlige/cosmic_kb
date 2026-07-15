@@ -621,7 +621,13 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
 
 
 def _cmd_trace(args: argparse.Namespace) -> int:
-    """阶段5+6+7 旗舰：字段排障追踪（谁改了它·哪个事件函数·是否落库）。"""
+    """阶段5+6+7 旗舰：字段排障追踪（谁改了它·哪个事件函数·是否落库）。
+
+    `--kind operation`（隐藏坑 #1）：坐标改按 "单据.操作key" 解释，返回该操作的程序化触发链
+    （谁 executeOperate/invokeOperation 触发了它、操作 key/目标单据解不出而无法排除的入站嫌疑
+    ——含挂不上操作坐标的表单插件外发、它又触发了谁）。对该操作的调用一次即完整。
+    坐标判别纯显式，不做字段/操作自动猜测。
+    """
     from ..graph import store
     from ..report import field_trace
 
@@ -630,6 +636,17 @@ def _cmd_trace(args: argparse.Namespace) -> int:
         return rc
     conn = store.open_kb(db)
     try:
+        if getattr(args, "kind", "field") == "operation":
+            from ..report import op_trace
+
+            ot = op_trace.operation_trace(conn, args.field, form_key=args.form)
+            if args.json:
+                print(json.dumps(ot, ensure_ascii=False, indent=2))
+            else:
+                print(op_trace.render_operation_trace(ot))
+            if ot.get("status") == "need_clarification":
+                return 3
+            return 2 if ot.get("error") else 0
         field_key, form_key, entry_key, level = field_trace.parse_locator(args.field)
         # 显式 --form/--entry/--level 覆盖点号推断。
         form_key = args.form or form_key
@@ -1294,12 +1311,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ── 阶段5+6+7 旗舰：字段排障追踪 + 单据钻取（读 KB）─────────────────────
     trace = sub.add_parser(
-        "trace", help="旗舰：输入字段标识→哪些插件的哪个事件函数改了它、是否落库",
+        "trace", help="旗舰：输入字段标识→哪些插件的哪个事件函数改了它、是否落库；"
+                      "--kind operation 改查操作坐标→程序化触发链",
     )
     trace.add_argument(
         "field",
         help="字段标识；支持点号精确定位 单据.分录.字段 / 单据.字段 / 分录.字段，如 "
-             "cqkd_assetcard.cqkd_entry.cqkd_amount")
+             "cqkd_assetcard.cqkd_entry.cqkd_amount；--kind operation 时写 单据.操作key")
+    trace.add_argument(
+        "--kind", choices=["field", "operation"], default="field",
+        help="坐标类型（纯显式，不自动猜测）：field=字段（默认）；operation=操作——查该操作的"
+             "程序化触发链（谁 executeOperate/invokeOperation 触发了它、操作key/目标解不出而"
+             "无法排除的入站嫌疑、它又触发了谁），对该操作的调用一次即完整")
     trace.add_argument("--form", help="限定某单据（同字段跨单据时缩小范围）")
     trace.add_argument("--entry", help="限定某分录/子分录标识（同字段跨层级时精确定位）")
     trace.add_argument("--level", choices=["header", "entry", "subentry", "basedata"],

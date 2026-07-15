@@ -37,6 +37,21 @@ def test_bundled_skills_have_portable_frontmatter():
         assert len(text) > 500
 
 
+def test_understand_skill_routes_operation_without_bill_first():
+    """Skill 与 MCP 保持同一路由，不把已知操作坐标重新导向 bill-first。"""
+    text = read_skill("cosmic-kb-understand").decode("utf-8")
+
+    assert "操作程序化触发链" in text.split("---", 2)[1]
+    assert '`trace(kind="field")`' in text
+    assert '`trace(kind="operation")`，不先调 `bill`' in text
+    assert "单据整体操作集、全部插件、插件车道" in text
+    assert '`resolve_fields(kind="plugin")`' in text
+    assert "使用 `bill` 获取目标单据的操作集和有效插件绑定" not in text
+    assert "pagination.complete=false" in text
+    assert "plugins`、`triggered_by`、`unresolved_inbound`、`triggers_downstream" in text
+    assert "能力边界" in text
+
+
 def test_detect_agents_by_command_and_config(tmp_path):
     home = tmp_path / "home"
     (home / ".qoder").mkdir(parents=True)

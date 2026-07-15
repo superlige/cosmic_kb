@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import inspect
 import sqlite3
 from pathlib import Path
 
@@ -27,6 +28,41 @@ def kb_env(tmp_path: Path, monkeypatch):
     return db
 
 
+def test_mcp_descriptions_keep_routing_contract_and_schema():
+    """描述是 LLM 的路由契约：五路入口齐全，操作坐标不再被 bill-first 截走。"""
+    instructions = mcp_server.INSTRUCTIONS
+    first_512 = instructions[:512]
+    for tool_name in ("trace", "bill", "resolve_fields", "cosmic_semantics"):
+        assert tool_name in first_512
+    assert 'kind="field"' in first_512
+    assert 'kind="operation"' in first_512
+    assert "pagination.complete=false" in instructions
+    assert "unresolved_inbound" in instructions
+
+    trace_doc = inspect.getdoc(mcp_server.tool_trace) or ""
+    assert "已知操作坐标时直接调用" in trace_doc
+    assert "`bill` 不是前置步骤" in trace_doc
+    assert all(section in trace_doc for section in (
+        "plugins", "triggered_by", "unresolved_inbound", "triggers_downstream"))
+    assert "不代表人工、工作流或设计器入口的完整链路" in trace_doc
+
+    bill_doc = inspect.getdoc(mcp_server.tool_bill) or ""
+    assert "本工具不是前置步骤" in bill_doc
+    assert "outbound_triggers" in bill_doc
+    assert "插件源码解读场景的必查工具" not in bill_doc
+
+    resolve_doc = inspect.getdoc(mcp_server.tool_resolve_fields) or ""
+    assert all(f'"{kind}"' in resolve_doc
+               for kind in ("field", "entity", "form", "plugin"))
+    assert "必须传等长列表逐项对应" in resolve_doc
+    assert "不能组装业务点号坐标" in resolve_doc
+    assert "missing_form_key" in resolve_doc
+
+    assert list(inspect.signature(mcp_server.tool_trace).parameters) == [
+        "field", "form", "entry", "level", "access", "cursor", "kind"]
+    assert set(mcp_server.TOOLS) == {"trace", "bill", "resolve_fields", "cosmic_semantics"}
+
+
 def test_tool_trace_same_as_report(kb_env):
     """tool_trace 走紧凑投影 trace_compact（防 host 截断），与 report 同口径、零重写。"""
     from cosmic_kb.report import field_trace
@@ -41,6 +77,16 @@ def test_tool_trace_same_as_report(kb_env):
     finally:
         conn.close()
     assert got == want
+
+
+def test_tool_trace_kind_operation(kb_env):
+    """kind="operation"（纯显式）：路由到操作坐标追踪 op_trace；未知 kind 诚实报错不猜。"""
+    got = mcp_server.tool_trace("cqkd_assetcard.audit", kind="operation")
+    assert got["kind"] == "operation"
+    assert got["pagination"]["complete"] is True
+    assert got["triggered_by"] == []          # 合成库无触发点，诚实空 + note 说明
+    assert "未发现" in got["note"]
+    assert "error" in mcp_server.tool_trace("cqkd_assetcard.audit", kind="nope")
 
 
 def test_tool_bill_handles_null_field_key(kb_env):

@@ -29,6 +29,7 @@ from . import call_graph as cgmod
 from . import event_extractor as events
 from . import field_access as fa
 from . import null_reason as nrmod
+from . import op_trigger as otmod
 from . import persistence as persist
 from . import plugin_classifier as classifier
 from . import project_graph as pgmod
@@ -95,6 +96,8 @@ class AnalysisResult:
     # 全工程常量值表（常量名→字面值）。供粗扫侧把常量引用也算作召回（信任手段二），
     # 复用这里已建好的表、避免重复解析全工程 Java。tree-sitter 未装时为 None。
     const_table: "ConstantTable | None" = None
+    # 程序化操作触发点（隐藏坑 #1）：executeOperate/invokeOperation 调用点 → 目标单据.操作。
+    operation_triggers: list["otmod.OperationTriggerRow"] = field(default_factory=list)
 
 
 def analyze(
@@ -186,6 +189,10 @@ def analyze(
 
     # ── 字段 key 反查元数据回填 form_key（待办一：数据流追不到来源时的硬约束兜底）──────────
     _backfill_form_key(result, field_idx, bound_entity)
+
+    # ── 程序化操作触发点采集（隐藏坑 #1）：独立全量扫，不依赖插件 BFS ────────────────
+    #    放在第①轮之后——invokeOperation 的目标单据要靠 bound_entity（本类唯一绑定单据）。
+    result.operation_triggers = otmod.collect_triggers(pg, bound_entity)
 
     result.field_accesses = _dedup(result.field_accesses)
     # ── 未定位成因定稿（信任优先）：全部回填之后，给仍 form_key=None 的行打结构化成因 ──────────

@@ -85,6 +85,46 @@ def bill_view(conn, key: str) -> dict[str, Any] | None:
     for slot in entity_touch.values():
         slot["fields"].sort(key=lambda f: -f["writers"])
 
+    # ── 程序化操作触发点（隐藏坑 #1）：executeOperate/invokeOperation 调用点 ────────────
+    # 正查（inbound）明细已移入 `trace --kind operation`（操作坐标追踪，2026-07-15 与用户拍板：
+    # 明细摊进 bill 对不查触发链的调用是纯冗余）。bill 只留**最小发现性信号**：每操作一个计数 +
+    # stats 汇总——agent 钻单据时看到计数 >0 就知道该查操作坐标，几字节换发现性。
+    inbound_ops = [r[0] for r in conn.execute(
+        "SELECT op_key FROM operation_trigger WHERE target_form_key=?", (key,)).fetchall()]
+    op_keys = {o["key"] for o in operations}
+    trig_cnt_by_op: dict[str, int] = {}
+    unresolved_trigger_count = 0
+    for ok in inbound_ops:
+        if ok and ok in op_keys:
+            trig_cnt_by_op[ok] = trig_cnt_by_op.get(ok, 0) + 1
+        else:  # 操作 key 解不出（dynamic/unknown）或不在元数据操作集：计数诚实呈现，明细见操作坐标
+            unresolved_trigger_count += 1
+    for o in operations:
+        o["programmatic_trigger_count"] = trig_cnt_by_op.get(o["key"], 0)
+    # 反查（outbound）：本单据绑定插件的代码对外触发了哪些**别的**单据的操作（影响面评估）。
+    # 定位（2026-07-15 二次整合后）：这是单据级**影响面**视图（"改本单插件会炸到谁"）；
+    # 其中 target=NULL 的切片已同时并入对应操作坐标追踪的 unresolved_inbound（op key 匹配→
+    # target_unresolved 嫌疑），查"谁调了某操作"trace 一次即完整，本节不再是必查补充。
+    # 自触发（目标=本单据）已可经操作坐标查到，排掉避免重复；目标解不出（NULL）的也列出——
+    # "不知道炸到谁"本身就是要暴露的风险。
+    own_classes = sorted({p["class_name"] for p in plugins if p.get("class_name")})
+    outbound_triggers: list[dict[str, Any]] = []
+    if own_classes:
+        qmarks = ",".join("?" * len(own_classes))
+        outbound_triggers = [dict(r) for r in conn.execute(
+            f"SELECT caller_class,caller_method,line,source_relpath,via,op_key,op_key_resolution,"
+            f"target_form_key,target_resolution,target_confidence,evidence FROM operation_trigger "
+            f"WHERE caller_class IN ({qmarks}) AND (target_form_key IS NULL OR target_form_key<>?) "
+            f"ORDER BY caller_class,line", (*own_classes, key)).fetchall()]
+        tgt_keys = sorted({t["target_form_key"] for t in outbound_triggers if t["target_form_key"]})
+        tgt_names = {}
+        if tgt_keys:
+            tq = ",".join("?" * len(tgt_keys))
+            tgt_names = {r[0]: r[1] for r in conn.execute(
+                f"SELECT key,name FROM form WHERE key IN ({tq})", tgt_keys).fetchall()}
+        for t in outbound_triggers:
+            t["target_form_name"] = tgt_names.get(t["target_form_key"])
+
     # 风险：有 project 插件却找不到源码 / 歧义。
     risk_bindings = [b for b in bindings if b["status"] in ("missing", "ambiguous")]
 
@@ -119,12 +159,16 @@ def bill_view(conn, key: str) -> dict[str, Any] | None:
         "field_touch": field_touch,
         "entity_touch": list(entity_touch.values()),
         "risk_bindings": risk_bindings,
+        "outbound_triggers": outbound_triggers,
         "note": note,
         "stats": {
             "entity_count": len(entities), "field_count": len(fields),
             "operation_count": len(operations), "plugin_count": len(plugins),
             "touched_fields": len(field_touch),
             "disabled_plugin_count": len(disabled_plugins),
+            "programmatic_trigger_count": len(inbound_ops),
+            "unresolved_trigger_count": unresolved_trigger_count,
+            "outbound_trigger_count": len(outbound_triggers),
         },
     }
 
@@ -181,7 +225,12 @@ def _build_plugin_lanes(
 #   ③ cap + 字节 governor——各列表 cap、按 host 口径 _wire_len 逐档收紧直至 ≤ 预算；
 #   ④ 游标分页——被 cap 的段带 `*_next_cursor`，`bill(key, cursor=该值)` 翻页取回全部被截条目（红线 #4）。
 # 富 bill_view 不动（CLI/Web 走 HTTP/终端无 32KB 限制，仍用富投影）。
-_BILL_PAGE_SECTIONS = ("fields", "operations", "plugins", "bindings", "entities", "entity_touch")
+_BILL_PAGE_SECTIONS = ("fields", "operations", "plugins", "bindings", "entities", "entity_touch",
+                       "outbound_triggers")
+
+# outbound 触发点内联上限（通常个位数；超出带 *_next_cursor 翻页）。
+# 入站明细已移入 `trace --kind operation`（操作坐标追踪），bill 只留每操作计数。
+_TRIGGER_LIST_CAP = 10
 
 # cap 阶梯（从宽到窄）：(字段元数据, 操作, 插件, 绑定, 实体, entity_touch 扁平字段行)。
 _BILL_LADDER = [
@@ -202,8 +251,19 @@ def _slim_entity(e: dict[str, Any]) -> dict[str, Any]:
     return {k: e.get(k) for k in ("key", "name", "level", "parent_key", "table_name")}
 
 
+def _slim_trigger_out(t: dict[str, Any]) -> dict[str, Any]:
+    """outbound 触发点：目标单据.操作 +（已核对）目标中文名；目标 NULL=解不出，本身就是风险信号。"""
+    return {k: t.get(k) for k in
+            ("caller_class", "caller_method", "line", "source_relpath", "via",
+             "op_key", "target_form_key", "target_form_name", "target_resolution")}
+
+
 def _slim_op(o: dict[str, Any]) -> dict[str, Any]:
-    return {k: o.get(k) for k in ("key", "name", "operation_type", "has_operation_plugin")}
+    out = {k: o.get(k) for k in ("key", "name", "operation_type", "has_operation_plugin")}
+    cnt = o.get("programmatic_trigger_count")
+    if cnt:   # 最小发现性信号：非零才带出（明细用 trace(单据.操作, kind="operation") 按需查）
+        out["programmatic_trigger_count"] = cnt
+    return out
 
 
 def _slim_plugin(p: dict[str, Any]) -> dict[str, Any]:
@@ -305,11 +365,19 @@ def _build_bill_compact(
         "bindings_total": len(binds),
         "risk_bindings": [_slim_binding(b) for b in bv["risk_bindings"]],  # 通常很少，整列内联
     }
+    # 程序化触发点（隐藏坑 #1）：入站明细在 `trace --kind operation`，此处只带 outbound 精简节
+    # （单据级影响面视图；无法排除的切片已并入操作坐标 unresolved_inbound）。非空才带出，两档 profile 都给。
+    outb = bv["outbound_triggers"]
+    if outb:
+        res["outbound_triggers"] = [_slim_trigger_out(t) for t in outb[:_TRIGGER_LIST_CAP]]
+        res["outbound_triggers_total"] = len(outb)
     capped = False
     capped |= _cap_flag(res, "entities", len(ents), cap_entities)
     capped |= _cap_flag(res, "operations", len(ops), cap_ops)
     capped |= _cap_flag(res, "plugins", len(plugins), cap_plugins)
     capped |= _cap_flag(res, "bindings", len(binds), cap_bindings)
+    if outb:
+        capped |= _cap_flag(res, "outbound_triggers", len(outb), _TRIGGER_LIST_CAP)
 
     if full:
         touch = _touch_rows(bv)
@@ -327,6 +395,12 @@ def _build_bill_compact(
     note = ""
     if bv.get("note"):   # 扩展别名重定向提示（见 bill_view），优先摆最前，别被防截断说明淹没
         note += bv["note"] + " "
+    if bv["stats"].get("programmatic_trigger_count") or bv["stats"].get("outbound_trigger_count"):
+        note += ("⚡ 本单据涉及程序化操作触发点（代码 executeOperate/invokeOperation 触发操作，"
+                 "设计器不展示）：operations[] 里带 programmatic_trigger_count 的操作，用 "
+                 "trace(\"单据.操作key\", kind=\"operation\") 查触发链明细（谁触发的/上游单据/"
+                 "操作 key 或目标解不出的入站嫌疑 unresolved_inbound——对某操作的调用在 trace "
+                 "里一次即完整）；本单据代码对外触发别的单据见 outbound_triggers（影响面视图）。")
     if full:
         note += ("紧凑投影（防 MCP 32KB 截断）：每字段的逐条事件已折叠为「写/落库/读」计数——要看『某字段"
                 "谁改的/在哪个事件函数/是否落库』逐字段用 `trace 单据.字段`（entity_touch 每行已给 trace 锚点）。"
@@ -369,6 +443,8 @@ def _bill_section_full(bv: dict[str, Any], section: str) -> list[dict[str, Any]]
         return [_slim_entity(e) for e in bv["entities"]]
     if section == "entity_touch":
         return _touch_rows(bv)            # 扁平字段触达行（每行带实体上下文 + trace 导航）
+    if section == "outbound_triggers":
+        return [_slim_trigger_out(t) for t in bv["outbound_triggers"]]
     return None
 
 
@@ -456,7 +532,27 @@ def render_bill(bv: dict[str, Any], *, max_list: int = 30) -> str:
                      "仅统计操作插件，表单插件按钮内部分支不计入）")
         for o in bv["operations"]:
             star = "★" if o["has_operation_plugin"] else " "
-            lines.append(f"  {star} {o['key'] or '?':<18} {o['name'] or '':<10} [{o['operation_type'] or '?'}]")
+            trig = (f"  ⚡程序化触发×{o['programmatic_trigger_count']}"
+                    f"（trace \"{f['key']}.{o['key']}\" --kind operation 查触发链）"
+                    if o.get("programmatic_trigger_count") else "")
+            lines.append(f"  {star} {o['key'] or '?':<18} {o['name'] or '':<10} "
+                         f"[{o['operation_type'] or '?'}]{trig}")
+
+    if bv["stats"].get("unresolved_trigger_count"):
+        lines.append("")
+        lines.append(f"  ⚡ 另有 {bv['stats']['unresolved_trigger_count']} 条指向本单据的程序化触发点"
+                     "操作 key 解不出/不在操作集（嫌疑明细在任一操作坐标追踪的 unresolved_inbound 段："
+                     f"trace \"{f['key']}.<操作key>\" --kind operation）")
+
+    if bv.get("outbound_triggers"):
+        lines.append("")
+        lines.append("【程序化外发触发】（本单据插件代码触发别的单据的操作——改本单插件前评估影响面）")
+        for t in bv["outbound_triggers"]:
+            tgt = t["target_form_key"] or "?（目标未解析）"
+            nm = f"「{t['target_form_name']}」" if t.get("target_form_name") else ""
+            lines.append(f"  ⚡ → {tgt}{nm}.{t['op_key'] or '?'} "
+                         f"{t['caller_class']}.{t['caller_method']} [{t['via']}] "
+                         f"{t['source_relpath']}:{t['line']}")
 
     if bv.get("plugin_lanes"):
         lines.append("")

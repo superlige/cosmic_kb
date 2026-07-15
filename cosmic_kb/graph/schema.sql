@@ -189,6 +189,28 @@ CREATE TABLE field_access (
                                            -- 单一真源 java/null_reason.py，供 trace/coverage/web 导航。
 );
 
+-- ── 程序化操作触发点（隐藏坑 #1：executeOperate/invokeOperation 调用点 → 目标单据.操作）──
+--   设计器完全不展示的"代码触发操作"：`OperationServiceHelper.executeOperate("audit",
+--   "cqkd_b", ...)`（跨单据）与 `view.invokeOperation("save")`（当前单据自触发）。
+--   只存**单跳原子事实**（谁·哪一行·触发了哪个单据的哪个操作），不预拼多跳链——
+--   A→B→C 级联由段二 agent 递归查 bill/trace 拼出。bill 按 (target_form_key, op_key)
+--   正查"谁触发了我"，按 caller_class 反查"本单据代码外发了什么"。
+CREATE TABLE operation_trigger (
+    caller_class        TEXT,             -- 调用点所在类全限定名
+    caller_method       TEXT,             -- 调用点所在方法名
+    line                INTEGER,          -- 调用所在行号（直达源码）
+    source_relpath      TEXT,             -- 源文件（相对源码根）
+    via                 TEXT,             -- executeOperate/execOperate/invokeOperation
+    op_key              TEXT,             -- 操作 key（audit/submit/…）；解不出为 NULL
+    op_key_resolution   TEXT,             -- literal/constant/ambiguous/dynamic/unknown
+    op_key_confidence   REAL,
+    target_form_key     TEXT,             -- 目标单据标识；解不出为 NULL（红线#4 不臆造）
+    target_resolution   TEXT,             -- literal/constant/binding/ambiguous/dynamic/unknown
+                                          -- binding=invokeOperation 取本类唯一绑定单据
+    target_confidence   REAL,
+    evidence            TEXT
+);
+
 -- ── Java 全局常量值表（类.常量 → 字面值；供 read_source 解析源码里的常量引用）───────
 --   起因：`TemporaryStopCon.ENTITY` 这类限定常量引用，字面值（如 cqkd_ltyz）根本不出现
 --   在源码正文里，read_source 按文本扫已知 key 的老办法扫不到，逼大模型凭常量英文名去猜
@@ -262,6 +284,8 @@ CREATE INDEX idx_facc_aclass      ON field_access(access_class);
 CREATE INDEX idx_facc_coord       ON field_access(field_key, form_key, level, entry_key);
 CREATE INDEX idx_facc_nullreason  ON field_access(null_reason);
 CREATE INDEX idx_coarse_field     ON coarse_field_hit(field_key);
+CREATE INDEX idx_optrig_target    ON operation_trigger(target_form_key, op_key);
+CREATE INDEX idx_optrig_caller    ON operation_trigger(caller_class);
 CREATE INDEX idx_javaconst_class  ON java_constant(class_name, const_name);
 CREATE INDEX idx_javaconst_name   ON java_constant(const_name);
 CREATE INDEX idx_combo_field      ON field_combo_item(field_uid);

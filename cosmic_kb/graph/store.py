@@ -27,11 +27,12 @@ if TYPE_CHECKING:
     from ..metadata.model import MetaModel
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
-KB_SCHEMA_VERSION = "16"
+KB_SCHEMA_VERSION = "17"
 
 # DROP 顺序（FTS 虚拟表与各表；DROP TABLE 对 search 同样有效，会连带清掉 FTS 影子表）。
 _OBJECTS = [
-    "search", "edge", "coarse_field_hit", "java_constant", "field_access", "plugin_method",
+    "search", "edge", "coarse_field_hit", "operation_trigger", "java_constant",
+    "field_access", "plugin_method",
     "operation", "binding", "source_class", "convert_rule",
     "field_combo_item", "plugin", "field", "entity", "form", "module", "kb_meta",
 ]
@@ -94,6 +95,7 @@ def build_kb(
             res = java_analyze.analyze(scan_result, models, bridge_result, index)
             counts.update(_populate_java(conn, res))
             counts.update(_populate_java_constants(conn, res))
+            counts.update(_populate_operation_triggers(conn, res))
             counts.update(_populate_coarse(conn, scan_result, models, res))
             _write_meta(conn, counts, bridge_result, module_map, source_args)
         return counts
@@ -333,6 +335,24 @@ def _populate_java_constants(conn, res) -> dict[str, Any]:
         "INSERT INTO java_constant VALUES(?,?,?,?,?)", const_table.records,
     )
     return {"java_constant": len(const_table.records)}
+
+
+def _populate_operation_triggers(conn, res) -> dict[str, Any]:
+    """程序化操作触发点（隐藏坑 #1）→ `operation_trigger` 表。
+
+    单跳原子事实：调用坐标（类·方法·行）→ 目标单据.操作。bill 按 (target_form_key,
+    op_key) 正查"谁触发了我"、按 caller_class 反查外发；不预拼多跳链（agent 递归拼）。
+    tree-sitter 未装时 res.operation_triggers 为空列表，空表计数 0。
+    """
+    rows = getattr(res, "operation_triggers", None) or []
+    conn.executemany(
+        "INSERT INTO operation_trigger VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        [(t.caller_class, t.caller_method, t.line, t.source_relpath, t.via,
+          t.op_key, t.op_key_resolution, t.op_key_confidence,
+          t.target_form_key, t.target_resolution, t.target_confidence, t.evidence)
+         for t in rows],
+    )
+    return {"operation_trigger": len(rows)}
 
 
 # 业务字段标识（字面量或常量名）作 get/set/getValue/setValue 首参 → 更强的读写信号。
