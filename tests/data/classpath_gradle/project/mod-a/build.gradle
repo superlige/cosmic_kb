@@ -1,0 +1,6 @@
+plugins {
+    id 'cosmic_plugin.java-library-conventions'
+}
+dependencies {
+    implementation project(':mod-b')
+}

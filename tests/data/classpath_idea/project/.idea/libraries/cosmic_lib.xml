@@ -1,0 +1,11 @@
+<component name="libraryTable">
+  <library name="cosmic-lib">
+    <CLASSES>
+      <root url="file://$PROJECT_DIR$/../jarfarm" />
+      <root url="jar://$PROJECT_DIR$/../single/one.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+    <jarDirectory url="file://$PROJECT_DIR$/../jarfarm" recursive="true" />
+  </library>
+</component>

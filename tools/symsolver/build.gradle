@@ -1,0 +1,52 @@
+/*
+ * symsolver —— 编译期符号解析 JVM 微工具（阶段 12.1）。
+ *
+ * stdin 收协议 v1 请求（单 JSON），stdout 出 JSONL 事件流（协议规格见
+ * docs/设计方案/跨类调用链解析与编译期符号方案.md §协议规格 v1）。
+ *
+ * 构建产物是 fat jar（不用 shadow 插件，直接 zipTree 合并 runtimeClasspath——
+ * 少一个插件门户依赖，离线/内网更稳），由 scripts/build_symsolver.ps1 拷入
+ * cosmic_kb/java/vendor/symsolver.jar 随包分发。**使用者永远不需要跑本构建**，
+ * 只需本机有 java 运行时（8+）。
+ *
+ * 兼容性：目标 Java 8（苍穹环境主流 JDK）。用 source/targetCompatibility 而非
+ * options.release —— 本机构建 JDK 就是 1.8，javac 8 不认 --release 参数。
+ */
+plugins {
+    id 'java'
+}
+
+repositories {
+    mavenLocal()
+    maven { url 'https://maven.aliyun.com/repository/public/' }
+    mavenCentral()
+}
+
+dependencies {
+    // 与 spike 同版本：已在两个真实项目上验证 96.5%/96.7% 解析率
+    implementation 'com.github.javaparser:javaparser-symbol-solver-core:3.25.10'
+    // 极简 JSON（单包无传递依赖），协议收发用
+    implementation 'com.eclipsesource.minimal-json:minimal-json:0.9.5'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
+
+compileJava {
+    options.encoding = 'UTF-8'
+}
+
+jar {
+    archiveFileName = 'symsolver.jar'
+    manifest {
+        attributes 'Main-Class': 'cosmic.symsolver.Main'
+    }
+    // fat jar：把 runtimeClasspath 全部解包合入；签名文件必须剔掉否则运行期校验失败
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'module-info.class'
+}

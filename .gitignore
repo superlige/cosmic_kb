@@ -7,6 +7,9 @@ build/
 dist/
 .pytest_cache/
 
+# Gradle 缓存（tools/symsolver 微工具工程）
+.gradle/
+
 # 本地配置（含项目路径，不入库）
 comic-understand-long/.cosmic-understand/config.json
 comic-understand-long/.cosmic-understand/ok-cosmic.json

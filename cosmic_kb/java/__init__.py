@@ -7,5 +7,8 @@
 模块：parser.py(阶段1，解析状态)、ast_index.py(AST 语义遍历)、constants.py(全局常量值表)、
 plugin_classifier.py / event_extractor.py / field_access.py(阶段5)、call_graph.py(阶段6 类内
 调用链)、persistence.py(阶段7 落库判定)、analyze.py(编排，产出 plugin_method / field_access)。
-跨类工具函数调用链追踪留待阶段6 后续（本轮类内，跨类标 unknown 留证据）。
+
+阶段 12 起叠加 symbols/ 编译期符号解析子包（类路径发现 + JVM 微工具 + SymbolTable，
+vendor/ 放随包 fat jar）：跨类调用从名字启发式升级为确定性类型绑定，解不出退回
+名字匹配并标注来源（精度分级共存）；12.2 注入本包管线。
 """

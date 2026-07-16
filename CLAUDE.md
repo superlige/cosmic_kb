@@ -16,7 +16,9 @@
 
 1. **本地优先**：扫描建库取证全程本机离线完成；接入大模型时，**允许其直接读取本机源码全文以完整理解代码**（不再强制只传最小证据包）。唯一底线是不把 KB / 报告 / 源码发布到公网站点，Web 仅绑 `127.0.0.1`。
 2. **代码是"野生的"**：可能不可编译、缺依赖、混合编码(GBK/GB2312/UTF-8±BOM)、多 ISV 前缀。
-   解析器**绝不依赖编译或依赖解析**。
+   **不执行任何构建**（不跑 mvn/gradle/javac、不连依赖仓库）；`java/` 子包允许**读工程依赖声明**
+   （IDEA/.iml、金蝶官方 Gradle 模板）+ **绑定本地 jar** 做编译期符号解析（阶段 12），
+   解不出一律退回 tree-sitter 名字匹配并如实标注来源——精度分级共存，无 classpath 不整体失能。
 3. **规模大**：成百上千文件 → 要性能、进度、缓存、增量重扫。
 4. **信任优先**：覆盖率/可信度报告是**一等功能**，不是事后补。
 5. **接手者视角**：第一需求是"这项目长什么样"，要先能出项目地图/理解报告。
@@ -56,6 +58,10 @@
 - 🗑 阶段 9 `ask`（NL→意图→确定性证据包）+ 其依附的 `semantic.resolver`/`context.builder`/`plugin_explain`：
   已整体退役（2026-07），改为让宿主大模型直接判断该调 trace/bill/resolve_fields 里的哪个（宿主本就
   比关键词分类器更擅长选工具），KB 收缩回纯确定性字段/分录级取证 + 源码理解辅助两类能力。
+- 🚧 阶段 12（编译期符号解析，3 子阶段）：12.1 ✅ 类路径发现（IDEA/.iml + Gradle 模板 + 显式兜底，
+  两真实样本 3678/4441 jar 全中）+ JVM 微工具（JavaParser Symbol Solver fat jar 随包
+  `java/vendor/symsolver.jar`，两层解析 expr→scope）+ runner/看门狗/软降级 + doctor 环境段；
+  12.2 ⬜ 符号表注入 java/ 管线 + schema v18；12.3 ⬜ call_edge 持久化 + callers 反查工具。
 - ⬜ 阶段 8（业务流）拍板搁置；阶段 11（增量重扫+GitNexus）待开发。
 
 当前 schema **v17**（v17 新增 `operation_trigger` 程序化操作触发点表，隐藏坑 #1）；
@@ -68,9 +74,9 @@
 
 ```powershell
 pip install -e ".[parse,encoding,dev,mcp]"  # 解析+编码+测试+MCP（mcp 可选）
-pytest -q                                # 跑测试（当前 460 passed, 4 skipped）
+pytest -q                                # 跑测试（当前 631 passed, 4 skipped）
 cosmic_kb --version                      # 版本
-cosmic_kb doctor                         # 资产体检（随包 semantics/templates 是否就位）
+cosmic_kb doctor                         # 资产体检（随包 semantics/templates/symsolver.jar 是否就位 + java 环境探测，缺 java 只提示符号解析降级不算失败）
 cosmic_kb ingest "<项目源码根>"          # 阶段1：摄取 + 覆盖率/可信度报告（--json 可留档）
 cosmic_kb meta "<dym|cr 或整包 zip>"     # 阶段2：解析元数据(含转换规则 .cr)，分类计数/JSON 快照
 cosmic_kb bridge "<项目源码根>" "<dym|zip|目录>"  # 阶段3：ClassName↔源码桥接报告（--json）

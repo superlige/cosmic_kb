@@ -110,6 +110,23 @@ def _traversable_ok(trav: Traversable) -> bool:
         return False
 
 
+def _symsolver_status() -> AssetStatus:
+    """随包符号解析微工具 jar 的存在性（阶段12；jar 缺失=安装损坏，java 缺失≠资产缺失）。"""
+    try:
+        trav = files("cosmic_kb.java") / "vendor" / "symsolver.jar"
+        present = trav.is_file()
+        size_mb = ""
+        if present:
+            try:
+                size_mb = f"，{Path(str(trav)).stat().st_size / 1024 / 1024:.1f} MB"
+            except OSError:
+                pass
+        return AssetStatus("symsolver", present,
+                           f"编译期符号解析 JVM 微工具 fat jar（随包{size_mb}）")
+    except Exception:
+        return AssetStatus("symsolver", False, "编译期符号解析 JVM 微工具 fat jar（随包）")
+
+
 def check_assets() -> list[AssetStatus]:
     """返回所有关键资产的存在性检查结果，供 `cosmic_kb doctor` 使用。"""
 
@@ -121,4 +138,5 @@ def check_assets() -> list[AssetStatus]:
                     f"references+rules 共 {ref_n} 篇语义文档（随包）"),
         AssetStatus("templates", tpl_ok,
                     "继承根模板 bos_billtpl/bos_basetpl（随包，操作 oid 回填用）"),
+        _symsolver_status(),
     ]

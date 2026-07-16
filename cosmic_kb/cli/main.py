@@ -41,7 +41,20 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     for status in statuses:
         print(f"{status.label:<10}{status.name:<20}{status.detail}")
 
-    # 随包数据（semantics/templates）应始终就位，任何一项缺失都算体检失败。
+    # 环境探测：java 是编译期符号解析（阶段12）的运行时前提，但**不是资产**——
+    # 找不到只提示"符号解析将降级为名字匹配"，不算体检失败（软降级红线）。
+    print("")
+    print("## 环境")
+    from ..java.symbols import runner as _sym_runner
+
+    java = _sym_runner.find_java()
+    if java:
+        print(f"OK        java                {java}")
+    else:
+        print("--        java                未找到（编译期符号解析将降级为 tree-sitter 名字匹配；"
+              "可设环境变量 COSMIC_KB_JAVA / JAVA_HOME 指定）")
+
+    # 随包数据（semantics/templates/symsolver）应始终就位，任何一项缺失都算体检失败。
     missing = [s for s in statuses if not s.present]
     print("")
     if missing:
@@ -1117,7 +1130,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
 
-    doctor = sub.add_parser("doctor", help="检查随包资产（semantics/templates）是否就位")
+    doctor = sub.add_parser("doctor", help="检查随包资产（semantics/templates/symsolver）与环境（java）是否就位")
     doctor.set_defaults(func=_cmd_doctor)
 
     # ── Agent Skill 分发：CodeBuddy / Qoder 直接安装，TRAE 生成官方导入包 ─────

@@ -1,0 +1,12 @@
+ext	{
+
+	path = [
+		trd : "${cosmic_libs_path}/trd",
+		bos : "${cosmic_libs_path}/bos",
+		biz : "${cosmic_libs_path}/biz",
+		cus : "${cosmic_libs_path}/cus",
+		ext : "${cosmic_libs_path}/ext",
+		outputdir : "${cosmic_libs_path}/outputdir"
+	]
+
+}

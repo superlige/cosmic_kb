@@ -44,12 +44,14 @@ include = ["cosmic_kb*"]
 # - semantics/references|rules：苍穹语义文档（cosmic_semantics 工具回传源，分发改造下沉进包）
 # - metadata/templates/*.dym：继承根模板（操作 oid 回填运行期依赖）
 # - skills/*/SKILL.md：CodeBuddy/Qoder/TRAE 共用的 Agent Skills
+# - java/vendor/*.jar：编译期符号解析 JVM 微工具 fat jar（阶段12，使用者只需本机有 java）
 [tool.setuptools.package-data]
 "cosmic_kb.graph" = ["*.sql"]
 "cosmic_kb.web" = ["static/*"]
 "cosmic_kb.semantics" = ["references/**/*.md", "rules/**/*.md"]
 "cosmic_kb.metadata" = ["templates/*.dym"]
 "cosmic_kb.skills" = ["*/SKILL.md"]
+"cosmic_kb.java" = ["vendor/*.jar"]
 
 [tool.setuptools.dynamic]
 version = { attr = "cosmic_kb.__version__" }
