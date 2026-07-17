@@ -21,6 +21,8 @@ from __future__ import annotations
 from collections import deque
 from typing import Any
 
+from ..java import plugin_classifier
+
 _MAX_DEPTH = 10       # 向上回溯最大层数（超出标 depth_capped，不静默丢）
 _MAX_CHAINS = 6       # 每个触发点最多带回的链数（入口链优先，超出计入 chains_truncated）
 _MAX_NODES = 400      # BFS 访问节点上限（防病态调用图爆炸；触发即 search_truncated）
@@ -45,7 +47,7 @@ def _entry_info(conn, cls: str, method: str) -> dict[str, Any] | None:
 
 def _bindings(conn, cls: str) -> list[dict[str, Any]]:
     return [dict(r) for r in conn.execute(
-        "SELECT DISTINCT form_key, plugin_type, operation_key FROM plugin "
+        "SELECT DISTINCT form_key, plugin_type, operation_key, enabled FROM plugin "
         "WHERE class_name=? ORDER BY form_key, plugin_type", (cls,)).fetchall()]
 
 
@@ -61,6 +63,93 @@ def _boundary_info(conn, cls: str) -> dict[str, Any] | None:
     if row is not None:
         return {"class": cls, "plugin_base": row["plugin_base"], "basis": "plugin_base"}
     return None
+
+
+# ── 注册状态反查（callers 入口可达性/死代码判定的落点）──────────────────────
+#
+# KB 有注册表（可确定是否注册+启用）的插件种类；调度计划(task)/开放平台(webapi)/工作流
+# (workflow) 等 KB 未接入配置表，如实报 orphan_unverifiable，绝不臆造已注册或已启用。
+_KB_REGISTRY_KINDS = frozenset({"form", "list", "op", "writeback", "convert"})
+
+_STATUS_NOTE = {
+    "registered_disabled": "有效绑定全部已禁用（不排除反射或运行时动态注册的其他入口）",
+    "registered_enabled_unknown": "绑定的启用状态未知（NULL），无法确认是否启用",
+    "orphan_unverifiable": "KB 未接入该类插件的注册配置表（如调度计划/开放平台/工作流），"
+                           "无法确定是否平台注册",
+    "no_registration_evidence": "既非元数据绑定插件，也非孤儿插件基类命中，无法判定注册状态",
+}
+
+
+def registration_status(conn, cls: str) -> dict[str, Any]:
+    """单个插件类的注册状态反查：有元数据绑定 → 三态 enabled（convert 走规则级 enabled）；
+    无绑定的孤儿插件类 → 按种类分「KB 未注册」与「KB 未接入该注册表，无法确定」两档；
+    两者都不是 → 无证据兜底。死代码判定的落点：只有 registered_enabled 才谈得上"确认可达"。
+    """
+    rows = [dict(r) for r in conn.execute(
+        "SELECT form_key, plugin_type, operation_key, enabled FROM plugin "
+        "WHERE class_name=? ORDER BY form_key, plugin_type", (cls,)).fetchall()]
+    if rows:
+        form_keys = sorted({r["form_key"] for r in rows if r["form_key"]})
+        form_names: dict[str, str] = {}
+        if form_keys:
+            ph = ",".join("?" * len(form_keys))
+            form_names = {r["key"]: r["name"] for r in conn.execute(
+                f"SELECT key, name FROM form WHERE key IN ({ph})", form_keys).fetchall()}
+        bindings: list[dict[str, Any]] = []
+        effective: list[int | None] = []
+        for r in rows:
+            if r["plugin_type"] == "convert":
+                rule = conn.execute(
+                    "SELECT id, name, source_entity, target_entity, enabled "
+                    "FROM convert_rule WHERE id=?", (r["form_key"],)).fetchone()
+                if rule is None:
+                    bindings.append({
+                        "plugin_type": "convert", "rule_id": r["form_key"], "rule_name": None,
+                        "source_entity": None, "target_entity": None,
+                        "enabled": None, "enabled_source": "convert_rule",
+                        "note": "转换规则悬空（convert_rule 未找到该 id），无法判定启停",
+                    })
+                    effective.append(None)
+                else:
+                    bindings.append({
+                        "plugin_type": "convert", "rule_id": rule["id"],
+                        "rule_name": rule["name"], "source_entity": rule["source_entity"],
+                        "target_entity": rule["target_entity"], "enabled": rule["enabled"],
+                        "enabled_source": "convert_rule",
+                    })
+                    effective.append(rule["enabled"])
+            else:
+                bindings.append({
+                    "plugin_type": r["plugin_type"], "form_key": r["form_key"],
+                    "form_name": form_names.get(r["form_key"]),
+                    "operation_key": r["operation_key"], "enabled": r["enabled"],
+                    "enabled_source": "plugin",
+                })
+                effective.append(r["enabled"])
+        if any(e == 1 for e in effective):
+            status = "registered_enabled"
+        elif effective and all(e == 0 for e in effective):
+            status = "registered_disabled"
+        else:
+            status = "registered_enabled_unknown"
+        kind = plugin_classifier.plugin_kind(rows[0]["plugin_type"], None)[0]
+        return {"class": cls, "status": status, "basis": "metadata_binding", "kind": kind,
+                "bindings": bindings, "note": _STATUS_NOTE.get(status)}
+
+    orow = conn.execute(
+        "SELECT plugin_base FROM source_class WHERE fqn=? AND orphan_role='plugin'",
+        (cls,)).fetchone()
+    if orow is not None:
+        kind = plugin_classifier.plugin_kind(None, orow["plugin_base"])[0]
+        status = "orphan_unregistered" if kind in _KB_REGISTRY_KINDS else "orphan_unverifiable"
+        note = (_STATUS_NOTE["orphan_unverifiable"] if status == "orphan_unverifiable" else
+                f"孤儿插件类（{kind}）：KB 有该类注册表但查无绑定，元数据范围内未注册"
+                "（不排除动态注册）")
+        return {"class": cls, "status": status, "basis": "plugin_base", "kind": kind,
+                "plugin_base": orow["plugin_base"], "bindings": [], "note": note}
+
+    return {"class": cls, "status": "no_registration_evidence", "basis": "none", "kind": None,
+            "bindings": [], "note": _STATUS_NOTE["no_registration_evidence"]}
 
 
 def entry_chains(conn, cls: str, method: str, *, max_depth: int = _MAX_DEPTH,
@@ -261,4 +350,4 @@ def render_lines(ec: dict[str, Any] | None, *, prefix: str = "     ↳ ",
     return out
 
 
-__all__ = ["entry_chains", "slim_chains", "render_lines"]
+__all__ = ["entry_chains", "registration_status", "slim_chains", "render_lines"]

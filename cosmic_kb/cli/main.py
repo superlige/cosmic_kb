@@ -1506,7 +1506,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     callers = sub.add_parser(
         "callers",
-        help="阶段12.3：反查谁调用了某 Java 方法（含方法引用与符号覆盖率，可作死代码证据）",
+        help="反查调用点 + 回溯插件事件入口并反查注册/启用状态"
+             "（苍穹入口可达性/死代码判定；含方法引用与符号覆盖率）",
     )
     callers.add_argument(
         "target",

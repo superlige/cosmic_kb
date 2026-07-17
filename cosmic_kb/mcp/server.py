@@ -27,7 +27,8 @@ INSTRUCTIONS = (
     "入站触发点自带 entry_chains（回溯到插件事件入口的调用链）。\n"
     "③ 单据整体操作集、全部插件绑定、插件车道或本单据对外触发的影响面 → bill(form_key)。\n"
     "④ 字段/实体/单据标识及插件类反查 → resolve_fields；标识不精确时先核对。\n"
-    "⑤ 谁调用了某 Java 方法、方法引用或死代码验证 → callers(\"Class.method\")。\n"
+    "⑤ 谁调用了某 Java 方法 + 入口可达性/死代码判定（回溯插件事件入口反查注册启用状态） "
+    "→ callers(\"Class.method\")；弱证据（entry_unverifiable/no_entry_found）不得断言死代码。\n"
     "⑥ 插件事件、SDK、事务和入库语义 → cosmic_semantics(topic)。\n"
     "通用纪律：不凭字段名、类名、包名或命名习惯猜标识和绑定；源码中文注释/常量名/Javadoc "
     "不是元数据证据，输出的中文名一律以 resolve_fields 等工具返回为准，未核对的只准写"
@@ -201,7 +202,7 @@ def tool_resolve_fields(
 
 
 def tool_callers(target: str, cursor: str | None = None) -> dict[str, Any]:
-    """反查谁调用了某 Java 方法；用于跨类调用链补全、方法引用定位和死代码验证。
+    """反查谁调用了某 Java 方法 + 苍穹入口可达性/死代码判定。
 
     `target` 写 `Class.method` 或 `完整包名.Class.method`。简单类名跨包重名时返回
     `need_clarification + candidates`，必须选完整 locator 重查。结果逐调用点给出类、方法、
@@ -209,7 +210,18 @@ def tool_callers(target: str, cursor: str | None = None) -> dict[str, Any]:
 
     返回始终附 `resolution_coverage`。0 结果只有在符号层 status=ok、无失败文件且覆盖率 ≥95%
     时才是“查无调用方”的强证据；符号层不可用或覆盖不足时，名字匹配口径不足以断言死代码。
-    热点方法会分页；`pagination.complete=false` 时把 `next_cursor` 原样传回，直至取全。
+
+    `entry_analysis` 段自动沿 call_edge 向上回溯到插件事件入口，再反查元数据注册与启用
+    状态，给出 verdict 五值：`entry_reachable`（已注册且启用，静态可达）/
+    `entries_inactive`（入口均已禁用或未注册，likely，永不 confirmed，不排除反射/动态注册）/
+    `entry_unverifiable`（注册状态无法确认，或负向结论遇截断/符号层弱化被降级，unknown）/
+    `no_entry_found`（追不到任何插件事件入口）/`not_analyzed`（目标是平台/JDK 类，不跑回溯）。
+    调度计划(task)/开放平台(webapi)/工作流(workflow)等 KB 未接入注册配置表的插件种类归
+    `entry_unverifiable`，不得当作已确认可达或已确认死代码。`verdict` 为
+    `entry_unverifiable`/`no_entry_found` 时是弱证据，不得断言死代码。
+
+    热点方法会分页；`pagination.complete=false` 时把 `next_cursor` 原样传回，直至取全；
+    只有首页带完整 `entry_analysis`（含入口链），后续页仅带 `verdict`/`confidence`/`note`。
     """
     from ..report import callers as callers_report
 
