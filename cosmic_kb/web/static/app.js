@@ -391,7 +391,8 @@ function renderField(ft) {
   }
   if (ft.note) out.appendChild(el("p", "warn", esc(ft.note)));
 
-  (ft.groups || []).forEach((g) => out.appendChild(renderGroup(g)));
+  const entryMap = new Map((((ft.entry_chains || {}).items) || []).map((x) => [x.ref, x]));
+  (ft.groups || []).forEach((g) => out.appendChild(renderGroup(g, entryMap)));
   if (!(ft.groups || []).length && !ft.note) {
     out.appendChild(el("p", "muted", "（当前坐标无插件读写记录）"));
   }
@@ -407,7 +408,7 @@ function renderField(ft) {
     head.appendChild(el("div", "gstat", `${ft.possible.length} 条 — 静态判不准层级/分录，供人工核对`));
     box.appendChild(head);
     const body = el("div", "gbody");
-    body.appendChild(possibleTable(ft.possible));
+    body.appendChild(possibleTable(ft.possible, entryMap));
     box.appendChild(body);
     out.appendChild(box);
   }
@@ -422,7 +423,7 @@ function renderField(ft) {
       `${(unloc.methods || []).length} 个方法 — 确实读写该字段，但来源单据没钉出，去这些方法读源码反推`));
     box.appendChild(head);
     const body = el("div", "gbody");
-    body.appendChild(unlocatedMethodsTable(unloc));
+    body.appendChild(unlocatedMethodsTable(unloc, entryMap));
     box.appendChild(body);
     out.appendChild(box);
   }
@@ -430,7 +431,7 @@ function renderField(ft) {
 }
 
 // 反推来源工作单表：同插件同事件方法去重一行，给 写/读 处数 + 来源线索(plugin_form_label) + 位置 + calls。
-function unlocatedMethodsTable(ul) {
+function unlocatedMethodsTable(ul, entryMap) {
   const t = el("table", "tbl acc");
   t.innerHTML =
     "<thead><tr><th>插件类</th><th>类型</th><th>事件函数</th><th>写/读</th>" +
@@ -448,7 +449,7 @@ function unlocatedMethodsTable(ul) {
       `<td class="ellip" title="${esc(reason)}">${esc(reason)}</td>` +
       `<td class="ellip" title="${esc(m.plugin_form_label || "")}">${esc(m.plugin_form_label || "service/未注册")}</td>` +
       `<td class="loc">${esc((m.locations || []).join(" / "))}</td>` +
-      `<td class="mono muted">${esc(m.calls || "")}</td>`;
+      `<td class="mono muted">${esc(entryChainText(m.entry_ref, entryMap) || m.calls || "")}</td>`;
     tb.appendChild(tr);
   });
   t.appendChild(tb);
@@ -488,7 +489,7 @@ function renderCoarse(coarse) {
   return box;
 }
 
-function possibleTable(rows) {
+function possibleTable(rows, entryMap) {
   const t = el("table", "tbl acc");
   t.innerHTML =
     "<colgroup><col class='c-plugin'><col class='c-owner'><col class='c-lvl'><col class='c-event'>" +
@@ -500,7 +501,8 @@ function possibleTable(rows) {
     grp.rows.forEach((r, i) => {
       const tr = el("tr", i === 0 ? "pgrp" : "");
       const lvl = (LEVEL[r.level] || r.level || "") + (r.entry_key ? "·" + esc(r.entry_key) : "");
-      let pathHtml = (r.path && r.path.length > 1) ? esc(r.path.join(" → ")) : "";
+      let pathHtml = esc(entryChainText(r.entry_ref, entryMap) ||
+        ((r.path && r.path.length > 1) ? r.path.join(" → ") : ""));
       if (r.cross_class) pathHtml = `<span class="b cross">↳ ${esc(r.access_simple)}</span> ` + pathHtml;
       const detail =
         `<td>${lvl}</td><td>${esc(r.event_method)}</td>` +
@@ -523,7 +525,7 @@ function possibleTable(rows) {
   return t;
 }
 
-function renderGroup(g) {
+function renderGroup(g, entryMap) {
   const box = el("div", "group");
   const head = el("div", "ghead");
   head.appendChild(el("div", "glabel", esc(g.label)));
@@ -544,21 +546,21 @@ function renderGroup(g) {
   const body = el("div", "gbody");
   if (g.writers && g.writers.length) {
     body.appendChild(el("h4", null, "写该字段的插件事件（落库 > 存疑 > 内存）"));
-    body.appendChild(accessTable(g.writers));
+    body.appendChild(accessTable(g.writers, entryMap));
   }
   // readers 现为「按方法去重」的清单 {total, methods, capped}（防膨胀，与 trace 返回口径一致）。
   const rd = g.readers || {};
   if (rd.total) {
     body.appendChild(el("h4", null,
       `读该字段的插件事件（按方法去重，共 ${rd.total} 处 → ${(rd.methods || []).length} 个方法）`));
-    body.appendChild(readerMethodsTable(rd));
+    body.appendChild(readerMethodsTable(rd, entryMap));
   }
   box.appendChild(body);
   return box;
 }
 
 // 读取方法清单表：同插件同事件方法去重一行，给 count + 位置 + calls 锚点（去那读源码）。
-function readerMethodsTable(rd) {
+function readerMethodsTable(rd, entryMap) {
   const t = el("table", "tbl acc");
   t.innerHTML =
     "<thead><tr><th>插件类</th><th>类型</th><th>事件函数</th><th>读取处数</th>" +
@@ -573,7 +575,7 @@ function readerMethodsTable(rd) {
       `<td>${esc(m.method || "")}</td>` +
       `<td>${m.count}</td>` +
       `<td class="loc">${esc((m.locations || []).join(" / "))}</td>` +
-      `<td class="mono muted">${esc(m.calls || "")}</td>`;
+      `<td class="mono muted">${esc(entryChainText(m.entry_ref, entryMap) || m.calls || "")}</td>`;
     tb.appendChild(tr);
   });
   t.appendChild(tb);
@@ -596,7 +598,7 @@ function ownerCell(r) {
 
 // 按插件类合并：同一 plugin_fqn 只占一块，插件类/所属单据/类型三列跨行合并，
 // 事件函数/落库/位置/调用链每条 access 一行——消除重复的插件类名，降低查看复杂度。
-function accessTable(rows) {
+function accessTable(rows, entryMap) {
   const t = el("table", "tbl acc");
   t.innerHTML =
     "<colgroup><col class='c-plugin'><col class='c-owner'><col class='c-type'><col class='c-event'>" +
@@ -609,7 +611,8 @@ function accessTable(rows) {
       const tr = el("tr", i === 0 ? "pgrp" : "");
       const resFlag = (r.key_resolution === "literal" || r.key_resolution === "constant")
         ? "" : ` <span class="b warn">${esc(r.key_resolution)}</span>`;
-      let pathHtml = (r.path && r.path.length > 1) ? esc(r.path.join(" → ")) : "";
+      let pathHtml = esc(entryChainText(r.entry_ref, entryMap) ||
+        ((r.path && r.path.length > 1) ? r.path.join(" → ") : ""));
       if (r.cross_class) {
         pathHtml = `<span class="b cross">↳ ${esc(r.access_simple)}</span> ` + pathHtml;
       }
@@ -635,6 +638,19 @@ function accessTable(rows) {
   });
   t.appendChild(tb);
   return t;
+}
+
+// 字段 trace 的入口链按物理方法去重存放；表格行只持 entry_ref，避免链随源码行重复膨胀。
+function entryChainText(ref, entryMap) {
+  if (!ref || !entryMap || !entryMap.has(ref)) return "";
+  const ec = entryMap.get(ref).entry_chains || {};
+  if (ec.status === "self_entry" && ec.entry) {
+    return `${(ec.entry.class || "").split(".").pop()}#${ec.entry.method} [${ec.entry.event}/${ec.entry.phase}]`;
+  }
+  const chain = (ec.chains || [])[0];
+  if (!chain) return `${ref} [${ec.status || "not_found"}]`;
+  const path = (chain.hops || []).map((h) => `${(h.class || "").split(".").pop()}#${h.method}`).join(" → ");
+  return `${path} [${chain.confidence || "unknown"}]`;
 }
 
 // 按 plugin_fqn 分组，保持首次出现顺序、组内保持原排序。

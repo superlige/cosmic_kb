@@ -165,6 +165,7 @@ CREATE TABLE field_access (
     plugin_fqn      TEXT,                 -- 入口插件/类全限定名（跨类回溯时=触发该写入的插件）
     plugin_type     TEXT,                 -- form/list/op/writeback/convert/service（service=未注册的项目类）
     access_class    TEXT,                 -- 该读写**物理所在**的类全限定名（跨类时≠plugin_fqn）
+    access_method   TEXT,                 -- 该读写**物理所在**的方法（入口链反向回溯坐标）
     event_method    TEXT,                 -- 入口事件函数（propertyChanged/beforeExecute…）
     event_phase     TEXT,                 -- 该事件落库相位
     access          TEXT,                 -- read/write
@@ -181,12 +182,34 @@ CREATE TABLE field_access (
                                            -- metadata_unique·metadata_binding·metadata_cooccur
                                            -- （字段key反查元数据回填，依据是字段归属非数据流）/
                                            -- NULL=未定位。诚实区分元数据反推与数据流证明（红线#4）。
-    null_reason     TEXT                   -- 未定位成因（form_key=NULL 时**为何** NULL，信任优先红线#4）：
+    null_reason     TEXT,                  -- 未定位成因（form_key=NULL 时**为何** NULL，信任优先红线#4）：
                                            -- field-key-undeterminable / basedata-ref（读基础资料自身字段）/
                                            -- basedata-write-suspect（写到基础资料·疑似误绑·应继续追）/
                                            -- dynamic-entity / helper-caller-unknown / model-context /
                                            -- local-or-container-source / unknown；form_key 已定位则 NULL。
                                            -- 单一真源 java/null_reason.py，供 trace/coverage/web 导航。
+    edge_source     TEXT DEFAULT 'heuristic' -- 调用边精度：local/symbol/mixed/heuristic
+);
+
+-- ── Java 调用边（阶段 12.3：跨类反查与死代码证据底座）────────────────────────
+--   全量保存每个调用点，不只保存“能继续走进项目源码”的成功边：
+--   * 类内边让 callers 反查不缺 helper/递归；
+--   * jar/jdk 平台边支持 SaveServiceHelper.save 等 sink 审计；
+--   * failed 站点 target_fqn=NULL，仍保留坐标并进入覆盖率，避免把未知静默丢掉。
+CREATE TABLE call_edge (
+    caller_fqn        TEXT,                 -- 调用点所在类；无法从病态 AST 对齐时可为 NULL
+    caller_method     TEXT,                 -- 普通方法名；构造/初始化器用 <init>/<clinit>/…
+    target_fqn        TEXT,                 -- 目标声明类 FQN；failed 时为 NULL
+    target_method     TEXT,                 -- 目标方法简单名（failed 也保留调用名）
+    target_signature  TEXT,                 -- Symbol Solver 完整签名；heuristic/failed 为 NULL
+    kind              TEXT,                 -- invocation / method_reference
+    line              INTEGER,              -- 方法名标识符行号（1-based）
+    col               INTEGER,              -- 方法名字符列（1-based）
+    source_relpath    TEXT,                 -- 调用点源文件（相对源码根）
+    resolution        TEXT,                 -- expr / scope / heuristic / failed
+    target_kind       TEXT,                 -- project / jar / jdk；failed 为 NULL
+    confidence        REAL,                 -- expr=1/scope=.95/heuristic=.6/failed=0
+    evidence          TEXT                  -- 符号签名、失败原因或名字兜底依据
 );
 
 -- ── 程序化操作触发点（隐藏坑 #1：executeOperate/invokeOperation 调用点 → 目标单据.操作）──
@@ -208,7 +231,8 @@ CREATE TABLE operation_trigger (
     target_resolution   TEXT,             -- literal/constant/binding/ambiguous/dynamic/unknown
                                           -- binding=invokeOperation 取本类唯一绑定单据
     target_confidence   REAL,
-    evidence            TEXT
+    evidence            TEXT,
+    receiver_source     TEXT DEFAULT 'text' -- 接收者确认来源：symbol/text
 );
 
 -- ── Java 全局常量值表（类.常量 → 字面值；供 read_source 解析源码里的常量引用）───────
@@ -283,6 +307,8 @@ CREATE INDEX idx_facc_form        ON field_access(form_key);
 CREATE INDEX idx_facc_aclass      ON field_access(access_class);
 CREATE INDEX idx_facc_coord       ON field_access(field_key, form_key, level, entry_key);
 CREATE INDEX idx_facc_nullreason  ON field_access(null_reason);
+CREATE INDEX idx_call_edge_target ON call_edge(target_fqn, target_method);
+CREATE INDEX idx_call_edge_caller ON call_edge(caller_fqn, caller_method);
 CREATE INDEX idx_coarse_field     ON coarse_field_hit(field_key);
 CREATE INDEX idx_optrig_target    ON operation_trigger(target_form_key, op_key);
 CREATE INDEX idx_optrig_caller    ON operation_trigger(caller_class);

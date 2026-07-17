@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Iterable
 
 from . import annotation_map as annmod
 from . import ast_index as ax
+from . import call_edges as cemod
 from . import call_graph as cgmod
 from . import event_extractor as events
 from . import field_access as fa
@@ -39,8 +40,10 @@ if TYPE_CHECKING:
     from ..bridge.namespace import SourceIndex
     from ..ingest.scanner import ScanResult
     from ..metadata.model import MetaModel
+    from ..progress import Progress
     from .constants import ConstantTable
     from .project_graph import ClassNode, ProjectGraph
+    from .symbols import SymbolTable
 
 _MAX_DEPTH = 8
 
@@ -76,11 +79,15 @@ class FieldAccessRow:
     key_resolution: str
     confidence: float
     source_relpath: str
+    access_method: str | None = None  # 读写物理所在方法（与 access_class 组成入口回溯坐标）
     evidence: str | None = None
     form_key_source: str | None = None  # form_key 来源：data_flow / metadata_*（反查回填）/ None
     # 未定位成因：form_key=None 时**为何** None（信任优先，红线 #4）。由 _finalize_null_reason 在全部
     # 回填后定稿，取值见 java/null_reason.py；form_key 已定位则为 None（被回填救活的行也清空）。
     null_reason: str | None = None
+    # 调用边精度：local（无跨类）/ symbol（跨类边均由符号确认）/ heuristic（均为名字兜底）/
+    # mixed（同一路径同时含 symbol 与 heuristic）。
+    edge_source: str = "local"
     # 接收者基变量名：仅供 _backfill_form_key 做同对象共现交集分组，不落库（store INSERT 不含它）。
     receiver_var: str | None = None
 
@@ -98,6 +105,8 @@ class AnalysisResult:
     const_table: "ConstantTable | None" = None
     # 程序化操作触发点（隐藏坑 #1）：executeOperate/invokeOperation 调用点 → 目标单据.操作。
     operation_triggers: list["otmod.OperationTriggerRow"] = field(default_factory=list)
+    # 阶段 12.3：全量调用点事实（项目/平台/类内/method_reference/failed 均保留）。
+    call_edges: list["cemod.CallEdgeRow"] = field(default_factory=list)
 
 
 def analyze(
@@ -105,17 +114,29 @@ def analyze(
     models: Iterable["MetaModel"],
     bridge_result: "BridgeResult",
     index: "SourceIndex",
+    symbols: "SymbolTable | None" = None,
+    progress: "Progress | None" = None,
 ) -> AnalysisResult:
-    """对项目做字段级分析（插件跨类归因 + 全量孤立补全）。"""
+    """对项目做字段级分析（插件跨类归因 + 全量孤立补全）。
+
+    progress：可选进度报告器。本函数是 build 里最重的一段（成百上千文件 × 多轮
+    分析），按子步骤接力打点（解析工程 Java → 插件归因 → 孤立补全 → 各回填），
+    不注入时完全静默（MCP/测试路径零输出）。
+    """
+    from ..progress import NULL
     from .parser import is_available
 
+    progress = progress or NULL
     result = AnalysisResult()
     if not is_available():
         result.available = False
         return result
 
     models = list(models)
-    pg = pgmod.build_project_graph(scan_result, index)
+    pg = pgmod.build_project_graph(scan_result, index, symbols=symbols, progress=progress)
+    # 与后续字段分析复用同一棵 ProjectGraph；只抽一次，不为反查工具重复扫描源码。
+    progress.tick(0, None, label="收集全量调用边")
+    result.call_edges = cemod.collect_call_edges(pg)
     const = pg.const
     known_entities = _known_entities(models)
 
@@ -143,6 +164,8 @@ def analyze(
     bound_entity: dict[str, set[str]] = {}
 
     # ── 第①轮：绑定插件归因（跨类回溯 + 来源实体传播）─────────────────────
+    #    先收任务清单再逐个跑：进度打点需要知道总数（"还差多少"），收集本身只是字典查找、零成本。
+    bound_tasks = []
     for m in models:
         for p in m.plugins:
             if not p.class_name:
@@ -150,34 +173,39 @@ def analyze(
             b = binding_idx.get((m.key, p.class_name, p.plugin_type))
             if b is None or b.status not in ("linked", "linked_by_name"):
                 continue
-            node = pg.classes.get(p.class_name)
-            if node is None:
-                result.skipped_no_source += 1
-                continue
-            if p.plugin_type == "convert" and m.convert is not None:
-                entry_form = m.convert.target_entity or m.key
-                convert_source = m.convert.source_entity
-            else:
-                entry_form, convert_source = m.key, None
-            if entry_form:
-                bound_entity.setdefault(node.fqn, set()).add(entry_form)
-            op_type = op_type_by.get((m.key, p.operation_key)) if p.plugin_type == "op" else None
-            _analyze_bound_plugin(
-                pg, node, p.plugin_type, entry_form, convert_source, op_type,
-                const, known_entities, plugin_base, covered, result,
-            )
-            bound_fqns.add(p.class_name)
-            result.analyzed_plugin_count += 1
+            bound_tasks.append((m, p))
+    for done, (m, p) in enumerate(bound_tasks, 1):
+        progress.tick(done, len(bound_tasks), "个插件", label="插件归因(跨类回溯)")
+        node = pg.classes.get(p.class_name)
+        if node is None:
+            result.skipped_no_source += 1
+            continue
+        if p.plugin_type == "convert" and m.convert is not None:
+            entry_form = m.convert.target_entity or m.key
+            convert_source = m.convert.source_entity
+        else:
+            entry_form, convert_source = m.key, None
+        if entry_form:
+            bound_entity.setdefault(node.fqn, set()).add(entry_form)
+        op_type = op_type_by.get((m.key, p.operation_key)) if p.plugin_type == "op" else None
+        _analyze_bound_plugin(
+            pg, node, p.plugin_type, entry_form, convert_source, op_type,
+            const, known_entities, plugin_base, covered, result,
+        )
+        bound_fqns.add(p.class_name)
+        result.analyzed_plugin_count += 1
 
     # ── 第①.5 轮：未绑定的苍穹插件基类（调度 AbstractTask / WebApi / 工作流…）作跨类入口 ──
-    for fqn, node in pg.classes.items():
-        base = plugin_base.get(node.simple)
-        if base and fqn not in bound_fqns:
-            _analyze_unbound_plugin(pg, node, base, const, known_entities, covered, result)
-            result.analyzed_plugin_count += 1
+    unbound = [(fqn, node, base) for fqn, node in pg.classes.items()
+               if (base := plugin_base.get(node.simple)) and fqn not in bound_fqns]
+    for done, (fqn, node, base) in enumerate(unbound, 1):
+        progress.tick(done, len(unbound), "个类", label="未绑定插件入口")
+        _analyze_unbound_plugin(pg, node, base, const, known_entities, covered, result)
+        result.analyzed_plugin_count += 1
 
     # ── 第②轮：全量孤立补全（其余普通 service/util 类，扁平）────────────────────
-    for fqn, node in pg.classes.items():
+    for done, (fqn, node) in enumerate(pg.classes.items(), 1):
+        progress.tick(done, len(pg.classes), "个类", label="孤立方法补全")
         if _analyze_standalone(pg, node, const, known_entities, plugin_base,
                                bound_entity, covered, result):
             result.standalone_class_count += 1
@@ -185,13 +213,15 @@ def analyze(
     # ── 孤立方法反向调用图回填（doc §5 #1）：唯一调用方实参来源沿「实参↔形参」传播 ──────────
     #    排在元数据兜底**之前**——反向调用图给的是真实数据流来源（实参确实携带该来源），强度高于
     #    「字段 key 反查元数据」，先定、metadata 只补它没救到的。
-    _backfill_reverse_calls(result, pg, const, known_entities, bound_entity)
+    _backfill_reverse_calls(result, pg, const, known_entities, bound_entity, progress=progress)
 
     # ── 字段 key 反查元数据回填 form_key（待办一：数据流追不到来源时的硬约束兜底）──────────
+    progress.tick(0, None, label="元数据反查回填")
     _backfill_form_key(result, field_idx, bound_entity)
 
     # ── 程序化操作触发点采集（隐藏坑 #1）：独立全量扫，不依赖插件 BFS ────────────────
     #    放在第①轮之后——invokeOperation 的目标单据要靠 bound_entity（本类唯一绑定单据）。
+    progress.tick(0, None, label="程序化触发点采集")
     result.operation_triggers = otmod.collect_triggers(pg, bound_entity)
 
     result.field_accesses = _dedup(result.field_accesses)
@@ -207,14 +237,22 @@ def _dedup(rows: list[FieldAccessRow]) -> list[FieldAccessRow]:
     去重键保留所有有区分意义的维度（来源单据/层级/分录/入口插件/物理类/事件/行/读写/落库结论），
     故多单据消歧、不同落库结论等仍各自保留，只消掉真正逐字重复的记录。
     """
-    seen: set[tuple] = set()
+    seen: dict[tuple, FieldAccessRow] = {}
     out: list[FieldAccessRow] = []
     for r in rows:
         k = (r.form_key, r.field_key, r.level, r.entry_key, r.plugin_fqn, r.access_class,
-             r.event_method, r.line, r.access, r.persists)
-        if k in seen:
+             r.access_method, r.event_method, r.line, r.access, r.persists)
+        previous = seen.get(k)
+        if previous is not None:
+            source_atoms = {
+                "local": set(), "symbol": {"symbol"}, "heuristic": {"heuristic"},
+                "mixed": {"symbol", "heuristic"},
+            }
+            previous.edge_source = _edge_grade(
+                source_atoms.get(previous.edge_source, {"heuristic"})
+                | source_atoms.get(r.edge_source, {"heuristic"}))
             continue
-        seen.add(k)
+        seen[k] = r
         out.append(r)
     return out
 
@@ -322,36 +360,49 @@ def _backfill_form_key(
                    "form_key 由字段 key 反查元数据 + 同对象共现字段交集收敛推得（数据流未追到）", 0.7)
 
 
+@dataclass(frozen=True)
+class _ReverseCall:
+    caller_fqn: str
+    caller_method: str
+    invocation: "ax.Invocation"
+    source: str                         # local | symbol | heuristic
+
+
 def _build_reverse_calls(
     pg: "ProjectGraph",
-) -> dict[tuple[str, str], list[tuple[str, str, "ax.Invocation"]]]:
+    progress: "Progress | None" = None,
+) -> dict[tuple[str, str], list[_ReverseCall]]:
     """全项目反向调用边索引：(目标类FQN, 目标方法) → [(调用方FQN, 调用方方法, 调用点), …]。
 
     遍历每个类的**全部重载**方法体，对每个调用用现成的 `_resolve_call` 解析到项目内目标
     （本类方法 / 可解析跨类方法；受者类型解不出就不收=宁缺毋滥）。自调用（递归）`_resolve_call`
     已天然返回 None（`inv.name != method`），不会进索引。
     """
-    callers: dict[tuple[str, str], list[tuple[str, str, "ax.Invocation"]]] = {}
-    for fqn, node in pg.classes.items():
+    callers: dict[tuple[str, str], list[_ReverseCall]] = {}
+    for done, (fqn, node) in enumerate(pg.classes.items(), 1):
+        if progress is not None:
+            progress.tick(done, len(pg.classes), "个类", label="反向调用图·建索引")
         for md in node.cg.method_decls:
             if md.body is None:
                 continue
-            for inv in ax.iter_invocations(md.body):
+            for inv in ax.iter_invocations(md.body, include_refs=True):
                 tgt = _resolve_call(pg, node, md.name, inv)
                 if tgt is None:
                     continue
-                callers.setdefault(tgt, []).append((fqn, md.name, inv))
+                callers.setdefault(tgt.key, []).append(
+                    _ReverseCall(fqn, md.name, inv, tgt.source))
     return callers
 
 
 def _all_call_edges(
-    callers: dict[tuple[str, str], list[tuple[str, str, "ax.Invocation"]]],
-) -> list[tuple[tuple[str, str], tuple[str, str], "ax.Invocation"]]:
+    callers: dict[tuple[str, str], list[_ReverseCall]],
+) -> list[tuple[tuple[str, str], tuple[str, str], "ax.Invocation", str]]:
     """把反向索引摊平成 [(caller, target, invocation)]，供固定点传播逐边重算。"""
-    out: list[tuple[tuple[str, str], tuple[str, str], "ax.Invocation"]] = []
+    out: list[tuple[tuple[str, str], tuple[str, str], "ax.Invocation", str]] = []
     for target, sites in callers.items():
-        for cfqn, cmethod, inv in sites:
-            out.append(((cfqn, cmethod), target, inv))
+        for site in sites:
+            out.append(((site.caller_fqn, site.caller_method), target,
+                        site.invocation, site.source))
     return out
 
 
@@ -422,12 +473,14 @@ class _PropInfo:
     depth: int
     site_count: int
     labels: tuple[str, ...]
+    edge_sources: frozenset[str] = frozenset()
 
 
 def _propagate_reverse_props(
-    pg: "ProjectGraph", callers: dict[tuple[str, str], list[tuple[str, str, "ax.Invocation"]]],
+    pg: "ProjectGraph", callers: dict[tuple[str, str], list[_ReverseCall]],
     const, known: dict[str, str | None], bound_entity: dict[str, set[str]],
     wanted: set[tuple[str, str]],
+    progress: "Progress | None" = None,
 ) -> dict[tuple[str, str], _PropInfo]:
     """沿可解析调用边做保守固定点传播。
 
@@ -439,8 +492,8 @@ def _propagate_reverse_props(
     queue = list(wanted)
     while queue:
         cur = queue.pop(0)
-        for cfqn, cmethod, _inv in callers.get(cur, []):
-            ck = (cfqn, cmethod)
+        for site in callers.get(cur, []):
+            ck = (site.caller_fqn, site.caller_method)
             if ck not in relevant:
                 relevant.add(ck)
                 queue.append(ck)
@@ -451,9 +504,15 @@ def _propagate_reverse_props(
     infos: dict[tuple[str, str], _PropInfo] = {}
     limit = min(max(len(edges) + 2, 2), 64)
 
+    # 固定点传播是 analyze 里最后一段重活（轮数 × 边数，每条边重跑方法体分析，真实项目
+    # 可达几十秒），逐边打累计数——轮数因提前收敛不可预知，报「已处理 N 条边」不报百分比。
+    evaluated = 0
     for _ in range(limit):
-        proposals: dict[tuple[str, str], list[tuple[_Prop, int, str]]] = {}
-        for caller, target, inv in edges:
+        proposals: dict[tuple[str, str], list[tuple[_Prop, int, str, frozenset[str]]]] = {}
+        for caller, target, inv, edge_source in edges:
+            evaluated += 1
+            if progress is not None:
+                progress.tick(evaluated, None, "条边", label="反向调用图·固定点传播")
             caller_node = pg.classes.get(caller[0])
             target_node = pg.classes.get(target[0])
             if caller_node is None or target_node is None:
@@ -475,26 +534,32 @@ def _propagate_reverse_props(
             if not _prop_nonempty(prop):
                 continue
             depth = (caller_info.depth + 1) if caller_info is not None else 1
-            proposals.setdefault(target, []).append((prop, depth, _method_label(pg, caller)))
+            sources = (caller_info.edge_sources if caller_info is not None else frozenset())
+            if edge_source != "local":
+                sources = sources | {edge_source}
+            proposals.setdefault(target, []).append(
+                (prop, depth, _method_label(pg, caller), sources))
 
         new_infos: dict[tuple[str, str], _PropInfo] = {}
         for target, sites in scoped_callers.items():
             vals = proposals.get(target, [])
             if len(vals) != len(sites):
                 continue
-            sigs = {_prop_signature(p) for p, _d, _label in vals}
+            sigs = {_prop_signature(p) for p, _d, _label, _sources in vals}
             if len(sigs) != 1:
                 continue
-            labels = tuple(sorted({_label for _p, _d, _label in vals}))
+            labels = tuple(sorted({_label for _p, _d, _label, _sources in vals}))
             new_infos[target] = _PropInfo(
                 prop=vals[0][0],
-                depth=max(d for _p, d, _label in vals),
+                depth=max(d for _p, d, _label, _sources in vals),
                 site_count=len(sites),
                 labels=labels,
+                edge_sources=frozenset().union(
+                    *(sources for _p, _d, _label, sources in vals)),
             )
-        if {k: (_prop_signature(v.prop), v.depth, v.site_count, v.labels)
+        if {k: (_prop_signature(v.prop), v.depth, v.site_count, v.labels, v.edge_sources)
                 for k, v in new_infos.items()} == {
-                    k: (_prop_signature(v.prop), v.depth, v.site_count, v.labels)
+                    k: (_prop_signature(v.prop), v.depth, v.site_count, v.labels, v.edge_sources)
                     for k, v in infos.items()
                 }:
             return new_infos
@@ -505,6 +570,7 @@ def _propagate_reverse_props(
 def _backfill_reverse_calls(
     result: AnalysisResult, pg: "ProjectGraph", const, known: dict[str, str | None],
     bound_entity: dict[str, set[str]],
+    progress: "Progress | None" = None,
 ) -> None:
     """孤立方法反向调用图回填（doc §5 #1）。
 
@@ -516,14 +582,17 @@ def _backfill_reverse_calls(
     none_rows = [r for r in result.field_accesses if r.form_key is None and r.field_key]
     if not none_rows:
         return
-    callers = _build_reverse_calls(pg)
+    callers = _build_reverse_calls(pg, progress=progress)
+    if progress is not None:
+        progress.tick(0, None, label="反向调用图·固定点传播")
     # 按 (物理类, 物理方法) 分组。standalone 行的 event_method 即物理方法名；_emit_event 行的
     # event_method 是入口事件名，在 helper 类里多查不到方法（md=None）而自然跳过——本回填只针对
     # 「孤立方法 DO 入参」桶（standalone 行）。
     groups: dict[tuple[str, str], list[FieldAccessRow]] = {}
     for r in none_rows:
         groups.setdefault((r.access_class, r.event_method), []).append(r)
-    infos = _propagate_reverse_props(pg, callers, const, known, bound_entity, set(groups))
+    infos = _propagate_reverse_props(pg, callers, const, known, bound_entity, set(groups),
+                                     progress=progress)
 
     for (fqn, method), rows in groups.items():
         node = pg.classes.get(fqn)
@@ -560,6 +629,7 @@ def _backfill_reverse_calls(
             r.level = acc.level
             r.entry_key = acc.entry_key
             r.form_key_source = "reverse_callgraph"
+            r.edge_source = _edge_grade(info.edge_sources)
             r.evidence = f"{r.evidence} | {note}" if r.evidence else note
             r.confidence = round(min(r.confidence, cap), 3)
 
@@ -651,11 +721,26 @@ def _arg_str_value(arg: str, env: "fa._Env") -> str | None:
 
 
 def _resolve_call(pg: "ProjectGraph", node: "ClassNode", method: str, inv: ax.Invocation):
-    """把一个调用解析成项目内 (fqn, 方法名)：本类方法 or 可解析跨类方法；否则 None。"""
+    """把调用解析成 ``ResolvedCall``：本类 local / 跨类 symbol 或 heuristic。"""
     recv = inv.object_text.strip()
     if recv in ("", "this") and inv.name in node.cg.methods and inv.name != method:
-        return (node.fqn, inv.name)
-    return pg._resolve_target(node, method, inv)
+        return pgmod.ResolvedCall(node.fqn, inv.name, "local")
+    target = pg._resolve_target(node, method, inv)
+    if target is not None and target.fqn == node.fqn:
+        return pgmod.ResolvedCall(target.fqn, target.method, "local")
+    return target
+
+
+def _edge_grade(sources: Iterable[str]) -> str:
+    """把一条路径/传播链的逐边来源收敛成 schema v18 四档。"""
+    cross = set(sources) - {"local"}
+    if not cross:
+        return "local"
+    if cross == {"symbol"}:
+        return "symbol"
+    if cross == {"heuristic"}:
+        return "heuristic"
+    return "mixed"
 
 
 def _callee_prop(pg: "ProjectGraph", target, inv: ax.Invocation,
@@ -669,8 +754,9 @@ def _callee_prop(pg: "ProjectGraph", target, inv: ax.Invocation,
     只传"有信息"的项；裸 (header,None,None) 坐标不传，让被调用方按默认推断。
     """
     prop = _Prop()
-    tnode = pg.classes[target[0]]
-    md = tnode.cg.methods.get(target[1])
+    tfqn, tmethod = target.key if hasattr(target, "key") else target
+    tnode = pg.classes[tfqn]
+    md = tnode.cg.methods.get(tmethod)
     if md is None:
         return prop
     params = list(ax.iter_param_vars(md.node))
@@ -742,7 +828,7 @@ class _RetResolver:
             tgt = _resolve_call(self.pg, node, method, inv)
             if tgt is None:
                 continue
-            rc = self._return_ctx(tgt[0], tgt[1], stack)
+            rc = self._return_ctx(tgt.fqn, tgt.method, stack)
             if rc is not None:
                 seed[lv.name] = rc
         return seed
@@ -776,9 +862,9 @@ class _RetResolver:
 
 def _seg(pg: "ProjectGraph", caller_fqn: str, target) -> str:
     """调用链路径段：本类调用记方法名，跨类记 Simple.method。"""
-    if target[0] == caller_fqn:
-        return target[1]
-    return f"{pg.classes[target[0]].simple}.{target[1]}"
+    if target.fqn == caller_fqn:
+        return target.method
+    return f"{pg.classes[target.fqn].simple}.{target.method}"
 
 
 def _walk_event(
@@ -787,14 +873,14 @@ def _walk_event(
 ):
     """从事件方法跨类 BFS，逐节点抽字段读写 + 传播来源实体。
 
-    返回 (records, seen)：records=[(fqn, method, path, accesses)]，seen={(fqn, method)}。
+    返回 (records, seen)：records=[(fqn, method, path, edge_source, accesses)]。
     """
-    records: list[tuple[str, str, list[str], list]] = []
+    records: list[tuple[str, str, list[str], str, list]] = []
     seen: set[tuple[str, str]] = {(plugin_fqn, event_method)}
-    q: deque = deque([(plugin_fqn, event_method, [event_method], _Prop())])
+    q: deque = deque([(plugin_fqn, event_method, [event_method], _Prop(), frozenset())])
     resolver = _RetResolver(pg, const, known, plugin_fqn, entry_form, convert_source)
     while q:
-        fqn, method, path, prop = q.popleft()
+        fqn, method, path, prop, edge_sources = q.popleft()
         node = pg.classes.get(fqn)
         md = node.cg.methods.get(method) if node else None
         if md is None:
@@ -815,16 +901,19 @@ def _walk_event(
         annmap = getattr(pg, "annmap", None)
         if annmap:                                  # 反射映射 bulk-write：合成该映射类全部字段写入
             accesses = accesses + annmap.synth_accesses(fqn, method)
-        records.append((fqn, method, path, accesses))
+        records.append((fqn, method, path, _edge_grade(edge_sources), accesses))
         if len(path) > _MAX_DEPTH:
             continue
-        for inv in ax.iter_invocations(md.body):
+        for inv in ax.iter_invocations(md.body, include_refs=True):
             tgt = _resolve_call(pg, node, method, inv)
-            if tgt is None or tgt in seen:
+            key = tgt.key if tgt is not None else None
+            if key is None or key in seen:
                 continue
-            seen.add(tgt)
+            seen.add(key)
             cp = _callee_prop(pg, tgt, inv, ctx_map, env)
-            q.append((tgt[0], tgt[1], path + [_seg(pg, fqn, tgt)], cp))
+            next_sources = edge_sources | ({tgt.source} if tgt.source != "local" else set())
+            q.append((tgt.fqn, tgt.method, path + [_seg(pg, fqn, tgt)], cp,
+                      frozenset(next_sources)))
     return records, seen
 
 
@@ -862,11 +951,12 @@ def _emit_event(
     """从一个入口（事件/根方法）跨类回溯，归集字段读写 + 落库判定 + 写入 result。"""
     records, seen = _walk_event(pg, plugin_fqn, event_method, entry_form, convert_source, const, known)
     sink_reachable = any(
-        persist.find_sinks(pg.classes[f].cg.methods[m].body)
+        persist.find_sinks(pg.classes[f].cg.methods[m].body, symbols=pg.symbols,
+                           relpath=pg.classes[f].relpath)
         for (f, m) in seen if m in pg.classes[f].cg.methods
     )
     has_ext = pg.has_unresolved_external([pgmod.CrossReach(f, m, []) for (f, m) in seen])
-    for fqn, method, path, accesses in records:
+    for fqn, method, path, edge_source, accesses in records:
         covered.add((fqn, method))
         rnode = pg.classes[fqn]
         for acc in accesses:
@@ -883,12 +973,14 @@ def _emit_event(
             result.field_accesses.append(FieldAccessRow(
                 form_key=acc.entity, field_key=acc.field_key, level=acc.level,
                 entry_key=acc.entry_key, plugin_fqn=plugin_fqn, plugin_type=plugin_type,
-                access_class=fqn, event_method=event_method, event_phase=phase,
+                access_class=fqn, access_method=method,
+                event_method=event_method, event_phase=phase,
                 access=acc.access, persists=persists, persist_reason=reason,
                 via=acc.via, line=acc.line, path=path, key_resolution=acc.key_resolution,
                 confidence=conf, source_relpath=rnode.relpath, evidence=acc.note,
                 form_key_source="data_flow" if acc.entity else None,
                 receiver_var=acc.receiver_var,
+                edge_source=edge_source,
             ))
 
 
@@ -959,7 +1051,8 @@ def _analyze_standalone(
             continue
         info = events.classify_method(kind, name) if is_plugin else None
         phase = info.phase if info else "unknown"
-        self_sink = bool(persist.find_sinks(md.body))
+        self_sink = bool(persist.find_sinks(md.body, symbols=pg.symbols,
+                                            relpath=node.relpath))
         for acc in accesses:
             if acc.via == "annotation-map":
                 persists, reason = "unknown", "注解反射映射写入(条件 set)；落库取决于调用方是否保存转换产物—未证"
@@ -974,7 +1067,8 @@ def _analyze_standalone(
             result.field_accesses.append(FieldAccessRow(
                 form_key=acc.entity, field_key=acc.field_key, level=acc.level,
                 entry_key=acc.entry_key, plugin_fqn=node.fqn, plugin_type=plugin_type,
-                access_class=node.fqn, event_method=name, event_phase=phase,
+                access_class=node.fqn, access_method=name,
+                event_method=name, event_phase=phase,
                 access=acc.access, persists=persists, persist_reason=reason,
                 via=acc.via, line=acc.line, path=[name], key_resolution=acc.key_resolution,
                 confidence=acc.confidence, source_relpath=node.relpath, evidence=acc.note,

@@ -113,7 +113,8 @@ def bill_view(conn, key: str) -> dict[str, Any] | None:
         qmarks = ",".join("?" * len(own_classes))
         outbound_triggers = [dict(r) for r in conn.execute(
             f"SELECT caller_class,caller_method,line,source_relpath,via,op_key,op_key_resolution,"
-            f"target_form_key,target_resolution,target_confidence,evidence FROM operation_trigger "
+            f"target_form_key,target_resolution,target_confidence,evidence,receiver_source "
+            f"FROM operation_trigger "
             f"WHERE caller_class IN ({qmarks}) AND (target_form_key IS NULL OR target_form_key<>?) "
             f"ORDER BY caller_class,line", (*own_classes, key)).fetchall()]
         tgt_keys = sorted({t["target_form_key"] for t in outbound_triggers if t["target_form_key"]})

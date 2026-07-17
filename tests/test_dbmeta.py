@@ -55,6 +55,8 @@ def test_assemble_real_sample_bd_customer():
     proj = {p.class_name for p in model.plugins if p.source == "project"}
     assert "kd.bd.master.CustomerFormPlugin" in proj
     assert len(model.operations) > 0
+    # DB fdata 只写自定义/显式覆盖操作；完全沿用根模板的预制操作也要补齐。
+    assert {"submit", "audit", "refresh"} <= {o.key for o in model.operations}
     assert model.source_file == "db://bd_customer"
 
 

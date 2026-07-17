@@ -48,8 +48,69 @@ def test_understand_skill_routes_operation_without_bill_first():
     assert '`resolve_fields(kind="plugin")`' in text
     assert "使用 `bill` 获取目标单据的操作集和有效插件绑定" not in text
     assert "pagination.complete=false" in text
-    assert "plugins`、`triggered_by`、`unresolved_inbound`、`triggers_downstream" in text
+    assert all(f"`{section}`" in text for section in (
+        "plugins", "triggered_by", "unresolved_inbound", "triggers_downstream",
+    ))
     assert "能力边界" in text
+
+
+def test_understand_skill_enforces_name_provenance():
+    """中文名来源硬约束：源码注释/常量名不算元数据证据，读源码后核对是强制门，未核对只准标注。"""
+    text = read_skill("cosmic-kb-understand").decode("utf-8")
+
+    assert "不是元数据证据" in text          # 封死"注释里写了中文名"的豁免借口
+    assert "强制门" in text                  # 读完源码→写结论前批量 resolve_fields 有明确触发点
+    assert "⚠️未核对" in text                # 输出模板兜底写法，禁止直接填推断名
+    assert "中文名来源硬约束" in text        # 回答格式一节的输出级约束存在
+
+
+def test_understand_skill_orchestrates_field_trace_evidence():
+    """字段 trace 默认查全写侧，并按入口去重、分层表达证据和强制作图。"""
+    text = read_skill("cosmic-kb-understand").decode("utf-8")
+    workflow = text.split("### 字段追溯", 1)[1].split("### 插件或方法解释", 1)[0]
+    template = text.split("### 字段排障结论", 1)[1].split("### 插件/方法作用解释", 1)[0]
+
+    assert 'trace(kind="field", access="write")' in workflow
+    assert 'trace(kind="field", access="read")' in workflow
+    assert "只有用户明确询问读取或完整读写关系时" in workflow
+    assert "pagination.pending" in workflow and "complete=true" in workflow
+    assert "不得在每个源码行下重复整条入口链" in workflow
+    assert "最多列 3 个" in workflow
+    assert "字段访问是“已确认/可能/仅线索”" in workflow
+    assert "插件入口是“已确认/可能/" in workflow
+    assert "写入结果是“已落库/仅内存/未知”" in workflow
+    assert all(label in template for label in (
+        "层级/分录可能命中", "来源单据未定位", "动态字段写入候选", "粗粒度源码命中",
+    ))
+    assert "未被访问节点引用" in template
+    assert "字段追溯文字模板之后**必须**附 Mermaid 图" in template
+    assert "每个去重的入口/访问方法只画一个节点" in template
+    assert "单图超过约 20 个节点" in template
+
+
+def test_understand_skill_orchestrates_operation_impact_evidence():
+    """操作影响模板查全三段、按方法去重，并分开入口、归属、影响与下游单跳。"""
+    text = read_skill("cosmic-kb-understand").decode("utf-8")
+    workflow = text.split("### 操作影响分析", 1)[1].split("## 术语对照", 1)[0]
+    template = text.split("### 操作影响分析", 2)[2].split("## 完成检查", 1)[0]
+
+    assert '直接调用 `trace(kind="operation")`' in workflow
+    assert "pagination.pending" in workflow and "next_cursor=null" in workflow
+    assert "triggered_by" in workflow and "unresolved_inbound" in workflow
+    assert "两者不得混成同一置信度" in workflow
+    assert "(caller_class, caller_method)" in workflow
+    assert "最多列 3 个" in workflow
+    assert "相同 `entry_chains` 只展开一次" in workflow
+    assert "caller_forms" in workflow and "不得据此虚构上游操作坐标" in workflow
+    assert all(label in template for label in (
+        "目标单据已确认、操作 key 解不出", "操作 key 匹配、目标单据解不出", "操作与目标都解不出",
+    ))
+    assert "每条仅为直接下一跳" in template
+    assert "next_trace" in workflow
+    assert "继续查询坐标" in template
+    assert "操作影响文字模板之后**必须**附 Mermaid 图" in template
+    assert "每个去重调用方法、入口方法、操作坐标、执行插件和字段只画一个节点" in template
+    assert "上游入站 / 操作执行与字段 / 下游单跳" in template
 
 
 def test_detect_agents_by_command_and_config(tmp_path):

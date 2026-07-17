@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from tree_sitter import Node
 
     from .constants import ConstantTable, KeyResolution
+    from .symbols import SymbolTable
 
 
 @dataclass
@@ -48,6 +49,7 @@ class OperationTriggerRow:
     target_form_key: str | None    # 目标单据标识；解不出为 None
     target_resolution: str         # literal | constant | binding | ambiguous | dynamic | unknown
     target_confidence: float
+    receiver_source: str = "text"  # symbol | text（接收者识别精度）
     evidence: str | None = None
 
 
@@ -70,6 +72,7 @@ def find_operation_triggers(
     source_relpath: str,
     bound_form: str | None = None,
     bound_ambiguous: bool = False,
+    symbols: "SymbolTable | None" = None,
 ) -> list[OperationTriggerRow]:
     """在一个方法体内找程序化操作触发点。
 
@@ -81,8 +84,16 @@ def find_operation_triggers(
     out: list[OperationTriggerRow] = []
     for inv in ax.iter_invocations(method_body):
         recv_tail = inv.object_text.strip().rsplit(".", 1)[-1].split("(", 1)[0]
+        site = (symbols.lookup(source_relpath, inv.line, inv.name, inv.col)
+                if symbols is not None else None)
+        resolved_site = site is not None and site.resolved
 
-        if recv_tail == "OperationServiceHelper" and inv.name in ("executeOperate", "execOperate"):
+        helper_match = recv_tail == "OperationServiceHelper"
+        receiver_source = "text"
+        if resolved_site:
+            helper_match = site.declaring == "kd.bos.servicehelper.operation.OperationServiceHelper"
+            receiver_source = "symbol"
+        if helper_match and inv.name in ("executeOperate", "execOperate"):
             op_val, op_kind, op_conf, op_note = _resolution(const.resolve_arg(inv, 0))
             tgt_val, tgt_kind, tgt_conf, tgt_note = _resolution(const.resolve_arg(inv, 1))
             notes = [n for n in (op_note, tgt_note) if n]
@@ -92,11 +103,15 @@ def find_operation_triggers(
                 op_key=op_val, op_key_resolution=op_kind, op_key_confidence=op_conf,
                 target_form_key=tgt_val, target_resolution=tgt_kind,
                 target_confidence=tgt_conf,
+                receiver_source=receiver_source,
                 evidence="; ".join(notes) if notes else None,
             ))
             continue
 
         if inv.name.startswith("invokeOperation") and inv.arg_count >= 1:
+            # 符号成功时，项目内同名 invokeOperation 明确否决；平台 kd.bos.* 目标才采信。
+            if resolved_site and not (site.declaring or "").startswith("kd.bos."):
+                continue
             op_val, op_kind, op_conf, op_note = _resolution(const.resolve_arg(inv, 0))
             if bound_form:
                 tgt_val, tgt_kind, tgt_conf = bound_form, "binding", 0.85
@@ -114,6 +129,7 @@ def find_operation_triggers(
                 op_key=op_val, op_key_resolution=op_kind, op_key_confidence=op_conf,
                 target_form_key=tgt_val, target_resolution=tgt_kind,
                 target_confidence=tgt_conf,
+                receiver_source="symbol" if resolved_site else "text",
                 evidence="; ".join(notes) if notes else None,
             ))
     return sorted(out, key=lambda row: (row.line, row.via))
@@ -135,6 +151,7 @@ def collect_triggers(pg, bound_entity: dict[str, set[str]]) -> list[OperationTri
                 caller_class=fqn, caller_method=md.name,
                 source_relpath=node.relpath,
                 bound_form=bound_form, bound_ambiguous=len(ents) > 1,
+                symbols=getattr(pg, "symbols", None),
             ))
     return _dedup(out)
 

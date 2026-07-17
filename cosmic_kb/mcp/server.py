@@ -21,14 +21,18 @@ DEFAULT_DB = "cosmic_kb.db"
 # 多数 MCP 客户端会把 server instructions 并入系统提示。见 docs/设计方案/分发与多agent接入方案.md §2。
 INSTRUCTIONS = (
     "苍穹（金蝶 Cosmic）本地取证工具。按已知起点直接路由，不把 bill 当通用前置：\n"
-    "① 字段谁读写、在哪个事件、是否落库 → trace(\"单据.字段\", kind=\"field\")。\n"
+    "① 字段谁读写、由哪个插件事件入口触发、是否落库 → trace(\"单据.字段\", kind=\"field\")。\n"
     "② 谁调用了某操作（含操作 key/目标单据解不出、无法排除的嫌疑）、操作绑定插件或跨单据下游 → "
-    "trace(\"单据.操作key\", kind=\"operation\")；已知操作坐标时直接查，一次即完整。\n"
+    "trace(\"单据.操作key\", kind=\"operation\")；已知操作坐标时直接查，一次即完整，"
+    "入站触发点自带 entry_chains（回溯到插件事件入口的调用链）。\n"
     "③ 单据整体操作集、全部插件绑定、插件车道或本单据对外触发的影响面 → bill(form_key)。\n"
     "④ 字段/实体/单据标识及插件类反查 → resolve_fields；标识不精确时先核对。\n"
-    "⑤ 插件事件、SDK、事务和入库语义 → cosmic_semantics(topic)。\n"
-    "通用纪律：不凭字段名、类名、包名或命名习惯猜标识和绑定；结论标 "
-    "confirmed/likely/unknown，证不到就是 unknown。trace/bill 顶层 "
+    "⑤ 谁调用了某 Java 方法、方法引用或死代码验证 → callers(\"Class.method\")。\n"
+    "⑥ 插件事件、SDK、事务和入库语义 → cosmic_semantics(topic)。\n"
+    "通用纪律：不凭字段名、类名、包名或命名习惯猜标识和绑定；源码中文注释/常量名/Javadoc "
+    "不是元数据证据，输出的中文名一律以 resolve_fields 等工具返回为准，未核对的只准写"
+    "「<标识>（未核对）」；结论标 "
+    "confirmed/likely/unknown，证不到就是 unknown。trace/bill/callers 顶层 "
     "pagination.complete=false 时按 pending.next_cursor 翻页至完成。need_clarification、"
     "mismatched_*、invalid_request、coarse_only、unlocated、dynamic_writers 和 "
     "unresolved_inbound 都是纠错或存疑证据，不得解释成不存在。"
@@ -79,7 +83,7 @@ def _open():
     return store.open_kb(db)
 
 
-# ── 四个取证工具的纯逻辑（复用段一取证函数，绝不重写）────────────────────────
+# ── 五个取证工具的纯逻辑（复用段一取证函数，绝不重写）────────────────────────
 def tool_trace(
     field: str,
     form: str | None = None,
@@ -92,7 +96,9 @@ def tool_trace(
     """字段或操作坐标取证；`kind` 必须显式区分，不自动猜测。
 
     `kind="field"`（默认）：`field` 传 `单据.字段`、`单据.分录.字段` 等精确坐标，返回读写类/方法、
-    事件、保存证据和源码行号。裸 key 有歧义会返回 `need_clarification`；`access="write"`/`"read"`
+    保存证据和源码行号；每个访问节点用 `entry_ref` 关联顶层按物理方法去重的 `entry_chains`
+    （插件事件入口→实际读写方法，目录自身可分页，避免逐行复制导致返回爆炸）。裸 key 有歧义会返回
+    `need_clarification`；`access="write"`/`"read"`
     可聚焦访问类型。`coarse_only`、`unlocated`、`dynamic_writers` 表示仍有待读源码的证据，不等于
     无人读写；note 出现 ⚡ 时可按其中的操作坐标转 `kind="operation"`。
 
@@ -100,7 +106,11 @@ def tool_trace(
     `bill` 不是前置步骤。返回 `plugins`（绑定的操作插件/源码入口）、`triggered_by`（明确的程序化
     上游）、`unresolved_inbound`（操作 key 或目标单据未钉准、**无法静态排除是本操作**的入站嫌疑，
     `suspect_reason` 注明成因，挂不上操作坐标的表单插件外发已并入）和 `triggers_downstream`
-    （跨单据下游，可能带 `next_trace`）。对某操作的程序化调用 `triggered_by`+`unresolved_inbound`
+    （跨单据下游，可能带 `next_trace`）。`triggered_by`/`unresolved_inbound` 每条附
+    `entry_chains`：沿静态调用边向上回溯到**插件事件入口**的调用链（苍穹程序化调用最终从插件
+    事件开始）——`terminal=entry` 已回溯到事件入口，`plugin_boundary` 到达插件类但方法不在事件表
+    （likely 入口），`no_static_caller` 表示静态追不到上游（反射/定时任务/OpenAPI 派发需读源码
+    定性，不等于无入口）。对某操作的程序化调用 `triggered_by`+`unresolved_inbound`
     合起来即完整，无需补查 `bill`。它只取证静态识别到的 executeOperate/invokeOperation 等程序化
     触发，不代表人工、工作流或设计器入口的完整链路。该模式忽略 `entry`/`level`/`access`。
 
@@ -190,6 +200,26 @@ def tool_resolve_fields(
         conn.close()
 
 
+def tool_callers(target: str, cursor: str | None = None) -> dict[str, Any]:
+    """反查谁调用了某 Java 方法；用于跨类调用链补全、方法引用定位和死代码验证。
+
+    `target` 写 `Class.method` 或 `完整包名.Class.method`。简单类名跨包重名时返回
+    `need_clarification + candidates`，必须选完整 locator 重查。结果逐调用点给出类、方法、
+    文件行列、`invocation|method_reference`、`expr|scope|heuristic` 与 confidence。
+
+    返回始终附 `resolution_coverage`。0 结果只有在符号层 status=ok、无失败文件且覆盖率 ≥95%
+    时才是“查无调用方”的强证据；符号层不可用或覆盖不足时，名字匹配口径不足以断言死代码。
+    热点方法会分页；`pagination.complete=false` 时把 `next_cursor` 原样传回，直至取全。
+    """
+    from ..report import callers as callers_report
+
+    conn = _open()
+    try:
+        return callers_report.callers_compact(conn, target, cursor=cursor)
+    finally:
+        conn.close()
+
+
 def tool_cosmic_semantics(topic: str = "") -> dict[str, Any]:
     """苍穹领域语义文档：插件类型/事件时机/SDK 用法/入库判断/反模式黑名单。不确定查哪篇先空参
     列清单（`{status:'need_topic', available_topics, grouped}`，每条带『何时用』）；命中返回
@@ -222,6 +252,7 @@ TOOLS = {
     "trace": tool_trace,
     "bill": tool_bill,
     "resolve_fields": tool_resolve_fields,
+    "callers": tool_callers,
     "cosmic_semantics": tool_cosmic_semantics,
 }
 

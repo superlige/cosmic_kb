@@ -32,12 +32,15 @@ def test_mcp_descriptions_keep_routing_contract_and_schema():
     """描述是 LLM 的路由契约：五路入口齐全，操作坐标不再被 bill-first 截走。"""
     instructions = mcp_server.INSTRUCTIONS
     first_512 = instructions[:512]
-    for tool_name in ("trace", "bill", "resolve_fields", "cosmic_semantics"):
+    for tool_name in ("trace", "bill", "resolve_fields", "callers", "cosmic_semantics"):
         assert tool_name in first_512
     assert 'kind="field"' in first_512
     assert 'kind="operation"' in first_512
     assert "pagination.complete=false" in instructions
     assert "unresolved_inbound" in instructions
+    # 中文名来源纪律下沉进常驻 instructions（非 Claude 宿主不加载 SKILL，只靠这段）
+    assert "不是元数据证据" in instructions
+    assert "（未核对）" in instructions
 
     trace_doc = inspect.getdoc(mcp_server.tool_trace) or ""
     assert "已知操作坐标时直接调用" in trace_doc
@@ -58,9 +61,16 @@ def test_mcp_descriptions_keep_routing_contract_and_schema():
     assert "不能组装业务点号坐标" in resolve_doc
     assert "missing_form_key" in resolve_doc
 
+    callers_doc = inspect.getdoc(mcp_server.tool_callers) or ""
+    assert "resolution_coverage" in callers_doc
+    assert "不足以断言死代码" in callers_doc
+    assert "pagination.complete=false" in callers_doc
+
     assert list(inspect.signature(mcp_server.tool_trace).parameters) == [
         "field", "form", "entry", "level", "access", "cursor", "kind"]
-    assert set(mcp_server.TOOLS) == {"trace", "bill", "resolve_fields", "cosmic_semantics"}
+    assert list(inspect.signature(mcp_server.tool_callers).parameters) == ["target", "cursor"]
+    assert set(mcp_server.TOOLS) == {
+        "trace", "bill", "resolve_fields", "callers", "cosmic_semantics"}
 
 
 def test_tool_trace_same_as_report(kb_env):
@@ -141,14 +151,16 @@ def test_open_raises_when_kb_missing(tmp_path: Path, monkeypatch):
         mcp_server.tool_trace("cqkd_collateralstatus")
     with pytest.raises(RuntimeError):
         mcp_server.tool_bill("cqkd_assetcard")
+    with pytest.raises(RuntimeError):
+        mcp_server.tool_callers("CollateralService.update")
 
 
 def test_tools_registry_matches():
-    """TOOLS 注册表收敛到 4 个排障核心工具（read_source/method_calls/ask 均已整体退役，
+    """TOOLS 注册表收敛到 5 个排障核心工具（read_source/method_calls/ask 均已整体退役，
     防漏注册）。"""
     assert set(mcp_server.TOOLS) == {
         "trace", "bill",
-        "resolve_fields", "cosmic_semantics"}
+        "resolve_fields", "callers", "cosmic_semantics"}
     for fn in mcp_server.TOOLS.values():
         assert callable(fn)
 

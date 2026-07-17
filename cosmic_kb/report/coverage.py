@@ -40,6 +40,7 @@ def coverage(conn) -> dict[str, Any]:
     """从 KB 连接组装「字段覆盖率 + 扫描质量」可信度报告 dict。"""
     java = json.loads(store.get_meta(conn, "java_analysis") or "{}")
     java_available = java.get("available", True)
+    symbol = json.loads(store.get_meta(conn, "symbol_resolution") or "{}")
 
     placeholders = ",".join("?" * len(BUSINESS_KINDS))
 
@@ -207,6 +208,18 @@ def coverage(conn) -> dict[str, Any]:
         "match_rate": _rate(matched, resolved),
     }
 
+    # ── 质量分解⑤：调用边精度（schema v18）──────────────────────────────
+    edge_counts = {r["edge_source"] or "heuristic": r["n"] for r in conn.execute(
+        "SELECT edge_source, COUNT(*) n FROM field_access GROUP BY edge_source")}
+    edge_total = sum(edge_counts.values())
+    edge_quality = {
+        "total": edge_total,
+        "by_source": edge_counts,
+        "exact": edge_counts.get("local", 0) + edge_counts.get("symbol", 0),
+        "fallback": edge_counts.get("heuristic", 0),
+        "mixed": edge_counts.get("mixed", 0),
+    }
+
     # ── 上游可信度（桥接命中率 / Java 是否启用）——覆盖率天花板由它们决定 ──────────
     status_counts = {r["status"]: r["n"] for r in conn.execute(
         "SELECT status, COUNT(*) n FROM binding GROUP BY status")}
@@ -218,6 +231,7 @@ def coverage(conn) -> dict[str, Any]:
         "field_access_total": java.get("field_access", 0),
         "bridge_hit_rate": _rate(linked, project_total),
         "bridge_missing": status_counts.get("missing", 0),
+        "symbol_resolution": symbol,
     }
 
     result = {
@@ -226,6 +240,7 @@ def coverage(conn) -> dict[str, Any]:
         "location_quality": location_quality,
         "persist_quality": persist_quality,
         "meta_match": meta_match,
+        "edge_quality": edge_quality,
         "upstream": upstream,
     }
     result["verdict"] = _verdict(result)
@@ -273,6 +288,7 @@ def render_coverage(c: dict[str, Any], *, max_list: int = 20) -> str:
     lq = c["location_quality"]
     pq = c["persist_quality"]
     mm = c["meta_match"]
+    eq = c.get("edge_quality", {})
     up = c["upstream"]
     lines: list[str] = []
 
@@ -342,6 +358,12 @@ def render_coverage(c: dict[str, Any], *, max_list: int = 20) -> str:
     lines.append(
         f"  ④ 命中元数据字段   {_bar(mm['match_rate'], 16)} {_pct(mm['match_rate'])}  "
         f"（对不上 {mm['unmatched']}：多为平台字段/常量解析偏差，共解析 {mm['resolved']}）")
+    if eq:
+        by = eq.get("by_source", {})
+        lines.append(
+            "  ⑤ 调用边精度       "
+            f"local {by.get('local', 0)} / symbol {by.get('symbol', 0)} / "
+            f"mixed {by.get('mixed', 0)} / heuristic {by.get('heuristic', 0)}")
 
     # 上游
     lines.append("")
@@ -350,4 +372,12 @@ def render_coverage(c: dict[str, Any], *, max_list: int = 20) -> str:
         f"  Java 分析 {'✅启用' if up['java_available'] else '⚠未启用'} · "
         f"已分析插件 {up['analyzed_plugins']} · "
         f"桥接命中率 {_pct(up['bridge_hit_rate'])}（missing {up['bridge_missing']}）")
+    sym = up.get("symbol_resolution") or {}
+    sym_status = sym.get("status", "未记录")
+    sym_cov = sym.get("coverage")
+    lines.append(
+        f"  编译期符号 {sym_status} · provider={sym.get('provider') or '—'} · "
+        f"jar={sym.get('jar_count', 0)} · coverage={_pct(sym_cov)}")
+    if sym.get("reason"):
+        lines.append(f"  符号降级原因: {sym['reason']}")
     return "\n".join(lines)

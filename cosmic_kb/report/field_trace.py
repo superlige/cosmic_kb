@@ -20,7 +20,7 @@ from typing import Any
 from ..graph import store
 from ..java import null_reason as nrmod
 from ..semantic import hints
-from . import dynamic_writes
+from . import dynamic_writes, entry_chain
 
 # 排序权重：写优先于读；落库优先；置信度高优先。
 _PERSIST_RANK = {"yes": 0, "unknown": 1, "no": 2, "na": 3}
@@ -32,8 +32,8 @@ _LEVEL_LABEL = {"header": "表头", "entry": "分录", "subentry": "子分录",
 # 是最大单行死重，取了只会撑大返回 dict 被 MCP 截断。
 _FA_COLS = (
     "form_key,field_key,level,entry_key,plugin_fqn,plugin_type,access_class,"
-    "event_method,event_phase,access,persists,persist_reason,via,line,path,"
-    "key_resolution,confidence,source_relpath,null_reason"
+    "access_method,event_method,event_phase,access,persists,persist_reason,via,line,path,"
+    "key_resolution,confidence,source_relpath,null_reason,edge_source"
 )
 
 # ── 返回 dict 的数组上界（红线 #4：cap 后仍把真实总数留在 summary，消费方比 len 即知截断量）──
@@ -44,14 +44,16 @@ _CAP_READER_METHODS = 15   # 每坐标读取折叠成的「该读方法」清单
 _CAP_POSSIBLE = 25         # 可能命中（层级/分录存疑）
 _CAP_UNLOCATED_METHODS = 15  # 来源未定位折叠成的「反推来源方法」清单条数
 _CAP_COARSE = 25           # 粗扫疑似盲点位置
+_CAP_ENTRY_CHAINS = 80     # 富投影入口目录上限；MCP 另走字节 governor + cursor
 
 # 单行投影白名单：只留 Web accessTable/possibleTable + CLI _fmt_access 实际渲染的字段。
 # 丢弃 confidence/event_phase/field_key/form_key(行级)/plugin_forms(与 label 冗余)/evidence。
 _SLIM_FIELDS = (
-    "access", "level", "entry_key", "event_method", "persists", "persist_reason",
+    "access", "level", "entry_key", "access_method", "event_method", "entry_ref",
+    "persists", "persist_reason",
     "via", "line", "source_relpath", "key_resolution", "plugin_fqn", "plugin_simple",
     "plugin_type", "access_simple", "cross_class", "plugin_form_label",
-    "plugin_cross_form", "semantics_topic",
+    "plugin_cross_form", "semantics_topic", "edge_source",
 )
 
 
@@ -69,20 +71,23 @@ def _slim_row(r: dict[str, Any]) -> dict[str, Any]:
 
 
 def _collapse_reader_methods(rows: list[dict[str, Any]], *, cap: int) -> dict[str, Any]:
-    """把读取行按 (入口类, 事件方法) 去重成「该读方法」清单（cause 无关版 worklist）。
+    """把读取行按 (物理类, 物理方法) 去重成「该读方法」清单（cause 无关版 worklist）。
 
     读取价值最低、却占膨胀大头——大模型真要弄清"谁读了它"，是去这些方法读源码，而非逐行看记录。
-    故同插件同事件方法只列一处，给 count + 物理位置（≤3）+ 已焊的语义路由/归属，
+    故同一实际读取方法只列一处，给 count + 物理位置（≤3）+ 入口链短引用，
     按 count 降序、cap 截断并报剩余数。形状与 dynamic_writers 同款（total/methods/capped）。
     """
     groups: dict[tuple, dict[str, Any]] = {}
     for r in rows:
-        key = (r.get("plugin_fqn"), r.get("event_method"))
+        cls = r.get("access_class") or r.get("plugin_fqn")
+        method = r.get("access_method") or r.get("event_method")
+        key = (cls, method)
         g = groups.get(key)
         if g is None:
             g = groups[key] = {
-                "class_fqn": r.get("plugin_fqn"), "method": r.get("event_method"),
-                "plugin_simple": r.get("plugin_simple"), "plugin_type": r.get("plugin_type"),
+                "class_fqn": cls, "method": method, "entry_ref": r.get("entry_ref"),
+                "plugin_simple": (cls or "").rsplit(".", 1)[-1],
+                "plugin_type": r.get("plugin_type"),
                 "plugin_form_label": r.get("plugin_form_label"),
                 "semantics_topic": r.get("semantics_topic"),
                 "count": 0, "locations": {},
@@ -94,6 +99,7 @@ def _collapse_reader_methods(rows: list[dict[str, Any]], *, cap: int) -> dict[st
     for g in groups.values():
         out.append({
             "class_fqn": g["class_fqn"], "method": g["method"],
+            "entry_ref": g["entry_ref"],
             "plugin_simple": g["plugin_simple"], "plugin_type": g["plugin_type"],
             "plugin_form_label": g["plugin_form_label"], "semantics_topic": g["semantics_topic"],
             "count": g["count"],
@@ -111,16 +117,19 @@ def _collapse_unlocated_methods(rows: list[dict[str, Any]], *, cap: int) -> dict
     读源码反推**（红线 #1 可读全文 / #4 不臆造）。按 (入口类, 事件方法) 去重——同方法读写
     N 个本字段的位置只列一次，给写/读分计 + 物理位置（≤3）+ 该插件注册所属单据
     `plugin_form_label`（**只读线索**：很可能来自这张单据，去源码确认，绝不自动回填 form_key）+
-    语义路由。写多优先、按访问数降序，超 cap 截断并报剩余。形状同 dynamic_writers（total/methods/capped）。
+    入口链短引用。写多优先、按访问数降序，超 cap 截断并报剩余。形状同 dynamic_writers。
     """
     groups: dict[tuple, dict[str, Any]] = {}
     for r in rows:
-        key = (r.get("plugin_fqn"), r.get("event_method"))
+        cls = r.get("access_class") or r.get("plugin_fqn")
+        method = r.get("access_method") or r.get("event_method")
+        key = (cls, method)
         g = groups.get(key)
         if g is None:
             g = groups[key] = {
-                "class_fqn": r.get("plugin_fqn"), "method": r.get("event_method"),
-                "plugin_simple": r.get("plugin_simple"), "plugin_type": r.get("plugin_type"),
+                "class_fqn": cls, "method": method, "entry_ref": r.get("entry_ref"),
+                "plugin_simple": (cls or "").rsplit(".", 1)[-1],
+                "plugin_type": r.get("plugin_type"),
                 "plugin_form_label": r.get("plugin_form_label"),
                 "semantics_topic": r.get("semantics_topic"),
                 "writes": 0, "reads": 0, "locations": {}, "reasons": Counter(),
@@ -139,6 +148,7 @@ def _collapse_unlocated_methods(rows: list[dict[str, Any]], *, cap: int) -> dict
         reason = g["reasons"].most_common(1)[0][0] if g["reasons"] else None
         out.append({
             "class_fqn": g["class_fqn"], "method": g["method"],
+            "entry_ref": g["entry_ref"],
             "plugin_simple": g["plugin_simple"], "plugin_type": g["plugin_type"],
             "plugin_form_label": g["plugin_form_label"], "semantics_topic": g["semantics_topic"],
             "null_reason": reason,
@@ -188,6 +198,11 @@ def _enrich_rows(rows: list[dict[str, Any]], plugin_home: dict[str, list]) -> No
     """给 field_access 行补派生字段（插件简名/跨类/所属单据/跨单据），供 _fmt_access 复用。"""
     for r in rows:
         r["path"] = json.loads(r["path"]) if r["path"] else []
+        # 正式 KB 从 schema v20 起直接持久化 access_method；具名 INSERT 的测试/兼容素材可能
+        # 留空，仍可从分析期 path 的最后一段无损回落（跨类段形如 Simple.method）。
+        if not r.get("access_method"):
+            tail = r["path"][-1] if r["path"] else r.get("event_method")
+            r["access_method"] = tail.rsplit(".", 1)[-1] if tail else None
         r["plugin_simple"] = (r["plugin_fqn"] or "").rsplit(".", 1)[-1]
         r["access_simple"] = (r["access_class"] or "").rsplit(".", 1)[-1]
         r["cross_class"] = bool(r["access_class"]) and r["access_class"] != r["plugin_fqn"]
@@ -199,6 +214,52 @@ def _enrich_rows(rows: list[dict[str, Any]], plugin_home: dict[str, list]) -> No
             all(h["form_key"] != r["form_key"] for h in homes)
         # 模式 B：事件方法 → 苍穹语义文档主题，焊进返回值，提示段二「判触发时机/入库先查语义，勿臆断」。
         r["semantics_topic"] = hints.event_topic(r.get("event_method"), r.get("plugin_type"))
+
+
+def _build_entry_catalog(conn, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按物理方法去重构建入口链目录，并给每条 field_access 行写入短 `entry_ref`。
+
+    目录而非逐行内联是字段 trace 的体积闸门：同一个 helper 内 N 个读写点只保存一份链。
+    已由正向事件扫描确认的 (plugin_fqn,event_method) 仅用于把对应入口排前，不额外复制链。
+    """
+    confirmed = {(r["plugin_fqn"], r["method_name"]) for r in conn.execute(
+        "SELECT plugin_fqn,method_name FROM plugin_method WHERE event_kind<>'helper'")}
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in rows:
+        cls = r.get("access_class") or r.get("plugin_fqn")
+        method = r.get("access_method") or r.get("event_method")
+        if not cls or not method:
+            r["entry_ref"] = None
+            continue
+        key = (cls, method)
+        g = grouped.setdefault(key, {"rows": [], "preferred": set(), "accesses": set()})
+        g["rows"].append(r)
+        g["accesses"].add(r.get("access"))
+        origin = (r.get("plugin_fqn"), r.get("event_method"))
+        if origin in confirmed:
+            g["preferred"].add(origin)
+
+    catalog: list[dict[str, Any]] = []
+    for idx, ((cls, method), g) in enumerate(sorted(grouped.items()), 1):
+        ref = f"ec{idx}"
+        for r in g["rows"]:
+            r["entry_ref"] = ref
+        catalog.append({
+            "ref": ref,
+            "access_class": cls,
+            "access_method": method,
+            "accesses": sorted(a for a in g["accesses"] if a),
+            "entry_chains": entry_chain.entry_chains(
+                conn, cls, method, preferred_entries=g["preferred"]),
+        })
+    return catalog
+
+
+def _rich_entry_catalog(catalog: list[dict[str, Any]]) -> dict[str, Any]:
+    items = [{k: v for k, v in item.items() if k != "accesses"}
+             for item in catalog[:_CAP_ENTRY_CHAINS]]
+    return {"total": len(catalog), "items": items,
+            "capped": max(0, len(catalog) - len(items))}
 
 
 # note 里点名的操作坐标条数上限（提示语要短；全量坐标从 bill 的每操作计数即可枚举）。
@@ -478,6 +539,7 @@ def _collect_materials(
                       if r["form_key"] == form_key
                       or (r["form_key"] is None and r["plugin_fqn"] in home_on_form)]
     dyn_scoped.sort(key=lambda r: (r["key_resolution"], r["plugin_fqn"] or "", r["line"]))
+    entry_catalog = _build_entry_catalog(conn, all_rows + dyn_scoped)
     # 折叠成「该读方法」清单——防大模型上下文爆炸：同方法写 N 个钉不出 key 的字段只读一次。
     # 先按 _BIG_CAP 折出**完整**方法清单（分页要据此翻到第 11 条之后），共享 dict 仍只展示前 10。
     wl_full = dynamic_writes.build_method_worklist(dyn_scoped, cap=_BIG_CAP)
@@ -559,6 +621,7 @@ def _collect_materials(
         "coarse": coarse,              # 已设界的粗扫盲点 dict（两投影共用）
         "dynamic_writers": dynamic_writers,  # 已折叠的动态写入候选 dict（两投影共用，methods 仅前 10）
         "dynamic_writers_full": dyn_full_methods,  # 完整折叠方法清单（仅 trace_compact 分页用）
+        "entry_catalog": entry_catalog,  # 按物理方法去重；各访问节点只持 entry_ref
         "java_available": java.get("available", True),
         "note": note,
     }
@@ -588,6 +651,7 @@ def field_trace(
         "precise": m["precise"],
         "occurrences": m["occurrences"],
         "groups": m["group_list"],
+        "entry_chains": _rich_entry_catalog(m["entry_catalog"]),
         # possible 投影+cap；unlocated 折叠成「反推来源单据」工作单（真实总数在 summary.possible / summary.unlocated）。
         "possible": [_slim_row(r) for r in m["possible"][:_CAP_POSSIBLE]],   # 可能命中（层级/分录存疑）
         "unlocated": _collapse_unlocated_methods(m["unlocated"], cap=_CAP_UNLOCATED_METHODS),  # 来源未定位（form_key 为空）→ 反推来源工作单
@@ -612,6 +676,7 @@ _COMPACT_CAP_GROUPS = 16      # 坐标组（单据·层级·分录）节点上�
 _COMPACT_CAP_OCC = 20         # occurrences（元数据定义坐标）上限
 _COMPACT_CAP_DYN = 10         # dynamic_writers 该读方法清单上限
 _COMPACT_CAP_COARSE = 20      # coarse.locations 粗扫盲点上限
+_COMPACT_CAP_ENTRY = 12       # 初始页入口方法目录项；其余用 entry_chains cursor 取回
 _BIG_CAP = 10 ** 9            # "不裁剪"哨兵（折叠出完整清单供分页 slice，再按预算逐条装入）
 _COMPACT_BUDGET = 31000       # 序列化预算（host 32768 硬上限留 ~1768 字节裕量）。**必须按 host 真实序列化方式度量**：
                               # MCP 底层 `mcp/server/lowlevel/server.py` 用 `json.dumps(result, indent=2)`
@@ -648,7 +713,9 @@ def _merge_writers_by_class(rows: list[dict[str, Any]], *, cap_classes: int, cap
                 "sites": [],
             }
         g["sites"].append({
+            "access_method": r.get("access_method"),
             "event_method": r.get("event_method"),
+            "entry_ref": r.get("entry_ref"),
             "line": r.get("line"),
             "via": r.get("via"),
             "persists": r.get("persists"),
@@ -673,7 +740,7 @@ def _merge_writers_by_class(rows: list[dict[str, Any]], *, cap_classes: int, cap
 
 def _merge_readers_by_class(rows: list[dict[str, Any]], *, cap_classes: int, cap_methods: int
                             ) -> dict[str, Any]:
-    """读行按**类**(`access_class` 回落 `plugin_fqn`)合并，类内再按事件方法去重计数。读取价值最低，
+    """读行按**类**(`access_class` 回落 `plugin_fqn`)合并，类内再按物理方法去重计数。读取价值最低，
     塌成 `{class_fqn, methods:[{method,count}], total}` 即可——要弄清谁读了它，去那几个方法读源码。
     类按读取数降序、cap_classes 截断；类内 methods cap_methods 截断。"""
     groups: dict[str | None, dict[str, Any]] = {}
@@ -685,11 +752,12 @@ def _merge_readers_by_class(rows: list[dict[str, Any]], *, cap_classes: int, cap
                 "class_fqn": cls, "plugin_type": r.get("plugin_type"),
                 "plugin_form_label": r.get("plugin_form_label"), "_methods": {},
             }
-        mk = r.get("event_method")
+        mk = r.get("access_method") or r.get("event_method")
         mrec = g["_methods"].get(mk)
         if mrec is None:
             mrec = g["_methods"][mk] = {
                 "method": mk, "count": 0,
+                "entry_ref": r.get("entry_ref"),
                 "semantics_topic": r.get("semantics_topic"),
             }
         mrec["count"] += 1
@@ -742,10 +810,37 @@ def _cap_coarse(coarse: dict[str, Any], cap: int) -> dict[str, Any]:
     return {**coarse, "locations": locs[:cap], "locations_capped": max(0, len(locs) - cap)}
 
 
+def _compact_entry_items(m: dict[str, Any], access: str | None) -> list[dict[str, Any]]:
+    """当前访问侧的入口目录完整有序表；链本体只在这里出现，访问节点仅持 entry_ref。"""
+    want = "read" if access == "read" else "write"
+    out: list[dict[str, Any]] = []
+    for item in m.get("entry_catalog") or []:
+        if want not in item.get("accesses", []):
+            continue
+        out.append({
+            "ref": item["ref"],
+            "access_class": item["access_class"],
+            "access_method": item["access_method"],
+            **entry_chain.slim_chains(item["entry_chains"], max_chains=2, max_hops=8),
+        })
+    return out
+
+
+def _compact_entry_catalog(m: dict[str, Any], access: str | None, cap: int) -> dict[str, Any]:
+    items = _compact_entry_items(m, access)
+    shown = items[:cap]
+    out: dict[str, Any] = {
+        "total": len(items), "items": shown, "capped": max(0, len(items) - len(shown)),
+    }
+    if len(shown) < len(items):
+        out["next_cursor"] = f"entry_chains@{len(shown)}"
+    return out
+
+
 def _build_compact(
     m: dict[str, Any], access: str | None, *,
     cap_classes: int, cap_sites: int, cap_methods: int, cap_overview: int,
-    cap_groups: int, cap_occ: int, cap_dyn: int, cap_coarse: int,
+    cap_groups: int, cap_occ: int, cap_dyn: int, cap_coarse: int, cap_entry: int,
 ) -> dict[str, Any]:
     """从原始材料组装紧凑 dict（一档 cap 下的一次构建，governor 会按字节预算反复调用收紧）。"""
     want_write = access in (None, "write")
@@ -806,7 +901,9 @@ def _build_compact(
         "occurrences": occ[:cap_occ], "occurrences_total": len(occ),
         "summary": dict(m["summary"]),
         "groups": groups_out, "groups_total": len(m["group_list"]), "groups_capped": groups_capped,
+        "entry_chains": _compact_entry_catalog(m, access, cap_entry),
     }
+    capped_hit = capped_hit or bool(res["entry_chains"]["capped"])
     # possible：按 access 过滤后按类合并（写侧用写合并，读侧用读合并）。
     # unlocated：折叠成「反推来源单据」工作单（含 plugin_home 线索），比按类合并更省字节。
     poss, unloc = _access_rows(m["possible"], access), _access_rows(m["unlocated"], access)
@@ -880,7 +977,7 @@ def _pending_from_flat_cursors(res: dict[str, Any], suffix: str = "_next_cursor"
 def _collect_pending_cursors(res: dict[str, Any]) -> list[dict[str, Any]]:
     """扫结果里所有仍非 null 的 `next_cursor`，汇总成待翻页清单（供顶层 `pagination` 门用）。"""
     pending: list[dict[str, Any]] = []
-    for key in ("unlocated", "dynamic_writers", "possible", "coarse"):
+    for key in ("entry_chains", "unlocated", "dynamic_writers", "possible", "coarse"):
         node = res.get(key)
         if isinstance(node, dict) and node.get("next_cursor"):
             pending.append({"section": key, "next_cursor": node["next_cursor"]})
@@ -897,11 +994,11 @@ def _collect_pending_cursors(res: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 # ── 游标分页（红线 #4 升级：被 cap 的 worklist 不只报计数，给 next_cursor 让模型逐页取回全部）──
-# 32KB 硬上限下单次装不全的段（unlocated/dynamic_writers/readers/writers/possible/coarse/occurrences），
+# 32KB 硬上限下单次装不全的段（entry_chains/unlocated/dynamic_writers/readers/writers/possible/coarse/occurrences），
 # overview 里只展示一屏 + 带 `next_cursor`（形如 "unlocated@5"）；模型用 cursor= 该值再调一次，本工具
 # 返回该段从 offset 起、预算内能装的下一页 items + 新的 next_cursor，直至 next_cursor=None（取完）。
 # 这样"被截内容"对消费方**可达**，而非仅一个计数（用户 2026-06-28 指出"只通知截断=仍丢信息"）。
-_PAGE_SECTIONS = ("writers", "readers", "unlocated", "dynamic_writers",
+_PAGE_SECTIONS = ("writers", "readers", "entry_chains", "unlocated", "dynamic_writers",
                   "possible", "coarse", "occurrences")
 
 
@@ -910,6 +1007,9 @@ def _annotate_next_cursors(res: dict[str, Any], precise: bool) -> None:
     u = res.get("unlocated")
     if isinstance(u, dict) and u.get("capped"):
         u["next_cursor"] = f"unlocated@{len(u.get('methods') or [])}"
+    ec = res.get("entry_chains")
+    if isinstance(ec, dict) and ec.get("capped") and not ec.get("next_cursor"):
+        ec["next_cursor"] = f"entry_chains@{len(ec.get('items') or [])}"
     dw = res.get("dynamic_writers")
     if isinstance(dw, dict):
         shown = len(dw.get("methods") or [])
@@ -969,6 +1069,9 @@ def _section_full(m: dict[str, Any], access: str | None, section: str
         return d["methods"], {"total_rows": d["total"], "writes": d.get("writes"),
                               "reads": d.get("reads"), "by_reason": d.get("by_reason"),
                               "reason_labels": d.get("reason_labels")}
+    if section == "entry_chains":
+        items = _compact_entry_items(m, access)
+        return items, {"total_methods": len(items)}
     if section == "dynamic_writers":
         dw = m["dynamic_writers"]
         return list(m.get("dynamic_writers_full") or []), {
@@ -1023,10 +1126,89 @@ def _page_section(m: dict[str, Any], access: str | None, section: str, offset: i
     page: list[dict[str, Any]] = []
     for it in items[offset:]:
         trial = page + [it]
-        if page and _wire_len(_wrap(trial, offset + len(trial))) > budget:
-            break          # 至少装一条（单条即便超 budget 也给，仍远小于 32KB）
+        if _wire_len(_wrap(trial, offset + len(trial))) > budget:
+            if page:
+                break
+            # 单个病态条目也不能击穿 host 硬限：逐级裁长字符串并显式标记。
+            fitted = None
+            for limit in (512, 256, 128, 64):
+                candidate = _clip_payload(it, limit)
+                if isinstance(candidate, dict):
+                    candidate["text_truncated"] = True
+                if _wire_len(_wrap([candidate], offset + 1)) <= budget:
+                    fitted = candidate
+                    break
+            if fitted is None:
+                fitted = {"text_truncated": True,
+                          "note": "单条记录异常大，已省略正文；请按源码锚点人工核对"}
+            page = [fitted]
+            break
         page = trial
     return _wrap(page, offset + len(page))
+
+
+def _clip_payload(value: Any, limit: int) -> Any:
+    """递归裁长展示字符串；仅作单条异常大时的最终 wire 安全阀。"""
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:max(0, limit - 1)] + "…"
+    if isinstance(value, list):
+        return [_clip_payload(v, limit) for v in value]
+    if isinstance(value, dict):
+        return {k: _clip_payload(v, limit) for k, v in value.items()}
+    return value
+
+
+def _minimal_compact(m: dict[str, Any], access: str | None) -> dict[str, Any]:
+    """所有正常 cap 档仍超预算时的最小、自描述响应；数据通过 cursor/收窄仍可达。"""
+    pending: list[dict[str, Any]] = []
+    if _compact_entry_items(m, access):
+        pending.append({"section": "entry_chains", "next_cursor": "entry_chains@0"})
+    groups = m.get("group_list") or []
+    if len(groups) == 1:
+        sec = "readers" if access == "read" else "writers"
+        if groups[0].get(sec):
+            pending.append({"section": sec, "next_cursor": f"{sec}@0"})
+    elif groups:
+        pending.append({"section": "groups", "next_cursor": None,
+                        "hint": "坐标组过多，请用 form/entry/level 收窄后获取读写明细"})
+    for sec, rows in (("possible", m.get("possible")), ("unlocated", m.get("unlocated"))):
+        if _access_rows(rows or [], access):
+            pending.append({"section": sec, "next_cursor": f"{sec}@0"})
+    if access != "read" and m.get("dynamic_writers_full"):
+        pending.append({"section": "dynamic_writers", "next_cursor": "dynamic_writers@0"})
+    if (m.get("coarse") or {}).get("locations"):
+        pending.append({"section": "coarse", "next_cursor": "coarse@0"})
+    if m.get("occurrences"):
+        pending.append({"section": "occurrences", "next_cursor": "occurrences@0"})
+    return {
+        "pagination": pagination_gate(pending),
+        "field_key": m["field_key"], "field_name": m["field_name"],
+        "filter": m["filter"], "precise": m["precise"], "access": access or "all",
+        "summary": m["summary"],
+        "note": "返回体超过预算，已降为最小摘要；按 pagination.pending 逐段取回。",
+    }
+
+
+def _compact_clarification(m: dict[str, Any], budget: int) -> dict[str, Any]:
+    """裸字段跨单据歧义也受 wire 预算约束；候选过多时要求先 resolve/narrow。"""
+    occurrences = m.get("occurrences") or []
+    for cap in (20, 10, 5, 1):
+        shown = occurrences[:cap]
+        pending = []
+        if len(shown) < len(occurrences):
+            pending.append({"section": "clarification", "next_cursor": None,
+                            "hint": "候选过多，请先 resolve_fields 或指定 form_key"})
+        res = {
+            "pagination": pagination_gate(pending),
+            "field_key": m["field_key"], "status": "need_clarification",
+            "filter": m.get("filter") or {},
+            "occurrences": shown, "occurrences_total": len(occurrences),
+            "occurrences_capped": max(0, len(occurrences) - len(shown)),
+            "note": m.get("note"),
+        }
+        if _wire_len(res) <= budget:
+            return res
+    return _clip_payload(res, 256)
 
 
 def trace_compact(
@@ -1047,33 +1229,43 @@ def trace_compact(
         access = None
     m = _collect_materials(conn, field_key, form_key=form_key, entry_key=entry_key, level=level)
     if m.get("status") == "need_clarification":
-        return m
+        return _compact_clarification(m, budget)
     if cursor:
         section, offset = _parse_cursor(cursor)
         return _page_section(m, access, section, offset, budget)
-    # cap 阶梯：从宽到窄，命中预算即返；最后一档兜底（极端情况返回最小档）。
-    # 列：(类, 单类写入点, 单类读取方法, readers_overview, 坐标组, occurrences, dynamic_writers, coarse)。
+    # cap 阶梯：从宽到窄，命中预算即返；最后仍超时降为最小摘要（绝不返回超预算 dict）。
+    # 列：(类, 单类写入点, 单类读取方法, readers_overview, 坐标组, occurrences,
+    #       dynamic_writers, coarse, entry_chains)。
     # 关键：除 per-class cap 外，**坐标组/occ/dyn/coarse 也逐档收紧**——否则裸字段「全量调」
     # 命中十几张单据时，per-class cap 再小也压不下整组体积，governor 无法收敛（旧版的洞）。
     ladder = [
         (_COMPACT_CAP_CLASSES, _COMPACT_CAP_SITES, _COMPACT_CAP_METHODS, _COMPACT_CAP_OVERVIEW,
-         _COMPACT_CAP_GROUPS, _COMPACT_CAP_OCC, _COMPACT_CAP_DYN, _COMPACT_CAP_COARSE),
-        (40, 8, 8, 60, 10, 16, 8, 16),
-        (25, 5, 5, 40, 6, 12, 6, 10),
-        (20, 4, 4, 32, 5, 10, 6, 8),   # 中间档：indent 让步长变大，多一档把预算用满、少裁次要工作单
-        (15, 3, 3, 25, 4, 8, 4, 6),
-        (8, 2, 2, 15, 2, 5, 2, 3),
-        (5, 1, 1, 8, 1, 3, 1, 2),    # 硬底：极端情况也能塌到单组单点
+         _COMPACT_CAP_GROUPS, _COMPACT_CAP_OCC, _COMPACT_CAP_DYN, _COMPACT_CAP_COARSE,
+         _COMPACT_CAP_ENTRY),
+        (40, 8, 8, 60, 10, 16, 8, 16, 10),
+        (25, 5, 5, 40, 6, 12, 6, 10, 8),
+        (20, 4, 4, 32, 5, 10, 6, 8, 6),
+        (15, 3, 3, 25, 4, 8, 4, 6, 4),
+        (8, 2, 2, 15, 2, 5, 2, 3, 2),
+        (5, 1, 1, 8, 1, 3, 1, 2, 1),
     ]
     res: dict[str, Any] = {}
-    for cc, cs, cm, co, cg, coc, cd, ccoarse in ladder:
+    for cc, cs, cm, co, cg, coc, cd, ccoarse, ce in ladder:
         res = _build_compact(m, access, cap_classes=cc, cap_sites=cs, cap_methods=cm,
                              cap_overview=co, cap_groups=cg, cap_occ=coc, cap_dyn=cd,
-                             cap_coarse=ccoarse)
+                             cap_coarse=ccoarse, cap_entry=ce)
         # 按 host 真实序列化方式（json.dumps indent=2, ensure_ascii=True）度量——见 _wire_len。
         if _wire_len(res) <= budget:
             return res
-    return res
+    minimal = _minimal_compact(m, access)
+    if _wire_len(minimal) <= budget:
+        return minimal
+    # 极端长 key/name 的最后安全阀；正常业务路径不会触发。
+    clipped = _clip_payload(minimal, 256)
+    return clipped if _wire_len(clipped) <= budget else {
+        "pagination": {"complete": False, "pending": []},
+        "error": "字段 trace 摘要仍超过 wire 预算，请使用更短的精确字段坐标重试。",
+    }
 
 
 def parse_locator(text: str) -> tuple[str, str | None, str | None, str | None]:
@@ -1190,7 +1382,7 @@ def _coord_label(form_key, form_name, level, entry_key, entry_name) -> str:
 _PERSIST_LABEL = {"yes": "✅落库", "no": "—内存", "unknown": "❓存疑", "na": ""}
 
 
-def _fmt_access(r: dict[str, Any]) -> list[str]:
+def _fmt_access(r: dict[str, Any], entry_map: dict[str, dict[str, Any]] | None = None) -> list[str]:
     lines: list[str] = []
     persist = _PERSIST_LABEL.get(r["persists"], r["persists"] or "")
     res_flag = "" if r["key_resolution"] in ("literal", "constant") else f" [{r['key_resolution']}]"
@@ -1209,6 +1401,9 @@ def _fmt_access(r: dict[str, Any]) -> list[str]:
     path = r.get("path") or []   # 精简行单元素 path 已被剔除，按缺省处理
     if len(path) > 1:
         lines.append(f"        调用链: {' → '.join(path)}")
+    if entry_map and r.get("entry_ref") in entry_map:
+        lines.extend(entry_chain.render_lines(
+            entry_map[r["entry_ref"]].get("entry_chains"), prefix="        ↳ ", max_chains=2))
     if r["persist_reason"]:
         lines.append(f"        落库依据: {r['persist_reason']}")
     return lines
@@ -1244,6 +1439,8 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
         lines.append(f"⚠ {ft.get('note') or '该字段在多个单据都有定义，请指定单据后再查。'}")
         return "\n".join(lines)
 
+    entry_map = {item["ref"]: item for item in (ft.get("entry_chains") or {}).get("items", [])}
+
     s = ft["summary"]
     lines.append("")
     lines.append(
@@ -1275,7 +1472,7 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
         if g["writers"]:
             lines.append("  【写】（落库 > 存疑 > 内存）")
             for r in g["writers"][:max_list]:
-                lines.extend(_fmt_access(r))
+                lines.extend(_fmt_access(r, entry_map))
         rd = g.get("readers") or {}
         if rd.get("total"):
             lines.append(f"  【读】（按方法去重，共 {rd['total']} 处 → {len(rd['methods'])} 个方法）")
@@ -1288,6 +1485,10 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
                     lines.append(f"        位于 {' / '.join(m['locations'])}")
                 if m.get("semantics_topic"):
                     lines.append(f"        ⚑ 判触发时机/是否入库前先 cosmic_semantics('{m['semantics_topic']}')")
+                if m.get("entry_ref") in entry_map:
+                    lines.extend(entry_chain.render_lines(
+                        entry_map[m["entry_ref"]].get("entry_chains"),
+                        prefix="        ↳ ", max_chains=2))
             if rd.get("capped"):
                 lines.append(f"    …另有 {rd['capped']} 个读方法未列出（用 单据.字段 收窄、或 --json）")
 
@@ -1303,7 +1504,7 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
         for r in possible[:max_list]:
             loc = f"{_LEVEL_LABEL.get(r['level'], r['level'])}" + (f"·{r['entry_key']}" if r["entry_key"] else "")
             lines.append(f"  [{loc}]")
-            lines.extend(_fmt_access(r))
+            lines.extend(_fmt_access(r, entry_map))
 
     # 未定位单据：确实读写该字段、但来源单据未钉出 → 折叠成「反推来源单据」工作单（仿动态写候选）。
     unloc = ft.get("unlocated") or {}
@@ -1332,6 +1533,10 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
                 lines.append(f"        位于 {' / '.join(m['locations'])}")
             if m.get("semantics_topic"):
                 lines.append(f"        ⚑ 判触发时机/是否入库前先 cosmic_semantics('{m['semantics_topic']}')")
+            if m.get("entry_ref") in entry_map:
+                lines.extend(entry_chain.render_lines(
+                    entry_map[m["entry_ref"]].get("entry_chains"),
+                    prefix="        ↳ ", max_chains=2))
         if unloc.get("capped"):
             lines.append(f"    …另有 {unloc['capped']} 个方法未列出（用 单据.字段 收窄、或 --json）")
         lines.append("    注：plugin_form_label 是插件注册单据，只是来源线索非确诊；来源单据请读源码确认，勿臆造。")
@@ -1377,6 +1582,10 @@ def render_field_trace(ft: dict[str, Any], *, max_list: int = 50) -> str:
             lines.append(f"  · {cls}.{m['method']}  ({m['count']} 处/{m['cause_label']})")
             for w in m["writes_in"]:
                 lines.append(f"        写入位于 {w['class']}  {w['anchor']}")
+            if m.get("entry_ref") in entry_map:
+                lines.extend(entry_chain.render_lines(
+                    entry_map[m["entry_ref"]].get("entry_chains"),
+                    prefix="        ↳ ", max_chains=2))
         if dyn.get("capped"):
             lines.append(f"    …另有 {dyn['capped']} 个方法未列出（用 dynwrites --form 过滤、或 trace --json）")
         lines.append("    注：这些写入静态钉不出具体字段，是否含本字段请让大模型按上面源码锚点读源码判定。")

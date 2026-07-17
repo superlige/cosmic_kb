@@ -115,7 +115,7 @@ class MetaEntity:
 
 @dataclass
 class MetaOperation:
-    """一个操作（按钮行为）。继承覆盖型只带 oid，需经模板回填出 key/name。"""
+    """一个操作（按钮行为）。继承覆盖型与未显式写出的预制操作由模板回填。"""
 
     key: str | None               # 操作标识（save/submit/...）；解不出记 None
     name: str | None              # 中文名

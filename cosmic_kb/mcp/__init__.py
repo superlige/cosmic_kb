@@ -1,7 +1,7 @@
 """段二 AI 理解层 · MCP 接入（把段一确定性取证暴露成 MCP 工具）。
 
 定位：本子包是「大模型接入」的薄适配层，不做任何分析逻辑——只把 `cosmic_kb` 已有的
-取证命令（`trace/bill/resolve_fields/cosmic_semantics`）包成 MCP（Model Context Protocol）
+取证命令（`trace/bill/resolve_fields/callers/cosmic_semantics`）包成 MCP（Model Context Protocol）
 工具，让 LLM 宿主挂上 `cosmic-kb-understand` Skill 后，自己调工具取证、自己做自然语言推理。
 
 为什么这么设计（对齐 CLAUDE.md 红线 #6「两段式解耦，KB 是契约」）：

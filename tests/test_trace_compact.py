@@ -30,18 +30,18 @@ from _synthkb import make_kb
 # field_access 列序（与 _synthkb 同款，少数列省略由默认填充）。
 _FA_INSERT = (
     "INSERT INTO field_access(form_key,field_key,level,entry_key,plugin_fqn,plugin_type,"
-    "access_class,event_method,event_phase,access,persists,persist_reason,via,line,path,"
+    "access_class,access_method,event_method,event_phase,access,persists,persist_reason,via,line,path,"
     "key_resolution,confidence,source_relpath,evidence) "
-    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 
 
 def _row(field_key, *, plugin_fqn, access_class=None, access="read", method="propertyChanged",
-         line=1, persists="na", form_key="cqkd_assetcard", level="header", entry_key=None,
+         access_method=None, line=1, persists="na", form_key="cqkd_assetcard", level="header", entry_key=None,
          via="model.getValue", key_resolution="literal"):
     return (
         form_key, field_key, level, entry_key, plugin_fqn, "form",
-        access_class or plugin_fqn, method, "load", access, persists, "", via, line,
+        access_class or plugin_fqn, access_method or method, method, "load", access, persists, "", via, line,
         json.dumps([method]), key_resolution, 0.9, "x/Y.java", "",
     )
 
@@ -522,3 +522,84 @@ def test_pagination_unknown_section_errors():
          "coarse": {}, "dynamic_writers": {}, "dynamic_writers_full": []}
     out = field_trace._page_section(m, None, "nope", 0, 1000)
     assert "error" in out["page"]
+
+
+# ── 字段访问 → 插件事件入口目录（按物理方法去重，明细仅持短引用）──────────────
+
+
+def test_entry_catalog_deduplicates_repeated_write_sites(tmp_path: Path):
+    """同一 service 方法内大量写入点只生成一份入口链；每个 site 复用同一 entry_ref。"""
+    db = make_kb(tmp_path)
+    _seed(db, [
+        _row("cqkd_collateralstatus", plugin_fqn="cqspb.assets.CollateralOp",
+             access_class="cqspb.assets.CollateralService", access_method="update",
+             method="beforeExecuteOperationTransaction", access="write", persists="yes",
+             line=100 + i, via="do.set")
+        for i in range(80)
+    ])
+    conn = store.open_kb(db)
+    try:
+        out = field_trace.trace_compact(
+            conn, "cqkd_collateralstatus", form_key="cqkd_assetcard", access="write")
+        assert field_trace._wire_len(out) <= field_trace._COMPACT_BUDGET
+        catalog = out["entry_chains"]
+        assert catalog["total"] == 1
+        item = catalog["items"][0]
+        assert (item["access_class"], item["access_method"]) == (
+            "cqspb.assets.CollateralService", "update")
+        assert item["status"] == "reached"
+        assert item["chains"][0]["entry"]["event"] == "beforeExecuteOperationTransaction"
+        refs = {site["entry_ref"] for cls in out["groups"][0]["writers"]["classes"]
+                for site in cls["sites"]}
+        assert refs == {item["ref"]}
+    finally:
+        conn.close()
+
+
+def test_entry_catalog_cursor_pages_all_unique_methods(tmp_path: Path):
+    """唯一物理方法很多时目录独立分页；overview 和每一页都不得突破 31KB。"""
+    db = make_kb(tmp_path)
+    _seed(db, [
+        _row("cqkd_collateralstatus", plugin_fqn=f"p.Plugin{i}",
+             access_class=f"p.Service{i}", access_method=f"write{i}", method=f"event{i}",
+             access="write", persists="unknown", line=i)
+        for i in range(30)
+    ])
+    conn = store.open_kb(db)
+    try:
+        out = field_trace.trace_compact(
+            conn, "cqkd_collateralstatus", form_key="cqkd_assetcard", access="write")
+        assert field_trace._wire_len(out) <= field_trace._COMPACT_BUDGET
+        section = out["entry_chains"]
+        assert section["total"] == 31   # 30 个新增方法 + synth KB 原有 update
+        refs = [item["ref"] for item in section["items"]]
+        cursor = section.get("next_cursor")
+        while cursor:
+            page = field_trace.trace_compact(
+                conn, "cqkd_collateralstatus", form_key="cqkd_assetcard",
+                access="write", cursor=cursor)
+            assert field_trace._wire_len(page) <= field_trace._COMPACT_BUDGET
+            refs.extend(item["ref"] for item in page["page"]["items"])
+            cursor = page["page"]["next_cursor"]
+        assert len(refs) == section["total"] == len(set(refs))
+    finally:
+        conn.close()
+
+
+def test_read_detail_uses_entry_ref_and_catalog(tmp_path: Path):
+    """读取侧仅在 access=read 明细中返回入口引用；默认 reader overview 保持轻量。"""
+    db = make_kb(tmp_path)
+    conn = store.open_kb(db)
+    try:
+        default = field_trace.trace_compact(
+            conn, "cqkd_amount", form_key="cqkd_assetcard")
+        assert "readers_overview" in default["groups"][0]
+        assert default["entry_chains"]["total"] == 0
+
+        detail = field_trace.trace_compact(
+            conn, "cqkd_amount", form_key="cqkd_assetcard", access="read")
+        method = detail["groups"][0]["readers"]["classes"][0]["methods"][0]
+        assert method["entry_ref"] == detail["entry_chains"]["items"][0]["ref"]
+        assert detail["entry_chains"]["items"][0]["status"] == "self_entry"
+    finally:
+        conn.close()

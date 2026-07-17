@@ -1,7 +1,7 @@
 """对话式安装 Bootstrap（D2 MCP 注册/校验 + D3 编排器）验收。
 
 覆盖计划 §9 验收口径里本仓可单测的部分：安装清单不含口令、plan 只读无副作用、apply 幂等 +
-断点续跑、四工具 tools/list 校验、同名冲突先备份再替换、路径转义（绝对路径写入）。
+断点续跑、五工具 tools/list 校验、同名冲突先备份再替换、路径转义（绝对路径写入）。
 """
 
 from __future__ import annotations
@@ -187,6 +187,28 @@ def test_apply_runs_steps_in_fixed_order(tmp_path, _stub_steps):
     assert rc == 0
     assert _stub_steps == list(orchestrator.STEP_ORDER)
     assert payload["summary"]["ok"] is True
+
+
+def test_build_step_forwards_symbol_options(tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.setattr("cosmic_kb.graph.store.kb_exists", lambda _p: False)
+
+    def fake_build(ns, db):
+        captured.update({"classpath_dir": ns.classpath_dir, "no_symbols": ns.no_symbols,
+                         "db": db})
+        return {"form": 1}, 0
+
+    monkeypatch.setattr("cosmic_kb.cli.main._build_kb", fake_build)
+    kb = tmp_path / "cosmic_kb.db"
+    result = orchestrator._step_build_kb(
+        tmp_path, kb,
+        {"source_root": str(tmp_path), "classpath_dirs": ["a", "b"],
+         "no_symbols": True},
+        rebuild=True, dry_run=False,
+    )
+    assert result["status"] == "done"
+    assert captured == {"classpath_dir": ["a", "b"], "no_symbols": True,
+                        "db": str(kb)}
 
 
 def test_apply_skips_verify_when_build_failed(tmp_path, monkeypatch, _stub_steps):

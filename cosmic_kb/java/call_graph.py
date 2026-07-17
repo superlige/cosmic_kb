@@ -46,7 +46,7 @@ def build_call_graph(type_decl: "TypeDecl") -> CallGraph:
     for name, m in methods.items():
         own: set[str] = set()
         ext = 0
-        for inv in ax.iter_invocations(m.body):
+        for inv in ax.iter_invocations(m.body, include_refs=True):
             recv = inv.object_text.strip()
             if recv in ("", "this") and inv.name in methods and inv.name != name:
                 own.add(inv.name)            # 同类方法调用（this.x() / x()）

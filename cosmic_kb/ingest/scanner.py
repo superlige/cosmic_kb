@@ -24,7 +24,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import TYPE_CHECKING, Iterable, Iterator
+
+if TYPE_CHECKING:
+    from ..progress import Progress
 
 # ── 默认排除规则 ────────────────────────────────────────────────
 # 目录名（任意层级命中即整树跳过）。编译产物 / VCS / IDE / 依赖缓存。
@@ -223,8 +226,13 @@ def scan(
     include_suffixes: Iterable[str] = DEFAULT_INCLUDE_SUFFIXES,
     exclude_dirs: Iterable[str] = DEFAULT_EXCLUDE_DIRS,
     follow_symlinks: bool = False,
+    progress: "Progress | None" = None,
 ) -> ScanResult:
-    """完整扫描并物化结果（含被跳过的目录/符号链接记录），便于覆盖率报告。"""
+    """完整扫描并物化结果（含被跳过的目录/符号链接记录），便于覆盖率报告。
+
+    progress：可选进度报告器（见 ``cosmic_kb.progress``）。遍历前无法预知文件总数，
+    只按「已读 N 个文件」打点，渲染限频由报告器自己管。
+    """
     root_path = Path(root).resolve()
     if not root_path.exists():
         raise FileNotFoundError(f"扫描根不存在: {root_path}")
@@ -273,6 +281,8 @@ def scan(
                     error=err,
                 )
             )
+            if progress is not None:
+                progress.tick(len(result.files), None, "个文件")
 
     result.files.sort(key=lambda f: f.relpath)
     return result

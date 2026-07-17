@@ -1,4 +1,4 @@
-"""D2 · MCP 自动注册 + 四工具校验（`docs/设计方案/分发与多agent接入方案.md` §3.6 + §3.2 步骤 5–6）。
+"""D2 · MCP 自动注册 + 五工具校验（`docs/设计方案/分发与多agent接入方案.md` §3.6 + §3.2 步骤 5–6）。
 
 两件事：
 
@@ -8,7 +8,8 @@
    （不依赖 `cosmic_kb-mcp` 是否在 PATH），并显式传当前项目 KB 绝对路径。
 
 2. **校验**（`verify_mcp`）：**仅写配置不算成功**。以子进程按写入的启动命令独立起服务器，完成
-   `initialize` + `tools/list`，断言 `trace`/`bill`/`resolve_fields`/`cosmic_semantics` 四工具在列。
+   `initialize` + `tools/list`，断言 `trace`/`bill`/`resolve_fields`/`callers`/
+   `cosmic_semantics` 五工具在列。
 
 冲突保护：同名 `cosmic_kb` 但配置不同默认停止（`status="conflict"`）；`force=True` 时先备份
 （`.mcp.json.bak-<时间戳>`）再替换。写配置走 installer 的原子写，避免半写坏宿主。
@@ -29,7 +30,7 @@ from ..mcp.server import TOOLS as _MCP_TOOLS
 
 # 固定 server 名（宿主里统一叫这个；同名冲突保护也认它）。
 SERVER_NAME = "cosmic_kb"
-# 段二四个核心取证工具——校验以「这四个都在 tools/list 里」为通过标准。从 server 真源派生，
+# 段二五个核心取证工具——校验以「这些工具都在 tools/list 里」为通过标准。从 server 真源派生，
 # 避免这里与实际注册的工具集漂移。
 REQUIRED_TOOLS: tuple[str, ...] = tuple(_MCP_TOOLS.keys())
 
@@ -199,7 +200,7 @@ def register(
     return payload, (1 if conflicts else 0)
 
 
-# ── 校验：子进程真起服务器，握手确认四工具在列 ───────────────────────────────
+# ── 校验：子进程真起服务器，握手确认五工具在列 ───────────────────────────────
 def _probe_tools(spec: Mapping[str, Any], timeout: float) -> list[str]:
     """按 `spec` 起 MCP 子进程，`initialize` + `tools/list`，返回工具名清单（未装 mcp 抛错）。"""
     import asyncio
@@ -233,7 +234,7 @@ def verify_mcp(
     timeout: float = 30.0,
     probe: Callable[[Mapping[str, Any], float], Sequence[str]] | None = None,
 ) -> dict[str, Any]:
-    """起服务器校验四工具可用。给 `kb_path` 或直接给 `spec`（应与注册写入的一致）。
+    """起服务器校验五工具可用。给 `kb_path` 或直接给 `spec`（应与注册写入的一致）。
 
     返回 `{ok, tools, missing, [error]}`。`ok=True` 仅当四个核心工具全部出现在 `tools/list`。
     `probe` 可注入以便测试（默认真起子进程握手）。

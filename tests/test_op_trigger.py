@@ -236,7 +236,7 @@ def test_pipeline_triggers_into_kb(tmp_path: Path):
 
 _TRIG_COLS = ("caller_class", "caller_method", "line", "source_relpath", "via", "op_key",
               "op_key_resolution", "op_key_confidence", "target_form_key",
-              "target_resolution", "target_confidence", "evidence")
+              "target_resolution", "target_confidence", "evidence", "receiver_source")
 
 
 def _add_triggers(db: Path, rows: list[tuple]) -> None:
@@ -252,7 +252,7 @@ def _add_triggers(db: Path, rows: list[tuple]) -> None:
 def _trig(caller, method, line, *, op_key="audit", op_res="literal", op_conf=1.0,
           target="cqkd_assetcard", tgt_res="literal", tgt_conf=1.0, via="executeOperate"):
     return (caller, method, line, caller.replace(".", "/") + ".java", via,
-            op_key, op_res, op_conf, target, tgt_res, tgt_conf, None)
+            op_key, op_res, op_conf, target, tgt_res, tgt_conf, None, "text")
 
 
 @pytest.fixture()
@@ -396,7 +396,7 @@ def test_operation_trace_locator_paths(trig_kb: Path):
 
 
 def test_operation_trace_op_not_in_metadata(trig_kb: Path):
-    """操作 key 有触发点但不在元数据操作集（平台默认操作等）：照常给证据 + 诚实注明不可考。"""
+    """操作 key 有触发点但不在元数据操作集：直查照常给证据，但不串成其他操作的嫌疑。"""
     _add_triggers(trig_kb, [
         _trig("cqspb.assets.BatchSvc", "push", 10, op_key="push"),
     ])
@@ -406,9 +406,37 @@ def test_operation_trace_op_not_in_metadata(trig_kb: Path):
         assert ot["operation"] == {"key": "push", "in_metadata": False}
         assert [t["caller_class"] for t in ot["triggered_by"]] == ["cqspb.assets.BatchSvc"]
         assert "不在" in ot["note"]
-        # 它同时作为"解出的 key 不在操作集"出现在别的操作坐标的 unresolved_inbound 里。
+        # key 已明确解析为 push，是否存在于元数据操作集都不可能变成 audit。
         ot_audit = op_trace.operation_trace(conn, "cqkd_assetcard.audit")
-        assert any(t["op_key"] == "push" for t in ot_audit["unresolved_inbound"])
+        assert all(t["op_key"] != "push" for t in ot_audit["unresolved_inbound"])
+    finally:
+        conn.close()
+
+
+def test_operation_trace_refresh_is_not_updatetax_suspect(trig_kb: Path):
+    """真实回归：invokeOperation("refresh") 已解析成不同 key，不得成为 updatetax 嫌疑。"""
+    conn = sqlite3.connect(str(trig_kb))
+    try:
+        conn.execute(
+            "INSERT INTO operation(form_key,key,name,operation_type,resolved_from,"
+            "has_operation_plugin) VALUES(?,?,?,?,?,?)",
+            ("cqkd_assetcard", "updatetax", "更新税额", "donothing", "self", 1),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _add_triggers(trig_kb, [
+        _trig("cqspb.assets.ContractFormPlugin", "afterDoOperation", 339,
+              op_key="refresh", target="cqkd_assetcard", tgt_res="binding",
+              tgt_conf=0.85, via="invokeOperation"),
+    ])
+
+    conn = store.open_kb(trig_kb)
+    try:
+        ot = op_trace.operation_trace(conn, "cqkd_assetcard.updatetax")
+        assert all(t["op_key"] != "refresh" for t in ot["unresolved_inbound"])
+        assert not any(t["caller_class"].endswith("ContractFormPlugin")
+                       for t in ot["unresolved_inbound"])
     finally:
         conn.close()
 
@@ -516,5 +544,151 @@ def test_no_triggers_no_noise(tmp_path: Path):
         cot = op_trace.operation_trace_compact(conn, "cqkd_assetcard.audit")
         assert cot["pagination"]["complete"] is True
         assert "unresolved_inbound" not in cot and "triggers_downstream" not in cot
+    finally:
+        conn.close()
+
+
+# ── 入口回溯（entry_chains：触发点 → 插件事件入口） ──────────────────────────
+
+
+def _exec_rows(db: Path, sql: str, rows: list[tuple]) -> None:
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executemany(sql, rows)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.fixture()
+def chain_kb(trig_kb: Path) -> Path:
+    """在 trig_kb 上叠加入口回溯素材：
+      * ContractAuditOp.afterExecuteOperationTransaction 补事件行 → 既有触发点即 self_entry；
+      * DeepSvc.fireAudit（新触发点，埋在 service 里）← ContractBillPlugin.itemClick（事件入口，
+        expr 边）与 LegacyHelper.run（heuristic 边、无上游、非插件类 → no_static_caller）；
+      * NightTask（孤儿任务插件类，orphan_role='plugin'）无上游 → plugin_boundary。"""
+    _exec_rows(trig_kb,
+               "INSERT INTO plugin_method(plugin_fqn,method_name,event_kind,event_phase,"
+               "start_line,end_line,source_relpath) VALUES(?,?,?,?,?,?,?)", [
+                   ("cqspb.assets.ContractAuditOp", "afterExecuteOperationTransaction",
+                    "afterExecuteOperationTransaction", "transaction", 80, 95,
+                    "cqspb/assets/ContractAuditOp.java"),
+                   ("cqspb.assets.ContractBillPlugin", "itemClick", "itemClick", "memory",
+                    40, 60, "cqspb/assets/ContractBillPlugin.java"),
+                   ("cqspb.assets.NightTask", "execute", "helper", "helper", 10, 40,
+                    "cqspb/assets/NightTask.java"),
+               ])
+    _exec_rows(trig_kb,
+               "INSERT INTO plugin(uid,form_key,class_name,plugin_type,source,operation_key,"
+               "operation_name,enabled) VALUES(?,?,?,?,?,?,?,?)", [
+                   ("p3", "cqkd_contract", "cqspb.assets.ContractBillPlugin", "form",
+                    "project", None, None, 1),
+               ])
+    _exec_rows(trig_kb,
+               "INSERT INTO source_class(fqn,simple,package,relpath,module,is_orphan,"
+               "orphan_role,plugin_base) VALUES(?,?,?,?,?,?,?,?)", [
+                   ("cqspb.assets.NightTask", "NightTask", "cqspb.assets",
+                    "cqspb/assets/NightTask.java", "cqkd_assets", 1, "plugin", "AbstractTask"),
+                   ("cqspb.assets.DeepSvc", "DeepSvc", "cqspb.assets",
+                    "cqspb/assets/DeepSvc.java", "cqkd_assets", 1, None, None),
+               ])
+    _exec_rows(trig_kb,
+               "INSERT INTO call_edge(caller_fqn,caller_method,target_fqn,target_method,"
+               "target_signature,kind,line,col,source_relpath,resolution,target_kind,"
+               "confidence,evidence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+                   ("cqspb.assets.ContractBillPlugin", "itemClick",
+                    "cqspb.assets.DeepSvc", "fireAudit", None, "invocation", 44, 9,
+                    "cqspb/assets/ContractBillPlugin.java", "expr", "project", 1.0,
+                    "symbol:expr"),
+                   ("cqspb.assets.LegacyHelper", "run",
+                    "cqspb.assets.DeepSvc", "fireAudit", None, "invocation", 12, 5,
+                    "cqspb/assets/LegacyHelper.java", "heuristic", "project", 0.6,
+                    "fallback=tree-sitter-local"),
+               ])
+    _add_triggers(trig_kb, [
+        _trig("cqspb.assets.DeepSvc", "fireAudit", 90),
+    ])
+    return trig_kb
+
+
+def test_entry_chains_reach_plugin_entry(chain_kb: Path):
+    """触发点埋在 service 深处：沿 call_edge 向上回溯到插件事件入口（最短链 + 逐跳调用边证据）；
+    heuristic 边的链降级 likely；追不到上游且非插件类的链 terminal=no_static_caller。"""
+    conn = store.open_kb(chain_kb)
+    try:
+        ot = op_trace.operation_trace(conn, "cqkd_assetcard.audit")
+        deep = next(t for t in ot["triggered_by"]
+                    if t["caller_class"] == "cqspb.assets.DeepSvc")
+        ec = deep["entry_chains"]
+        assert ec["status"] == "reached"
+        entry_chain = ec["chains"][0]                      # entry 链排最前
+        assert entry_chain["terminal"] == "entry"
+        assert entry_chain["confidence"] == "confirmed"     # expr 边，全链强证据
+        assert entry_chain["entry"]["event"] == "itemClick"
+        assert entry_chain["entry"]["phase"] == "memory"
+        assert [b["form_key"] for b in entry_chain["entry"]["bindings"]] == ["cqkd_contract"]
+        hops = entry_chain["hops"]
+        assert [(h["class"], h["method"]) for h in hops] == [
+            ("cqspb.assets.ContractBillPlugin", "itemClick"),
+            ("cqspb.assets.DeepSvc", "fireAudit"),
+        ]
+        assert (hops[0]["call_line"], hops[0]["call_resolution"]) == (44, "expr")
+
+        # heuristic 边的另一条链：LegacyHelper 无上游且非插件类 → no_static_caller/unknown。
+        legacy = next(c for c in ec["chains"]
+                      if c["hops"][0]["class"] == "cqspb.assets.LegacyHelper")
+        assert legacy["terminal"] == "no_static_caller"
+        assert legacy["confidence"] == "unknown"
+        assert "entry_chains=" in ot["note"] and "no_static_caller" in ot["note"]
+    finally:
+        conn.close()
+
+
+def test_entry_chains_self_entry_and_boundary(chain_kb: Path):
+    """触发点本身是事件方法 → self_entry；孤儿任务插件类追不到上游 → plugin_boundary(likely)。"""
+    conn = store.open_kb(chain_kb)
+    try:
+        ot = op_trace.operation_trace(conn, "cqkd_assetcard.audit")
+        cao = next(t for t in ot["triggered_by"]
+                   if t["caller_class"] == "cqspb.assets.ContractAuditOp")
+        assert cao["entry_chains"]["status"] == "self_entry"
+        assert cao["entry_chains"]["entry"]["event"] == "afterExecuteOperationTransaction"
+
+        night = next(t for t in ot["unresolved_inbound"]
+                     if t["caller_class"] == "cqspb.assets.NightTask")
+        nec = night["entry_chains"]
+        assert nec["status"] == "boundary_only"
+        assert nec["chains"][0]["terminal"] == "plugin_boundary"
+        assert nec["chains"][0]["confidence"] == "likely"
+        assert nec["chains"][0]["entry"]["plugin_base"] == "AbstractTask"
+    finally:
+        conn.close()
+
+
+def test_entry_chains_compact_and_render(chain_kb: Path):
+    """紧凑投影：入站行带压缩后的 entry_chains（路径字符串 + 入口摘要）；人读渲染画出入口链。"""
+    conn = store.open_kb(chain_kb)
+    try:
+        res = op_trace.operation_trace_compact(conn, "cqkd_assetcard.audit")
+        assert field_trace._wire_len(res) <= field_trace._COMPACT_BUDGET
+        deep = next(t for t in res["triggered_by"]
+                    if t["caller_class"] == "cqspb.assets.DeepSvc")
+        sec = deep["entry_chains"]
+        assert sec["status"] == "reached"
+        top = sec["chains"][0]
+        assert top["entry"] == {"event": "itemClick", "phase": "memory",
+                                "forms": ["cqkd_contract"]}
+        assert top["path"] == [
+            "cqspb.assets.ContractBillPlugin#itemClick@cqspb/assets/ContractBillPlugin.java:44",
+            "cqspb.assets.DeepSvc#fireAudit",
+        ]
+        cao = next(t for t in res["triggered_by"]
+                   if t["caller_class"] == "cqspb.assets.ContractAuditOp")
+        assert cao["entry_chains"]["status"] == "self_entry"
+
+        text = op_trace.render_operation_trace(op_trace.operation_trace(
+            conn, "cqkd_assetcard.audit"))
+        assert "入口链" in text and "事件=itemClick/memory" in text
+        assert "触发点本身即插件事件入口" in text
     finally:
         conn.close()

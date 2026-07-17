@@ -25,13 +25,21 @@ if TYPE_CHECKING:
     from ..bridge.namespace import SourceIndex
     from ..ingest.scanner import ScanResult
     from ..metadata.model import MetaModel
+    from ..java.symbols import SymbolTable
+
+if TYPE_CHECKING:
+    from ..progress import Progress
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
-KB_SCHEMA_VERSION = "17"
+KB_SCHEMA_VERSION = "20"
+
+# build_kb 内部推进的进度阶段名（顺序即执行顺序）。单独导出给 CLI 计算阶段总数
+# （[k/N] 里的 N），两侧共用一份常量、不靠魔法数字对齐。
+BUILD_STAGES: tuple[str, ...] = ("元数据灌库", "Java 字段级分析", "分析结果灌库与粗扫")
 
 # DROP 顺序（FTS 虚拟表与各表；DROP TABLE 对 search 同样有效，会连带清掉 FTS 影子表）。
 _OBJECTS = [
-    "search", "edge", "coarse_field_hit", "operation_trigger", "java_constant",
+    "search", "edge", "coarse_field_hit", "operation_trigger", "call_edge", "java_constant",
     "field_access", "plugin_method",
     "operation", "binding", "source_class", "convert_rule",
     "field_combo_item", "plugin", "field", "entity", "form", "module", "kb_meta",
@@ -63,12 +71,20 @@ def build_kb(
     *,
     index: "SourceIndex | None" = None,
     source_args: dict[str, Any] | None = None,
+    symbols: "SymbolTable | None" = None,
+    symbol_resolution: dict[str, Any] | None = None,
+    progress: "Progress | None" = None,
 ) -> dict[str, Any]:
     """幂等重建 KB 并灌库。返回各表计数摘要。
 
     index：可复用 build 流程已建好的源码索引（None 则自建），避免重复解析。
     source_args：记入 kb_meta 的来源信息（源码根 / 元数据输入 / 时间戳），供 report 判过期。
+    progress：可选进度报告器；本函数按 BUILD_STAGES 推进三个阶段（CLI 据此显示 [k/N]），
+    不注入时静默（MCP/测试路径零输出）。
     """
+    from ..progress import NULL
+
+    progress = progress or NULL
     if index is None:
         index = namespace.build_index(scan_result)
     models = list(models)
@@ -83,6 +99,7 @@ def build_kb(
     conn = _connect(db_path)
     try:
         with conn:  # 单事务：要么整体重建成功，要么回滚（幂等、不留半成品）
+            progress.stage(BUILD_STAGES[0])
             for obj in _OBJECTS:
                 conn.execute(f"DROP TABLE IF EXISTS {obj}")
             conn.executescript(schema_sql)
@@ -91,13 +108,20 @@ def build_kb(
                 index, form_module, class_module, orphan_role, orphan_base, orphan_set,
             )
             # Java 字段级分析只跑一次：结果（含常量表）同时喂给高精度落库与粗扫侧。
+            progress.stage(BUILD_STAGES[1])
             from ..java import analyze as java_analyze
-            res = java_analyze.analyze(scan_result, models, bridge_result, index)
+            res = java_analyze.analyze(
+                scan_result, models, bridge_result, index, symbols=symbols,
+                progress=progress)
+            progress.stage(BUILD_STAGES[2])
             counts.update(_populate_java(conn, res))
             counts.update(_populate_java_constants(conn, res))
             counts.update(_populate_operation_triggers(conn, res))
-            counts.update(_populate_coarse(conn, scan_result, models, res))
-            _write_meta(conn, counts, bridge_result, module_map, source_args)
+            counts.update(_populate_call_edges(conn, res))
+            counts.update(_populate_coarse(conn, scan_result, models, res,
+                                           progress=progress))
+            _write_meta(conn, counts, bridge_result, module_map, source_args,
+                        symbol_resolution)
         return counts
     finally:
         conn.close()
@@ -294,12 +318,12 @@ def _populate_java(conn, res) -> dict[str, Any]:
           pm.start_line, pm.end_line, pm.source_relpath) for pm in res.plugin_methods],
     )
     conn.executemany(
-        "INSERT INTO field_access VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO field_access VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [(r.form_key, r.field_key, r.level, r.entry_key, r.plugin_fqn, r.plugin_type,
-          r.access_class, r.event_method, r.event_phase, r.access, r.persists,
+          r.access_class, r.access_method, r.event_method, r.event_phase, r.access, r.persists,
           r.persist_reason, r.via, r.line, _json.dumps(r.path, ensure_ascii=False),
           r.key_resolution, r.confidence, r.source_relpath, r.evidence, r.form_key_source,
-          r.null_reason)
+          r.null_reason, r.edge_source)
          for r in res.field_accesses],
     )
     # field_access 也进 FTS（按字段 key / 类名搜得到）。
@@ -316,6 +340,7 @@ def _populate_java(conn, res) -> dict[str, Any]:
             "standalone_classes": res.standalone_class_count,
             "field_access": len(res.field_accesses),
             "plugin_method": len(res.plugin_methods),
+            "call_edge": len(getattr(res, "call_edges", None) or []),
         }, ensure_ascii=False),),
     )
     return {"plugin_method": len(res.plugin_methods), "field_access": len(res.field_accesses)}
@@ -346,13 +371,31 @@ def _populate_operation_triggers(conn, res) -> dict[str, Any]:
     """
     rows = getattr(res, "operation_triggers", None) or []
     conn.executemany(
-        "INSERT INTO operation_trigger VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO operation_trigger VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [(t.caller_class, t.caller_method, t.line, t.source_relpath, t.via,
           t.op_key, t.op_key_resolution, t.op_key_confidence,
-          t.target_form_key, t.target_resolution, t.target_confidence, t.evidence)
+          t.target_form_key, t.target_resolution, t.target_confidence, t.evidence,
+          t.receiver_source)
          for t in rows],
     )
     return {"operation_trigger": len(rows)}
+
+
+def _populate_call_edges(conn, res) -> dict[str, Any]:
+    """阶段 12.3：全量调用点事实 → ``call_edge``。
+
+    这里不筛 target_fqn，不去掉 failed，也不按调用方/目标去重：同一方法里的两个真实调用点是
+    两条独立证据，必须保留各自的行列坐标。
+    """
+    rows = getattr(res, "call_edges", None) or []
+    conn.executemany(
+        "INSERT INTO call_edge VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [(r.caller_fqn, r.caller_method, r.target_fqn, r.target_method,
+          r.target_signature, r.kind, r.line, r.col, r.source_relpath,
+          r.resolution, r.target_kind, r.confidence, r.evidence)
+         for r in rows],
+    )
+    return {"call_edge": len(rows)}
 
 
 # 业务字段标识（字面量或常量名）作 get/set/getValue/setValue 首参 → 更强的读写信号。
@@ -417,7 +460,8 @@ def _scan_java_tokens(text: str):
             i += 1
 
 
-def _populate_coarse(conn, scan_result, models, res) -> dict[str, Any]:
+def _populate_coarse(conn, scan_result, models, res,
+                     progress: "Progress | None" = None) -> dict[str, Any]:
     """信任「手段二」粗扫侧：用一个**独立、笨、难出错**的基线扫，交叉验证高精度会不会漏字段。
 
     扫两类引用（都不解析坐标/落库/调用链，保持与高精度 field_access 的独立性）：
@@ -456,10 +500,12 @@ def _populate_coarse(conn, scan_result, models, res) -> dict[str, Any]:
 
     seen: set[tuple[str, str, int]] = set()   # (field_key, relpath, line) 去重
     rows: list[tuple[str, str, int, str]] = []
-    for sf in scan_result.ok_files:
+    java_files = [sf for sf in scan_result.ok_files
+                  if sf.text and sf.relpath.lower().endswith(".java")]
+    for done, sf in enumerate(java_files, 1):
+        if progress is not None:
+            progress.tick(done, len(java_files), "个文件", label="粗扫交叉验证")
         text = sf.text
-        if not text or not sf.relpath.lower().endswith(".java"):
-            continue
         # 行起始偏移表，供 O(log n) 定位行号（避免每个命中都 count 一遍）。
         line_starts = [0]
         for i, ch in enumerate(text):
@@ -487,7 +533,8 @@ def _populate_coarse(conn, scan_result, models, res) -> dict[str, Any]:
     return {"coarse_field_hit": len(rows)}
 
 
-def _write_meta(conn, counts, bridge_result, module_map, source_args) -> None:
+def _write_meta(conn, counts, bridge_result, module_map, source_args,
+                symbol_resolution: dict[str, Any] | None = None) -> None:
     meta = {
         "schema_version": KB_SCHEMA_VERSION,
         "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -495,6 +542,11 @@ def _write_meta(conn, counts, bridge_result, module_map, source_args) -> None:
         "code_prefixes": _json(bridge_result.code_prefixes),
         "meta_prefixes": _json(bridge_result.meta_prefixes),
         "health": _json(module_map["health"]),
+        "symbol_resolution": _json(symbol_resolution or {
+            "status": "not_requested", "provider": None, "jar_count": 0,
+            "coverage": 0.0, "by_resolution": {}, "attempts": [],
+            "reason": "调用方未注入 SymbolTable，已使用 tree-sitter 名字匹配",
+        }),
     }
     if source_args:
         meta["source_args"] = _json(source_args)

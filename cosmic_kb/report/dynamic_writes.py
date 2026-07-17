@@ -42,7 +42,7 @@ _CAUSE_SHORT = {
 
 
 def build_method_worklist(rows: list[dict[str, Any]], *, cap: int = 10) -> dict[str, Any]:
-    """把 null-key 访问行按 (入口类, 事件方法) **去重成「该读方法」清单**，是控制大模型上下文的关键：
+    """把 null-key 访问行按 (物理类, 物理方法) **去重成「该读方法」清单**。
 
     同一方法写 N 个钉不出 key 的字段，大模型只需读这方法一次。故不回逐行，回去重后的方法清单——
     每条给：入口类全限定名 + 事件方法 + 多少处动态访问 + 成因 + 写入物理位置（`writes_in`，跨类
@@ -50,11 +50,13 @@ def build_method_worklist(rows: list[dict[str, Any]], *, cap: int = 10) -> dict[
     """
     groups: dict[tuple, dict[str, Any]] = {}
     for r in rows:
-        key = (r.get("plugin_fqn"), r.get("event_method"))
+        cls = r.get("access_class") or r.get("plugin_fqn")
+        method = r.get("access_method") or r.get("event_method")
+        key = (cls, method)
         g = groups.get(key)
         if g is None:
             g = groups[key] = {
-                "class_fqn": r.get("plugin_fqn"), "method": r.get("event_method"),
+                "class_fqn": cls, "method": method, "entry_ref": r.get("entry_ref"),
                 "count": 0, "writes": 0, "causes": set(), "writes_in": {},
             }
         g["count"] += 1
@@ -68,6 +70,7 @@ def build_method_worklist(rows: list[dict[str, Any]], *, cap: int = 10) -> dict[
         causes = sorted(g["causes"], key=lambda c: _CAUSES.index(c) if c in _CAUSES else 99)
         out.append({
             "class_fqn": g["class_fqn"], "method": g["method"],
+            "entry_ref": g["entry_ref"],
             "count": g["count"], "writes": g["writes"],
             "causes": causes,
             "cause_label": "/".join(_CAUSE_SHORT.get(c, c) for c in causes),

@@ -3,9 +3,12 @@
 设计（2026-07-15 与用户拍板）：程序化触发点的**入站明细**不摊进 bill / 字段 trace 的返回
 （对不查触发链的调用是纯冗余），改为按需查询——操作坐标就是天然的查询粒度。返回三段：
   * `triggered_by`        谁的代码触发了本操作（executeOperate/invokeOperation 调用点，附
-                          caller_forms=调用方插件绑定的上游单据，递归 trace 上游即拼跨单据链）；
+                          caller_forms=调用方插件绑定的上游单据，递归 trace 上游即拼跨单据链；
+                          2026-07-16 起每条另附 entry_chains=沿 call_edge 向上回溯到插件事件
+                          入口的调用链——苍穹所有程序化调用最终从插件事件开始，触发点埋在
+                          service/helper 深处时靠它还原"链从哪个事件拉起"，见 entry_chain.py）；
   * `unresolved_inbound`  **无法静态排除是本操作**的嫌疑触发点（红线 #4 全量摆出，每条带
-                          `suspect_reason` 成因）：目标已钉本单据但操作 key 解不出/不在操作集
+                          `suspect_reason` 成因）：目标已钉本单据但操作 key 解不出
                           （op_unresolved）、操作 key 正是本操作但目标单据解不出
                           （target_unresolved——表单插件绑多张单/目标动态拼接的外发即此形态，
                           2026-07-15 二次整合后并入操作坐标，查"谁调了本操作"一次即完整）、
@@ -28,17 +31,18 @@ from __future__ import annotations
 from typing import Any
 
 # 复用 trace 的「host 口径字节度量 + 游标解析 + 预算 + 翻页门」单一事实源（红线 #6）。
+from . import entry_chain
 from .field_trace import (_COMPACT_BUDGET, _parse_cursor, _pending_from_flat_cursors,
                           _wire_len, pagination_gate)
 
 # operation_trigger 取数列（rich 全带；slim 投影只留渲染所需，confidence 由 resolution 档位自明）。
 _TRIG_COLS = ("caller_class,caller_method,line,source_relpath,via,op_key,op_key_resolution,"
-              "op_key_confidence,target_form_key,target_resolution,target_confidence")
+              "op_key_confidence,target_form_key,target_resolution,target_confidence,receiver_source")
 
 # 入站嫌疑成因：排序强弱（op/target 单边解不出都是强嫌疑，双边解不出最弱）与人读标签。
 _SUSPECT_RANK = {"op_unresolved": 0, "target_unresolved": 1, "both_unresolved": 2}
 _SUSPECT_LABEL = {
-    "op_unresolved": "目标=本单据、操作key解不出/不在操作集",
+    "op_unresolved": "目标=本单据、操作key解不出",
     "target_unresolved": "操作key匹配、目标单据解不出（表单插件外发常见形态）",
     "both_unresolved": "操作与目标都解不出",
 }
@@ -99,14 +103,14 @@ def operation_trace(conn, locator: str, *, form_key: str | None = None) -> dict[
         f"ORDER BY caller_class,line", (form_key, op_key)).fetchall()]
 
     # 入站嫌疑：**无法静态排除是本操作**的触发点全量摆出（红线 #4），suspect_reason 注明成因——
-    #   op_unresolved     目标已钉本单据、操作 key 解不出（dynamic/unknown）或不在元数据操作集；
+    #   op_unresolved     目标已钉本单据、操作 key 解不出（dynamic/unknown）；
     #   target_unresolved 操作 key 正是所查操作、目标单据解不出——表单插件绑多张单/目标动态拼接
     #                     的外发即此形态（bill.outbound_triggers 里 target=NULL 的切片），
     #                     2026-07-15 二次整合：并入操作坐标后查"谁调了本操作"不再需要补查 bill；
     #   both_unresolved   操作 key 与目标都解不出——可能是任何操作的调用，最弱嫌疑排最后。
-    # 只有「操作 key 解出且≠所查操作」或「目标钉到别的单据」才允许静态排除，不进嫌疑。
-    op_set = {r[0] for r in conn.execute(
-        "SELECT key FROM operation WHERE form_key=?", (form_key,))}
+    # 只要操作 key 已经静态解出且≠所查操作，就能直接排除；是否出现在元数据操作集只影响
+    # “操作本体信息是否完整”，不能让 refresh 之类已知的其他操作变成 updatetax 的嫌疑。
+    # 目标钉到别的单据同理已由候选 SQL 排除。
     unresolved: list[dict[str, Any]] = []
     for r in conn.execute(
             f"SELECT {_TRIG_COLS} FROM operation_trigger WHERE target_form_key=? OR "
@@ -114,9 +118,9 @@ def operation_trace(conn, locator: str, *, form_key: str | None = None) -> dict[
             f"ORDER BY caller_class,line", (form_key, op_key)).fetchall():
         t = dict(r)
         if t["target_form_key"] == form_key:
-            # 已钉本单据：所查操作本身已完整列在 triggered_by；解出且在操作集的是本单据
-            # **别的**操作的入站（查该操作坐标即可见）——两者都不算本操作的嫌疑。
-            if t["op_key"] == op_key or (t["op_key"] is not None and t["op_key"] in op_set):
+            # 已钉本单据：所查操作本身已完整列在 triggered_by；任意已解析的不同 key 都是
+            # 本单据**别的**操作——即使元数据漏了该预制/自定义操作，也不能串成本操作嫌疑。
+            if t["op_key"] is not None:
                 continue
             t["suspect_reason"] = "op_unresolved"
         else:
@@ -138,6 +142,7 @@ def operation_trace(conn, locator: str, *, form_key: str | None = None) -> dict[
                      "元数据未随包），以下为指向它的程序化触发点证据，操作本体信息不可考。")
 
     _attach_caller_forms(conn, inbound + unresolved)
+    _attach_entry_chains(conn, inbound + unresolved)
 
     # 本操作绑定的操作插件（触发链的"执行体"；下游外发从这些类的调用点查）。
     plugins = [dict(r) for r in conn.execute(
@@ -172,6 +177,12 @@ def operation_trace(conn, locator: str, *, form_key: str | None = None) -> dict[
     if inbound:
         notes.append("triggered_by=谁的代码程序化触发了本操作（caller_forms=调用方插件绑定的"
                      "上游单据；对上游继续 trace(kind=\"operation\") 可递归拼出跨单据触发链）。")
+    if inbound or unresolved:
+        notes.append("entry_chains=沿 call_edge 向上回溯到插件事件入口的调用链（苍穹程序化"
+                     "调用最终从插件事件开始）：terminal=entry 已到事件入口（confirmed），"
+                     "plugin_boundary=到达插件类但方法不在事件表（likely 入口），"
+                     "no_static_caller=静态追不到上游（可能反射/定时任务/OpenAPI 派发，"
+                     "读源码定性，不得当成无入口）。")
     else:
         notes.append("未发现明确指向本操作的程序化触发点（不排除操作 key/目标单据动态拼接"
                      "解不出的情况，见 unresolved_inbound）。")
@@ -212,6 +223,16 @@ def _attach_caller_forms(conn, triggers: list[dict[str, Any]]) -> None:
         t["caller_forms"] = forms.get(t["caller_class"], [])
 
 
+def _attach_entry_chains(conn, triggers: list[dict[str, Any]]) -> None:
+    """给触发点补 entry_chains=向上回溯到插件事件入口的调用链（同一方法只算一次）。"""
+    cache: dict[tuple[str, str], dict[str, Any]] = {}
+    for t in triggers:
+        key = (t["caller_class"], t["caller_method"])
+        if key not in cache:
+            cache[key] = entry_chain.entry_chains(conn, *key)
+        t["entry_chains"] = cache[key]
+
+
 # ── 紧凑投影（MCP 入口）：cap + 字节 governor + 游标分页 ──────────────────────────────
 _OP_PAGE_SECTIONS = ("triggered_by", "unresolved_inbound", "triggers_downstream")
 # cap 阶梯（触发点通常个位数，首档已宽裕；极端库逐档收紧，被截段带 *_next_cursor 可翻页取全）。
@@ -219,26 +240,34 @@ _OP_LADDER = [(20, 10, 10), (10, 6, 6), (5, 3, 3), (2, 1, 1)]
 
 
 def _slim_in(t: dict[str, Any]) -> dict[str, Any]:
-    """入站触发点紧凑形状：调用坐标 + 解析档位 + 上游单据（op_key=所查操作，自明不重复）。"""
-    return {k: t.get(k) for k in
-            ("caller_class", "caller_method", "line", "source_relpath", "via",
-             "op_key_resolution", "caller_forms")}
+    """入站触发点紧凑形状：调用坐标 + 解析档位 + 上游单据（op_key=所查操作，自明不重复）
+    + entry_chains（压成路径字符串的插件入口链）。"""
+    out = {k: t.get(k) for k in
+           ("caller_class", "caller_method", "line", "source_relpath", "via",
+            "op_key_resolution", "receiver_source", "caller_forms")}
+    if t.get("entry_chains") is not None:
+        out["entry_chains"] = entry_chain.slim_chains(t["entry_chains"])
+    return out
 
 
 def _slim_unres(t: dict[str, Any]) -> dict[str, Any]:
     """未归位触发点：suspect_reason 打头说明为何排除不掉，op/target 两侧解析档位都带
-    （读源码定性所需最小上下文），诚实说明为何没挂上。"""
-    return {k: t.get(k) for k in
-            ("suspect_reason", "caller_class", "caller_method", "line", "source_relpath", "via",
-             "op_key", "op_key_resolution", "target_form_key", "target_resolution",
-             "caller_forms")}
+    （读源码定性所需最小上下文），诚实说明为何没挂上；同带 entry_chains。"""
+    out = {k: t.get(k) for k in
+           ("suspect_reason", "caller_class", "caller_method", "line", "source_relpath", "via",
+            "op_key", "op_key_resolution", "target_form_key", "target_resolution",
+            "receiver_source", "caller_forms")}
+    if t.get("entry_chains") is not None:
+        out["entry_chains"] = entry_chain.slim_chains(t["entry_chains"])
+    return out
 
 
 def _slim_down(t: dict[str, Any]) -> dict[str, Any]:
     """下行触发点：目标坐标 +（已核对）目标中文名 + next_trace 递归导航；目标 NULL=解不出即风险。"""
     return {k: t.get(k) for k in
             ("caller_class", "caller_method", "line", "source_relpath", "via", "op_key",
-             "target_form_key", "target_form_name", "target_resolution", "next_trace")}
+             "target_form_key", "target_form_name", "target_resolution", "receiver_source",
+             "next_trace")}
 
 
 _SLIM_BY_SECTION = {"triggered_by": _slim_in, "unresolved_inbound": _slim_unres,
@@ -336,6 +365,20 @@ def operation_trace_compact(
     return res
 
 
+_TERMINAL_ZH = {"entry": "事件入口", "plugin_boundary": "插件类边界",
+                "no_static_caller": "静态追不到上游", "depth_capped": "超出回溯深度",
+                "callers_all_visited": "上游成环/已并入其他链"}
+
+
+def _render_entry_chains(t: dict[str, Any], *, max_chains: int = 3) -> list[str]:
+    """触发点下缩进两格渲染入口链（入口 → … → 触发点）。"""
+    ec = t.get("entry_chains")
+    if ec and ec.get("status") == "self_entry":
+        e = ec["entry"]
+        return [f"     ↳ 触发点本身即插件事件入口：{e['event']}（{e['phase']} 相位）"]
+    return entry_chain.render_lines(ec, max_chains=max_chains)
+
+
 def render_operation_trace(ot: dict[str, Any]) -> str:
     """CLI 人读文本（与 dict 同数据，延续 report 包 dict 在前 / render 在后约定）。"""
     if ot.get("error"):
@@ -369,6 +412,7 @@ def render_operation_trace(ot: dict[str, Any]) -> str:
                 else f" [{t['op_key_resolution']}]"
             lines.append(f"  ⚡ {t['caller_class']}.{t['caller_method']} [{t['via']}] "
                          f"{t['source_relpath']}:{t['line']}{res_flag}{src}")
+            lines.extend(_render_entry_chains(t))
 
     if ot["unresolved_inbound"]:
         lines.append("")
@@ -380,6 +424,7 @@ def render_operation_trace(ot: dict[str, Any]) -> str:
                          f"[{t['target_resolution']}]  "
                          f"{t['caller_class']}.{t['caller_method']} [{t['via']}] "
                          f"{t['source_relpath']}:{t['line']}")
+            lines.extend(_render_entry_chains(t))
 
     if ot["triggers_downstream"]:
         lines.append("")

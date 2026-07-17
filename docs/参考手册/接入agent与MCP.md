@@ -48,6 +48,8 @@ KB** 最稳。
 
 - 「`cqkd_amount` 这个金额字段是谁改的、在哪个插件哪个事件、有没有落库？」→ agent 会调 `trace`。
 - 「这张 `cqkd_assetcard` 单据有哪些操作和插件，有没有风险点？」→ agent 会调 `bill`。
+- 「谁调用了 `ContractService.updateRlateAssets`，它是不是死代码？」→ agent 会调 `callers`，并把
+  0 结果与符号覆盖率一起解释；符号层降级时不会据此断言死代码。
 - **让 agent 读一段源码、顺手核对里面的中文名**：「帮我看看这个文件/这个类是干什么的，里面涉及
   的单据、分录、字段中文名都是什么」——agent 会一边读源码，一边用 `resolve_fields` 把碰到的英文
   标识核对成元数据里的真实中文名，而不是凭命名习惯自己翻译/瞎猜；如果你怀疑它是不是真的查过、
@@ -56,7 +58,7 @@ KB** 最稳。
 - 「这个项目的字段扫描覆盖率怎么样，有没有扫不到的地方？」→ agent 会调 `coverage`（信任优先）。
 
 这些都是**普通对话**，不是固定命令模板——只要问题里带着字段/单据/插件这类信息，agent 就有
-线索去调工具取证。它会自动调 `trace/bill/resolve_fields/cosmic_semantics` 这 4 个 MCP 工具
+线索去调工具取证。它会自动调 `trace/bill/resolve_fields/callers/cosmic_semantics` 这 5 个 MCP 工具
 取证、带类·方法·行号·三态置信度作答——**苍穹领域纪律（三态置信度、不臆造、入库
 判断）已经随 MCP `instructions` 注入宿主，任意 agent 都自带，不需要额外装 Skill。**
 
@@ -79,7 +81,7 @@ KB** 最稳。
   判断，都写进了固定纪律里，不靠临场记忆。
 
 这些都是**呈现层增强**，不改变取证工具本身的调用方式，也不是必需——不装 Skill，`trace`/
-`bill`/`resolve_fields`/`cosmic_semantics` 照样能用，只是回答格式和查询顺序靠 agent 自己临场
+`bill`/`resolve_fields`/`callers`/`cosmic_semantics` 照样能用，只是回答格式和查询顺序靠 agent 自己临场
 组织。Skill 负责编排工作流，领域事实仍以 MCP `instructions` 和 `cosmic_semantics` 为准。
 
 默认自动检测本机宿主并安装到用户级目录：

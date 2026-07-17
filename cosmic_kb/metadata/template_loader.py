@@ -3,7 +3,8 @@
 业务 dym 里覆盖继承操作时只写 `<Operation action="edit" oid="hexid"><Plugins>...`，
 **没有 Key/Name/OperationType**，这些 hex oid 指向标准操作（保存/提交/审核…）的定义
 在**继承根模板**里（bos_billtpl / bos_basetpl），没随业务 dym 导出。本模块把模板解析成
-`hex oid → {key, name, operation_type}` 映射表，供 dym_parser 按 oid 回填操作语义。
+`hex oid → {key, name, operation_type}` 映射表，供 dym_parser 按 oid 回填操作语义，
+并补齐业务 XML 因“完全沿用模板”而没有重复写出的预制操作。
 
 关键事实（见 docs/核心/阶段验收.md）：
     - **标准操作 oid 不是平台全局，每类模板各一套**：同名 save，单据是 c91d5125000033ac，

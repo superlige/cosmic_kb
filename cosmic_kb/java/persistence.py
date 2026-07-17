@@ -20,6 +20,7 @@ from . import ast_index as ax
 
 if TYPE_CHECKING:
     from tree_sitter import Node
+    from .symbols import SymbolTable
 
 # 落库 sink：显式持久化/事务调用。按「接收者类名 + 方法名」识别。
 _SINK_RULES: list[tuple[str, set[str], str]] = [
@@ -29,6 +30,19 @@ _SINK_RULES: list[tuple[str, set[str], str]] = [
     ("DeleteServiceHelper", {"delete"}, "DeleteServiceHelper 删除"),
     ("DB", {"execute", "update", "executeBatch", "insert"}, "DB 直写"),
 ]
+# 编译期符号命中时用**精确声明类 FQN**确认/否决，项目内同名 helper 不得误报。
+_SINK_FQN_RULES: dict[str, tuple[set[str], str]] = {
+    "kd.bos.servicehelper.operation.SaveServiceHelper": (
+        {"save", "update", "saveOperate"}, "SaveServiceHelper 保存"),
+    "kd.bos.servicehelper.operation.OperationServiceHelper": (
+        {"executeOperate", "execOperate"}, "OperationServiceHelper 执行操作"),
+    "kd.bos.servicehelper.BusinessDataServiceHelper": (
+        {"save"}, "BusinessDataServiceHelper 保存"),
+    "kd.bos.servicehelper.operation.DeleteServiceHelper": (
+        {"delete"}, "DeleteServiceHelper 删除"),
+    "kd.bos.db.DB": (
+        {"execute", "update", "executeBatch", "insert"}, "DB 直写"),
+}
 # getView().invokeOperation("save"/...) / invokeOperationWithSelect：触发平台入库操作。
 _INVOKE_OP_RE = re.compile(r'invokeOperation\w*\(\s*"([^"]+)"')
 _PERSIST_INVOKE_OPS = {"save", "submit", "audit", "unaudit", "unsubmit", "delete", "push"}
@@ -46,14 +60,35 @@ _NONPERSIST_OP_TYPES = {"donothing"}
 class Sink:
     kind: str
     line: int
+    receiver_source: str = "text"          # symbol | text
 
 
-def find_sinks(method_body: "Node | None") -> list[Sink]:
-    """在一个方法体内找显式落库 sink。"""
+def find_sinks(method_body: "Node | None", *, symbols: "SymbolTable | None" = None,
+               relpath: str | None = None) -> list[Sink]:
+    """在一个方法体内找显式落库 sink。
+
+    SymbolTable 命中时按声明类 FQN 白名单确认/否决；无符号、failed 或列对不齐才退回原文本
+    尾段匹配。显式开启 method_reference，使 ``SaveServiceHelper::save`` 也进入同一判定。
+    """
     if method_body is None:
         return []
     out: list[Sink] = []
-    for inv in ax.iter_invocations(method_body):
+    for inv in ax.iter_invocations(method_body, include_refs=True):
+        site = (symbols.lookup(relpath, inv.line, inv.name, inv.col)
+                if symbols is not None and relpath else None)
+        if site is not None and site.resolved:
+            rule = _SINK_FQN_RULES.get(site.declaring or "")
+            if rule is not None and inv.name in rule[0]:
+                out.append(Sink(kind=rule[1], line=inv.line, receiver_source="symbol"))
+            elif (inv.kind == "invocation" and inv.name.startswith("invokeOperation")
+                  and (site.declaring or "").startswith("kd.bos.")):
+                m = _INVOKE_OP_RE.search(ax._text(inv.node))
+                if m and m.group(1) in _PERSIST_INVOKE_OPS:
+                    out.append(Sink(kind=f'invokeOperation("{m.group(1)}")', line=inv.line,
+                                    receiver_source="symbol"))
+            # 符号已给确定目标但不在白名单：明确否决文本同名误报。
+            continue
+
         recv = inv.object_text.strip()
         recv_tail = recv.rsplit(".", 1)[-1].split("(", 1)[0]
         for cls, names, desc in _SINK_RULES:
@@ -61,7 +96,7 @@ def find_sinks(method_body: "Node | None") -> list[Sink]:
                 out.append(Sink(kind=desc, line=inv.line))
                 break
         else:
-            if inv.name.startswith("invokeOperation"):
+            if inv.kind == "invocation" and inv.name.startswith("invokeOperation"):
                 m = _INVOKE_OP_RE.search(ax._text(inv.node))
                 if m and m.group(1) in _PERSIST_INVOKE_OPS:
                     out.append(Sink(kind=f"invokeOperation(\"{m.group(1)}\")", line=inv.line))

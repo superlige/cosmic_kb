@@ -23,6 +23,7 @@ from pathlib import Path
 
 from .. import __version__
 from .. import _assets
+from ..progress import NULL as NULL_PROGRESS, ConsoleProgress, Progress
 
 # Windows 控制台默认 GBK，无法编码中文/箭头等字符 —— 统一切到 UTF-8。
 if os.name == "nt":
@@ -183,11 +184,12 @@ def _cmd_meta(args: argparse.Namespace) -> int:
     return rc
 
 
-def _collect_models(paths: list[str], registry) -> tuple[list, int]:
+def _collect_models(paths: list[str], registry,
+                    progress: Progress = NULL_PROGRESS) -> tuple[list, int]:
     """把 meta 风格的输入（.dym / .zip / 含 zip 的目录）展开成 MetaModel 列表。
 
     返回 (models, rc)；rc 非 0 表示输入有误（调用方据此退出）。复用阶段 2 的解析器，
-    桥接只取其产物，不重复造解析逻辑。
+    桥接只取其产物，不重复造解析逻辑。progress 供 build 打点（bridge 走默认静默）。
     """
     from ..metadata import dym_parser, package_loader
 
@@ -209,20 +211,26 @@ def _collect_models(paths: list[str], registry) -> tuple[list, int]:
 
     models: list = []
     for z in zips:
+        def _zip_tick(done: int, total: int, _member: str, _name: str = z.name) -> None:
+            progress.tick(done, total, "项", label=f"解析 {_name}")
+
         try:
-            res = package_loader.load_package(z, template_registry=registry)
+            res = package_loader.load_package(
+                z, template_registry=registry, progress=_zip_tick)
             models.extend(e.model for e in res.ok_entries)
         except Exception as exc:
-            print(f"整包打开失败: {z}: {type(exc).__name__}: {exc}", file=sys.stderr)
-    for d in dyms:
+            progress.note(f"整包打开失败: {z}: {type(exc).__name__}: {exc}")
+    for i, d in enumerate(dyms, 1):
+        progress.tick(i, len(dyms), "个 dym/cr", label="解析散件")
         try:
             models.append(dym_parser.parse_file(str(d), template_registry=registry))
         except Exception as exc:
-            print(f"解析失败: {d}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            progress.note(f"解析失败: {d}: {type(exc).__name__}: {exc}")
     return models, 0
 
 
-def _apply_vendor_metadata_cli(args: argparse.Namespace, models: list, scan_result):
+def _apply_vendor_metadata_cli(args: argparse.Namespace, models: list, scan_result,
+                               progress: Progress = NULL_PROGRESS):
     """build/bridge 共用：给了 --db-config 就自动按三信号（扩展/ORM查询/操作执行）发现
     并拉取原厂元数据；`--vendor` 仍可手动追加（并集，去重）。
 
@@ -267,18 +275,19 @@ def _apply_vendor_metadata_cli(args: argparse.Namespace, models: list, scan_resu
         return 1
 
     if auto_candidates:
-        print(f"自动摄取（{len(auto_candidates)} 个，三信号发现）:", file=sys.stderr)
+        progress.note(f"自动摄取（{len(auto_candidates)} 个，三信号发现）:")
         for c in auto_candidates:
             ev = f"  证据: {c.evidence[0]}" if c.evidence else ""
-            print(f"  {c.key}（信号={'+'.join(c.sources) or '?'}）{ev}", file=sys.stderr)
+            progress.note(f"  {c.key}（信号={'+'.join(c.sources) or '?'}）{ev}")
     if vendor_fnumbers:
-        print(f"手动指定: {', '.join(vendor_fnumbers)}", file=sys.stderr)
+        progress.note(f"手动指定: {', '.join(vendor_fnumbers)}")
     for note in notices:
-        print(f"提示: {note}", file=sys.stderr)
+        progress.note(f"提示: {note}")
     return models
 
 
-def _sync_own_isv_metadata_cli(args: argparse.Namespace, models: list):
+def _sync_own_isv_metadata_cli(args: argparse.Namespace, models: list,
+                               progress: Progress = NULL_PROGRESS):
     """build 专用：`--db-config` 给了就自动按本项目二开 ISV 同步 form/entity/转换规则
     的当前完整内容，整条替换进 `models`（同 key 覆盖，新 key 追加）。
 
@@ -321,7 +330,7 @@ def _sync_own_isv_metadata_cli(args: argparse.Namespace, models: list):
         return 1
 
     for note in result.notices:
-        print(f"提示: {note}", file=sys.stderr)
+        progress.note(f"提示: {note}")
     return result.models, result.isv, result.sync_ts
 
 
@@ -407,10 +416,34 @@ def _resolve_db(args: argparse.Namespace) -> str:
     return DEFAULT_DB  # 6) 最终兜底：cwd/cosmic_kb.db（向后兼容老用法）
 
 
-def _build_kb(args: argparse.Namespace, db_path: str) -> tuple[dict | None, int]:
+def _plan_build_stages(args: argparse.Namespace) -> list[str]:
+    """按本次入参算出 build 会经过的全部进度阶段（[k/N] 的 N 由此而来）。
+
+    必须与 `_build_kb` 里 progress.stage(...) 的实际调用一一对应：可选阶段
+    （符号解析/DB 同步/原厂补充）按同样的条件增删；最后三个阶段由
+    `store.build_kb` 内部推进（BUILD_STAGES 两侧共用一份常量）。
+    """
+    from ..graph.store import BUILD_STAGES
+
+    stages = ["源码扫描"]
+    if not getattr(args, "no_symbols", False):
+        stages.append("编译期符号解析")
+    stages.append("元数据解析")
+    if getattr(args, "db_config", None):
+        stages.append("二开元数据同步")
+    if getattr(args, "db_config", None) or getattr(args, "vendor", None):
+        stages.append("原厂元数据补充")
+    stages.append("桥接与模块识别")
+    stages.extend(BUILD_STAGES)
+    return stages
+
+
+def _build_kb(args: argparse.Namespace, db_path: str,
+              progress: Progress = NULL_PROGRESS) -> tuple[dict | None, int]:
     """阶段4 共用：扫描 + 桥接 + 模块识别 + 灌库。返回 (计数摘要, rc)。
 
     源码索引只建一次，喂桥接与模块识别（守红线「规模大」，不重复解析千百文件）。
+    progress：进度报告器（build 命令注入 ConsoleProgress；bootstrap 等静默调用走默认）。
     """
     from ..ingest import scanner
     from ..bridge import linker, namespace
@@ -418,14 +451,89 @@ def _build_kb(args: argparse.Namespace, db_path: str) -> tuple[dict | None, int]
     from ..report import project_map
     from ..graph import store
 
+    progress.stage("源码扫描")
     try:
-        scan_result = scanner.scan(args.source_root, follow_symlinks=args.follow_symlinks)
+        scan_result = scanner.scan(args.source_root, follow_symlinks=args.follow_symlinks,
+                                   progress=progress)
     except FileNotFoundError as exc:
         print(f"错误: {exc}", file=sys.stderr)
         return None, 2
+    progress.tick(len(scan_result.files), len(scan_result.files) or None, "个文件")
 
+    # 编译期符号层在 SQLite 事务**之前**完成：JVM 冷盘/崩溃都只影响精确层，绝不占住建库事务；
+    # outcome 的 status/reason/attempts 原样进 kb_meta，失败退回 tree-sitter 名字匹配。
+    symbols = None
+    explicit_cp = list(getattr(args, "classpath_dir", None) or [])
+    no_symbols = bool(getattr(args, "no_symbols", False))
+    if no_symbols:
+        symbol_resolution = {
+            "status": "disabled", "provider": None, "jar_count": 0,
+            "coverage": 0.0, "by_resolution": {}, "attempts": [],
+            "reason": "用户指定 --no-symbols，已使用 tree-sitter 名字匹配",
+        }
+        progress.note("符号解析: disabled（--no-symbols，降级为 tree-sitter 名字匹配）")
+    else:
+        from ..java.symbols import discover_classpath
+        from ..java.symbols import runner as symbol_runner
+
+        progress.stage("编译期符号解析")
+        cp = discover_classpath(args.source_root, explicit_dirs=explicit_cp)
+        symbol_resolution = {
+            "status": "unavailable", "provider": cp.provider,
+            "jar_count": cp.jar_count, "coverage": 0.0, "by_resolution": {},
+            "attempts": [a.to_dict() for a in cp.attempts], "reason": None,
+        }
+        if cp.status != "ok":
+            symbol_resolution["reason"] = "未发现可用类路径，已使用 tree-sitter 名字匹配"
+            progress.note("符号解析: unavailable（未发现类路径，降级为 tree-sitter 名字匹配）")
+        else:
+            entries = [
+                {"path": str(sf.path), "relpath": sf.relpath, "encoding": sf.encoding}
+                for sf in scan_result.ok_files if sf.relpath.lower().endswith(".java")
+            ]
+            extra_roots = [] if cp.source_roots() else [str(scan_result.root)]
+            request = symbol_runner.request_from_classpath(
+                cp, entries, extra_source_roots=extra_roots)
+            progress.note(f"符号解析: provider={cp.provider}  jar={cp.jar_count}  files={len(entries)}"
+                          "（首次读取新 jar 目录可能需数分钟）")
+            progress.tick(0, None, label="solver 构建(读 jar)")
+
+            # JVM 微工具逐文件回报 file 事件（runner 早就把 on_event 留给 CLI 进度用了）。
+            sym_done = 0
+
+            def _on_sym_event(event: dict) -> None:
+                nonlocal sym_done
+                etype = event.get("event")
+                if etype == "file":
+                    sym_done += 1
+                    progress.tick(sym_done, len(entries), "个文件", label="逐文件解析")
+                elif etype == "solver_ready":
+                    progress.tick(0, None, label="逐文件解析")
+
+            outcome = symbol_runner.run(request, on_event=_on_sym_event)
+            stats = outcome.table.stats() if outcome.table is not None else {}
+            symbols = outcome.table if outcome.usable else None
+            symbol_resolution.update({
+                "status": outcome.status,
+                "coverage": stats.get("coverage", 0.0),
+                "by_resolution": stats.get("by_resolution", {}),
+                "by_failure_reason": stats.get("by_failure_reason", {}),
+                "files": stats.get("files", 0),
+                "files_failed": stats.get("files_failed", 0),
+                "sites": stats.get("sites", 0),
+                "resolved": stats.get("resolved", 0),
+                "reason": outcome.reason,
+                "elapsed_ms": outcome.elapsed_ms,
+                "solver": outcome.solver,
+                "warnings": list(outcome.table.warnings) if outcome.table else [],
+            })
+            progress.note(f"符号解析: {outcome.status}  coverage={stats.get('coverage', 0.0):.1%}  "
+                          f"resolved={stats.get('resolved', 0)}/{stats.get('sites', 0)}"
+                          + (f"  reason={outcome.reason}" if outcome.reason else ""))
+
+    progress.stage("元数据解析")
     registry = TemplateRegistry(args.template_dir) if args.template_dir else TemplateRegistry()
-    models, rc = _collect_models(args.meta, registry)
+    models, rc = _collect_models(args.meta, registry, progress=progress)
     if rc:
         return None, rc
     # 空 models 的检查挪到下面——纯 DB 冷启动建库（--db-config 给了、meta 为空）
@@ -433,13 +541,16 @@ def _build_kb(args: argparse.Namespace, db_path: str) -> tuple[dict | None, int]
 
     sync_isv = sync_ts = None
     if getattr(args, "db_config", None):
-        outcome = _sync_own_isv_metadata_cli(args, models)
+        progress.stage("二开元数据同步")
+        outcome = _sync_own_isv_metadata_cli(args, models, progress=progress)
         if isinstance(outcome, int):
             return None, outcome
         models, sync_isv, sync_ts = outcome
 
     vendor_fnumbers = getattr(args, "vendor", None)
-    result = _apply_vendor_metadata_cli(args, models, scan_result)
+    if getattr(args, "db_config", None) or vendor_fnumbers:
+        progress.stage("原厂元数据补充")
+    result = _apply_vendor_metadata_cli(args, models, scan_result, progress=progress)
     if isinstance(result, int):
         return None, result
     models = result
@@ -451,10 +562,15 @@ def _build_kb(args: argparse.Namespace, db_path: str) -> tuple[dict | None, int]
         )
         return None, 2
 
+    progress.stage("桥接与模块识别")
     index = namespace.build_index(scan_result)
     bridge = linker.link(scan_result, models, index=index)
     mm = project_map.module_map(scan_result, models, bridge, index=index)
     source_args = {"source_root": str(args.source_root), "meta": list(args.meta)}
+    if explicit_cp:
+        source_args["classpath_dirs"] = explicit_cp
+    if no_symbols:
+        source_args["no_symbols"] = True
     if vendor_fnumbers:
         source_args["vendor_fnumbers"] = list(vendor_fnumbers)
     if sync_ts:
@@ -463,18 +579,26 @@ def _build_kb(args: argparse.Namespace, db_path: str) -> tuple[dict | None, int]
     counts = store.build_kb(
         scan_result, models, bridge, mm, db_path, index=index,
         source_args=source_args,
+        symbols=symbols, symbol_resolution=symbol_resolution,
+        progress=progress,
     )
     return counts, 0
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
     """阶段4：建/重建 Cosmic KB（SQLite + FTS5），落盘项目地图与理解报告的数据底座。"""
-    counts, rc = _build_kb(args, args.db)
-    if rc:
-        return rc
+    progress = ConsoleProgress(len(_plan_build_stages(args)))
+    try:
+        counts, rc = _build_kb(args, args.db, progress=progress)
+        if rc:
+            return rc
+        progress.finish()
+    finally:
+        progress.close()   # 出错/异常路径：进度行没换行就补一个，别让报错串在行尾
     print(f"✅ KB 已建好: {args.db}")
     order = ["module", "form", "entity", "field", "plugin", "convert_rule", "operation",
-             "source_class", "binding", "plugin_method", "field_access", "coarse_field_hit",
+             "source_class", "binding", "plugin_method", "field_access", "call_edge",
+             "coarse_field_hit",
              "edge", "search"]
     print("  " + "  ".join(f"{k}={counts[k]}" for k in order if k in counts))
     print("  下一步: 在该项目目录下直接  cosmic_kb trace <字段标识>   （自动就近发现此 KB）")
@@ -490,7 +614,13 @@ def _ensure_kb(args: argparse.Namespace) -> tuple[str | None, int]:
         return args.db, 0
     if getattr(args, "source_root", None) and getattr(args, "meta", None):
         print(f"提示: KB 不存在或版本不符，按入参临时重建 {args.db} …", file=sys.stderr)
-        _counts, rc = _build_kb(args, args.db)
+        progress = ConsoleProgress(len(_plan_build_stages(args)))
+        try:
+            _counts, rc = _build_kb(args, args.db, progress=progress)
+            if rc == 0:
+                progress.finish()
+        finally:
+            progress.close()
         return (args.db, 0) if rc == 0 else (None, rc)
     print(
         f"错误: KB 不存在或版本不符: {args.db}\n"
@@ -673,6 +803,28 @@ def _cmd_trace(args: argparse.Namespace) -> int:
             print(field_trace.render_field_trace(ft, max_list=args.max_list))
         # 跨单据歧义需反问时返回非零退出码，方便脚本/Skill 判断"还要指定单据再查"。
         return 3 if ft.get("status") == "need_clarification" else 0
+    finally:
+        conn.close()
+
+
+def _cmd_callers(args: argparse.Namespace) -> int:
+    """阶段 12.3：Java 方法反查（谁调用了它 / 静态死代码证据）。"""
+    from ..graph import store
+    from ..report import callers as callers_report
+
+    db, rc = _ensure_kb(args)
+    if rc:
+        return rc
+    conn = store.open_kb(db)
+    try:
+        result = callers_report.callers(conn, args.target)
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(callers_report.render_callers(result, max_list=args.max_list))
+        if result.get("status") == "need_clarification":
+            return 3
+        return 2 if result.get("error") else 0
     finally:
         conn.close()
 
@@ -1089,6 +1241,7 @@ def _cmd_bootstrap_apply(args: argparse.Namespace) -> int:
         agents=args.agent, force_mcp=args.force_mcp,
         prompt_db_password=args.prompt_db_password, run_coverage=args.coverage,
         rebuild=args.rebuild, dry_run=args.dry_run,
+        classpath_dirs=args.classpath_dir, no_symbols=args.no_symbols,
     )
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -1285,6 +1438,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="显式指定本项目二开 ISV（跳过自动发现/消歧）；不给且候选唯一时自动使用，"
              "候选 >1 个且无法用本地元数据消歧时报错列出候选（各自表单数），需手动指定",
     )
+    build.add_argument(
+        "--classpath-dir", action="append", default=[], metavar="DIR",
+        help="显式指定本地 jar 类路径目录（可重复；优先于 IDEA/Gradle 自动发现）",
+    )
+    build.add_argument(
+        "--no-symbols", action="store_true",
+        help="禁用编译期符号解析，强制使用 tree-sitter 名字匹配（诊断/基线对照用）",
+    )
     build.set_defaults(func=_cmd_build, creating=True)
 
     report = sub.add_parser(
@@ -1342,6 +1503,18 @@ def build_parser() -> argparse.ArgumentParser:
                        help="限定层级：表头/分录/子分录/基础资料")
     _add_report_common(trace)
     trace.set_defaults(func=_cmd_trace)
+
+    callers = sub.add_parser(
+        "callers",
+        help="阶段12.3：反查谁调用了某 Java 方法（含方法引用与符号覆盖率，可作死代码证据）",
+    )
+    callers.add_argument(
+        "target",
+        help="Java 方法坐标：Class.method 或 完整包名.Class.method，如 "
+             "ContractService.updateRlateAssets",
+    )
+    _add_report_common(callers)
+    callers.set_defaults(func=_cmd_callers)
 
     resolve = sub.add_parser(
         "resolve",
@@ -1476,7 +1649,7 @@ def build_parser() -> argparse.ArgumentParser:
     # ── 对话式安装 Bootstrap 编排器（plan/apply/status）──────────────────────
     bootstrap = sub.add_parser(
         "bootstrap",
-        help="对话式安装编排：plan 只读探测 → apply 建库+装Skill+注册MCP+四工具校验 → status 查进度",
+        help="对话式安装编排：plan 只读探测 → apply 建库+装Skill+注册MCP+五工具校验 → status 查进度",
     )
     bootstrap.set_defaults(func=lambda _args: (bootstrap.print_help() or 0))
     bsub = bootstrap.add_subparsers(dest="bootstrap_command")
@@ -1513,6 +1686,10 @@ def build_parser() -> argparse.ArgumentParser:
     bs_apply.add_argument("--coverage", action="store_true", help="doctor 后附带跑一次覆盖率")
     bs_apply.add_argument("--rebuild", action="store_true", help="KB 已存在也强制重建（默认续跑跳过）")
     bs_apply.add_argument("--dry-run", action="store_true", help="只演练不写入")
+    bs_apply.add_argument("--classpath-dir", action="append", default=[], metavar="DIR",
+                          help="显式 jar 类路径目录（可重复，透传 build）")
+    bs_apply.add_argument("--no-symbols", action="store_true",
+                          help="禁用编译期符号解析（透传 build）")
     bs_apply.set_defaults(func=_cmd_bootstrap_apply)
 
     bs_status = bsub.add_parser("status", help="读 install.json + 各步产物，报告进度与下一步")

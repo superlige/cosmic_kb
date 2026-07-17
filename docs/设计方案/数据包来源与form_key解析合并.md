@@ -54,24 +54,28 @@
 以下数量按真实项目 `D:\kingdee\asset_management_sys\cosmic_kb.db` 的 `field_access` 表复算。重建命令：
 
 ```powershell
-cosmic_kb build "D:\kingdee\asset_management_sys" "D:\codex\cqkd_ai\samples\appzip" "D:\codex\cqkd_ai\samples\trans"
+python -m cosmic_kb.cli.main build "D:\kingdee\asset_management_sys" --db-config "D:\kingdee\asset_management_sys\cosmic_db.json" --isv cqkd --db "D:\kingdee\asset_management_sys\cosmic_kb.db"
 ```
 
 > 每次做 form_key 优化并测试通过后，回来刷新 §2 的两张表。
 
 ---
 
-## 2. 当前识别情况（2026-06-27 反向调用图固定点版）
+## 2. 当前识别情况（2026-07-16 · schema v18 真实整库）
+
+> 已用项目 `cosmic_db.json` 全量同步 `cqkd` ISV 元数据并覆盖重建真实 KB；
+> built_at 2026-07-16 12:17:16，`PRAGMA integrity_check=ok`。SymbolTable 解析
+> 83712/86189（97.13%），以下指标全部由磁盘上 schema v18 KB 重新 SQL 复算。
 
 ### 2.1 总体定位率
 
 | 口径 | 总数 | 未定位（form_key=None） | 未定位占比 |
 |------|------|------------------------|------------|
-| 全部字段读写 | 20,259 | 6,903 | 34.07% |
-| 写访问 write | 7,336 | 1,930 | 26.31% |
-| 读访问 read | 12,923 | 4,973 | 38.48% |
+| 全部字段读写 | 21,763 | 6,854 | 31.49% |
+| 写访问 write | 7,809 | 1,780 | 22.79% |
+| 读访问 read | 13,954 | 5,074 | 36.36% |
 
-已定位 13,356 条（65.93%）。
+已定位 14,909 条（68.51%）。
 
 ### 2.2 已定位的来源依据分布
 
@@ -79,11 +83,11 @@ cosmic_kb build "D:\kingdee\asset_management_sys" "D:\codex\cqkd_ai\samples\appz
 
 | 来源依据 | 数量 | 占全部 | 强度 | 说明 |
 |----------|------|--------|------|------|
-| `data_flow` | 8,895 | 43.91% | 数据流证明 | 事件入参 / ORM / 转换源目标 / 集合·行变量 / 跨方法传播 |
-| `reverse_callgraph` | 218 | 1.08% | 数据流证明 | 孤立 helper 被项目内可解析调用，实参来源安全收敛后反向传播（见 §4.6） |
-| `metadata_unique` | 2,317 | 11.44% | 元数据反推 | 数据流断链，但字段 key 在元数据里只归一张单据，反查唯一 |
-| `metadata_binding` | 1,169 | 5.77% | 元数据反推 | 字段 key 多候选，但与插件绑定单据取交后唯一 |
-| `metadata_cooccur` | 757 | 3.74% | 元数据反推 | 同一接收者变量连读写多字段，候选单据交集唯一 |
+| `data_flow` | 9,882 | 45.41% | 数据流证明 | 事件入参 / ORM / 转换源目标 / 集合·行变量 / 跨方法传播 |
+| `reverse_callgraph` | 204 | 0.94% | 数据流证明 | 孤立 helper 被项目内可解析调用，实参来源安全收敛后反向传播（见 §4.6） |
+| `metadata_unique` | 2,262 | 10.39% | 元数据反推 | 数据流断链，但字段 key 在元数据里只归一张单据，反查唯一 |
+| `metadata_binding` | 1,756 | 8.07% | 元数据反推 | 字段 key 多候选，但与插件绑定单据取交后唯一 |
+| `metadata_cooccur` | 805 | 3.70% | 元数据反推 | 同一接收者变量连读写多字段，候选单据交集唯一 |
 
 > `data_flow`/`reverse_callgraph` 是真实数据流级证据；`metadata_*` 是"按字段归属反推来源单据"——不是冒充数据流。`read_source` 对 `metadata_*` 来源会注明"依据是字段归属、非数据流行号"。
 

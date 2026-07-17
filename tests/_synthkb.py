@@ -83,26 +83,30 @@ def make_kb(tmp_path: Path) -> Path:
         "INSERT INTO plugin_method(plugin_fqn,method_name,event_kind,event_phase,start_line,"
         "end_line,source_relpath) VALUES(?,?,?,?,?,?,?)",
         [
+            ("cqspb.assets.CollateralOp", "beforeExecuteOperationTransaction",
+             "beforeExecuteOperationTransaction", "transaction", 20, 39,
+             "cqspb/assets/CollateralOp.java"),
             ("cqspb.assets.CollateralService", "update", "helper", "helper", 40, 70,
              "cqspb/assets/CollateralService.java"),
         ],
     )
     conn.executemany(
         "INSERT INTO field_access(form_key,field_key,level,entry_key,plugin_fqn,plugin_type,"
-        "access_class,event_method,event_phase,access,persists,persist_reason,via,line,path,"
-        "key_resolution,confidence,source_relpath,evidence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "access_class,access_method,event_method,event_phase,access,persists,persist_reason,via,line,path,"
+        "key_resolution,confidence,source_relpath,evidence,edge_source) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [
             ("cqkd_assetcard", "cqkd_collateralstatus", "header", None,
              "cqspb.assets.CollateralOp", "op", "cqspb.assets.CollateralService",
-             "beforeExecuteOperationTransaction", "transaction", "write", "yes",
+             "update", "beforeExecuteOperationTransaction", "transaction", "write", "yes",
              "入库类操作(audit)事务内 setValue", "do.set", 41,
              json.dumps(["beforeExecuteOperationTransaction", "update"]),
-             "literal", 0.95, "cqspb/assets/CollateralService.java", ""),
+             "literal", 0.95, "cqspb/assets/CollateralService.java", "", "heuristic"),
             ("cqkd_assetcard", "cqkd_amount", "entry", "cqkd_entry",
              "cqspb.assets.CollateralOp", "op", "cqspb.assets.CollateralOp",
-             "beforeExecuteOperationTransaction", "transaction", "read", "na",
+             "beforeExecuteOperationTransaction", "beforeExecuteOperationTransaction", "transaction", "read", "na",
              "", "model.getValue", 55, json.dumps(["beforeExecuteOperationTransaction"]),
-             "literal", 0.9, "cqspb/assets/CollateralOp.java", ""),
+             "literal", 0.9, "cqspb/assets/CollateralOp.java", "", "local"),
         ],
     )
     conn.executemany(
@@ -113,12 +117,40 @@ def make_kb(tmp_path: Path) -> Path:
              "cqspb/assets/CollateralOp.java", 1.0, ""),
         ],
     )
+    conn.executemany(
+        "INSERT INTO call_edge(caller_fqn,caller_method,target_fqn,target_method,target_signature,"
+        "kind,line,col,source_relpath,resolution,target_kind,confidence,evidence) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [
+            ("cqspb.assets.CollateralOp", "beforeExecuteOperationTransaction",
+             "cqspb.assets.CollateralService", "update",
+             "cqspb.assets.CollateralService.update(kd.bos.dataentity.entity.DynamicObject)",
+             "invocation", 31, 9, "cqspb/assets/CollateralOp.java", "expr", "project", 1.0,
+             "symbol:expr"),
+            ("cqspb.assets.CollateralOp", "wireHandlers",
+             "cqspb.assets.CollateralService", "update",
+             "cqspb.assets.CollateralService.update(kd.bos.dataentity.entity.DynamicObject)",
+             "method_reference", 35, 21, "cqspb/assets/CollateralOp.java", "scope", "project", 0.95,
+             "symbol:scope"),
+            ("cqspb.assets.CollateralService", "update", "kd.bos.servicehelper.SaveServiceHelper",
+             "save", "kd.bos.servicehelper.SaveServiceHelper.save(kd.bos.orm.dataentity.DynamicObject)",
+             "invocation", 60, 13, "cqspb/assets/CollateralService.java", "expr", "jar", 1.0,
+             "symbol:expr"),
+            ("cqspb.assets.CollateralService", "update", None, "dynamicInvoke", None,
+             "invocation", 64, 13, "cqspb/assets/CollateralService.java", "failed", None, 0.0,
+             "symbol:failed; reason=unsolved-symbol"),
+        ],
+    )
     # 字段级分析可用标记（field_trace 读 java_analysis）。
     conn.executemany(
         "INSERT INTO kb_meta(key,value) VALUES(?,?)",
         [
             ("schema_version", store.KB_SCHEMA_VERSION),
             ("java_analysis", json.dumps({"available": True})),
+            ("symbol_resolution", json.dumps({
+                "status": "ok", "coverage": 0.97, "files": 2, "files_failed": 0,
+                "sites": 100, "resolved": 97,
+            })),
             ("built_at", "test"),
         ],
     )

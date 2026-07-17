@@ -8,8 +8,8 @@
   1. **全项目类索引**：每个项目源码顶层类型解析一次（树缓存），记 FQN→类信息（类内调用图、
      成员字段类型、方法表），并顺便灌常量表（复用同一棵树、不重复解析）。
   2. **跨类调用回溯**：从一个事件方法出发，沿「类内调用 + 可解析的跨类调用」BFS，返回每个
-     可达 (类, 方法) + 调用路径。接收者类型解析靠**本地变量声明类型 / 成员字段类型 / 静态调用
-     类名**（野生代码、不编译，纯启发式：解不出就当外部、不臆造）。
+     可达 (类, 方法) + 调用路径。阶段 12 优先消费编译期 SymbolTable；未提供、调用点解不出或
+     对不齐时，才退回**本地变量声明类型 / 成员字段类型 / 静态调用类名**启发式。
 
 只跟进**项目自有类**（有源码、在索引里）；调到 kd.bos.* 等平台/外部方法解析不了，记为
 unresolved（落库判定据此保守标 unknown）。守红线：处处置信度、跨类靠传递路径、解不出标 unknown。
@@ -28,9 +28,11 @@ from . import constants as const_mod
 if TYPE_CHECKING:
     from ..bridge.namespace import SourceIndex
     from ..ingest.scanner import ScanResult
+    from ..progress import Progress
     from .ast_index import TypeDecl
     from .call_graph import CallGraph
     from .constants import ConstantTable
+    from .symbols import SymbolSite, SymbolTable
 
 
 @dataclass
@@ -54,13 +56,27 @@ class CrossReach:
     path: list[str]                          # [事件名, …, 限定名]（跨类段用 Simple.method）
 
 
+@dataclass(frozen=True)
+class ResolvedCall:
+    """一个已落到项目源码方法的调用边，并保留解析来源供精度分级。"""
+
+    fqn: str
+    method: str
+    source: str                              # local | symbol | heuristic
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return self.fqn, self.method
+
+
 class ProjectGraph:
     """全项目类索引 + 常量表。"""
 
-    def __init__(self) -> None:
+    def __init__(self, symbols: "SymbolTable | None" = None) -> None:
         self.classes: dict[str, ClassNode] = {}      # FQN → 类信息
         self.by_simple: dict[str, list[str]] = {}    # 简单名 → [FQN]（类型解析）
         self.const: "ConstantTable" = const_mod.ConstantTable()
+        self.symbols = symbols
         # 接收者类型解析缓存：(fqn, method) → {变量名: 类型简单名}
         self._local_cache: dict[tuple[str, str], dict[str, str]] = {}
 
@@ -82,10 +98,26 @@ class ProjectGraph:
         self._local_cache[key] = types
         return types
 
+    def _symbol_site(self, node: ClassNode, inv: ax.Invocation) -> "SymbolSite | None":
+        if self.symbols is None:
+            return None
+        return self.symbols.lookup(node.relpath, inv.line, inv.name, inv.col)
+
     def _resolve_target(
         self, node: ClassNode, method: str, inv: ax.Invocation,
-    ) -> tuple[str, str] | None:
-        """把一个跨类方法调用解析成项目内 (目标FQN, 方法名)；解不出返回 None。"""
+    ) -> ResolvedCall | None:
+        """把跨类调用解析成项目内目标；符号精确层优先，失败才退名字启发式。
+
+        符号已成功落到 jar/jdk（或落到当前图未收录的源码类型）时不再用同名启发式覆盖这个
+        确定性结论；只有无 site / failed site 才回退。
+        """
+        site = self._symbol_site(node, inv)
+        if site is not None and site.resolved:
+            if (site.target_kind == "project" and site.declaring in self.classes
+                    and inv.name in self.classes[site.declaring].cg.methods):
+                return ResolvedCall(site.declaring, inv.name, "symbol")
+            return None
+
         recv = inv.object_text.strip()
         if recv in ("", "this"):
             return None
@@ -109,7 +141,7 @@ class ProjectGraph:
             return None
         target = fqns[0]
         if inv.name in self.classes[target].cg.methods:
-            return (target, inv.name)
+            return ResolvedCall(target, inv.name, "heuristic")
         return None
 
     # ── 跨类可达 ──────────────────────────────────────────────────────
@@ -135,12 +167,13 @@ class ProjectGraph:
             # 跨类调用。
             md = node.cg.methods.get(method)
             if md is not None:
-                for inv in ax.iter_invocations(md.body):
+                for inv in ax.iter_invocations(md.body, include_refs=True):
                     tgt = self._resolve_target(node, method, inv)
-                    if tgt is not None and tgt not in seen:
-                        tsimple = self.classes[tgt[0]].simple
-                        seen[tgt] = path + [f"{tsimple}.{tgt[1]}"]
-                        queue.append((tgt, depth + 1))
+                    key = tgt.key if tgt is not None else None
+                    if key is not None and key not in seen:
+                        tsimple = self.classes[tgt.fqn].simple
+                        seen[key] = path + [f"{tsimple}.{tgt.method}"]
+                        queue.append((key, depth + 1))
         return [CrossReach(fqn=f, method=m, path=p) for (f, m), p in seen.items()]
 
     def has_unresolved_external(self, reach: list[CrossReach]) -> bool:
@@ -152,10 +185,18 @@ class ProjectGraph:
             md = node.cg.methods.get(r.method)
             if md is None:
                 continue
-            for inv in ax.iter_invocations(md.body):
+            for inv in ax.iter_invocations(md.body, include_refs=True):
                 recv = inv.object_text.strip()
                 if recv in ("", "this"):
                     continue
+                site = self._symbol_site(node, inv)
+                if site is not None and site.resolved:
+                    # 已证实是平台/JDK 目标：若它是落库 sink，find_sinks 会按 FQN 白名单收；
+                    # 若不是 sink，就不再把它当“未知外泄”把 persistence 压到 0.3 档。
+                    if site.target_kind in ("jar", "jdk"):
+                        continue
+                    if site.target_kind == "project" and site.declaring in self.classes:
+                        continue
                 if "." not in recv:
                     continue                        # 简单接收者（bill.set 等）不视为外泄
                 if self._resolve_target(node, r.method, inv) is None:
@@ -163,12 +204,20 @@ class ProjectGraph:
         return False
 
 
-def build_project_graph(scan_result: "ScanResult", index: "SourceIndex") -> ProjectGraph:
-    """解析全部项目 Java（每文件一次），建类索引 + 常量表。"""
-    pg = ProjectGraph()
-    for sf in scan_result.ok_files:
-        if not sf.relpath.lower().endswith(".java"):
-            continue
+def build_project_graph(scan_result: "ScanResult", index: "SourceIndex",
+                        symbols: "SymbolTable | None" = None,
+                        progress: "Progress | None" = None) -> ProjectGraph:
+    """解析全部项目 Java（每文件一次），建类索引 + 常量表。
+
+    progress：可选进度报告器——这是 Java 分析里最先跑、也最容易被误当"卡住"的一步
+    （逐文件 tree-sitter 解析），按文件数打点。
+    """
+    pg = ProjectGraph(symbols)
+    java_files = [sf for sf in scan_result.ok_files
+                  if sf.relpath.lower().endswith(".java")]
+    for done, sf in enumerate(java_files, 1):
+        if progress is not None:
+            progress.tick(done, len(java_files), "个文件", label="解析工程 Java")
         root = ax.parse_tree(sf.text)
         if root is None:
             continue

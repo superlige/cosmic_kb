@@ -88,6 +88,8 @@ _SYNTH_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
   <Operation><Id>SAVE_OID</Id><Key>save</Key><Name>保存</Name><OperationType>save</OperationType>
     <Parameter><SaveParameter><Id>SHOULD_NOT_PICK</Id></SaveParameter></Parameter>
   </Operation>
+  <Operation><Id>REFRESH_OID</Id><Key>refresh</Key><Name>刷新</Name><OperationType>refresh</OperationType>
+  </Operation>
 </Operations></BillEntity></Items></EntityMetadata>
 """
 
@@ -137,6 +139,15 @@ def test_synth_operation_oid_uses_direct_child_id(tmp_path):
     assert save.key == "save" and save.name == "保存" and save.resolved_from == "template"
     own = next(o for o in m.operations if o.key == "myop")
     assert own.resolved_from == "self" and own.operation_type == "donothing"
+
+
+def test_synth_includes_unmodified_template_operation(tmp_path):
+    """完全沿用模板的预制操作不会出现在业务 XML，也必须进入最终操作集。"""
+    m = _synth_model(tmp_path)
+    refresh = next(o for o in m.operations if o.key == "refresh")
+    assert (refresh.name, refresh.operation_type, refresh.oid, refresh.resolved_from) == \
+        ("刷新", "refresh", "REFRESH_OID", "template")
+    assert [o.key for o in m.operations].count("save") == 1  # 显式覆盖优先，不重复补模板项
 
 
 def test_synth_plugins_three_locations(tmp_path):

@@ -7,7 +7,8 @@ persistence` 复用。
 
 设计约束（守红线）：
     - 野生代码、可能不可编译 —— 依赖 tree-sitter 错误恢复，partial 树照样遍历，绝不崩。
-    - 只读 AST、不做类型解析、不碰外部符号（kd.bos.* 等留给后续按 SDK 解释）。
+    - 本模块只读 AST；阶段 12 的编译期符号解析作为可选精确层从 ``symbols/`` 注入，失败仍
+      回退本模块的名字匹配，不改变 tree-sitter 这条召回底线。
     - 行号一律 1-based，直接可对照源码（与 parser.py 的 ErrorSpan 口径一致）。
     - tree-sitter 未装时 parse_tree 返回 None，调用方据此跳过（由可信度报告如实呈现）。
 """
@@ -408,13 +409,39 @@ class Invocation:
     object_text: str               # 接收者表达式文本（无则 ""，如同类方法 helper(...)）
     object_node: "Node | None"
     args: list["Node"]             # 实参表达式节点（已剔标点）
-    arg_count: int
-    line: int
+    arg_count: int | None          # method_reference 没有实参，记 None
+    line: int                      # 方法名标识符起点（1-based）
+    col: int                       # 方法名标识符字符列（1-based，非 UTF-8 字节列）
+    kind: str                      # invocation | method_reference
     node: "Node"
 
 
-def iter_invocations(node: "Node | None") -> Iterator[Invocation]:
-    """遍历子树内的所有方法调用（method_invocation），含嵌套链式调用。"""
+def _char_col(name_node: "Node") -> int:
+    """把 tree-sitter 的 UTF-8 **字节列**换成协议 v1 的 1-based **字符列**。
+
+    tree-sitter 的 ``start_point.column`` 对非 ASCII 源码按 UTF-8 字节计数；JavaParser 协议按
+    Java 字符列计数。沿 parent 找到整棵树，用 ``start_byte`` 截取本行前缀再 UTF-8 解码，
+    才能让中文注释/标识符之后的调用点与 SymbolTable 精确对齐。极端旧 binding 没有 parent
+    时保守退回字节列（lookup 仍有三元组唯一性兜底）。
+    """
+    try:
+        root = name_node
+        while root.parent is not None:
+            root = root.parent
+        raw = root.text
+        line_start = raw.rfind(b"\n", 0, name_node.start_byte) + 1
+        prefix = raw[line_start:name_node.start_byte]
+        return len(prefix.decode("utf-8", "replace")) + 1
+    except Exception:
+        return name_node.start_point[1] + 1
+
+
+def iter_invocations(node: "Node | None", *, include_refs: bool = False) -> Iterator[Invocation]:
+    """遍历子树内的方法调用；``include_refs=True`` 时同时产出 ``Class::method``。
+
+    默认仍只扫 ``method_invocation``，避免没有实参的 method_reference 进入字段访问、常量实参
+    等消费者。调用图/可达性/sink 消费者显式开启引用扫描。
+    """
     if node is None:
         return
     stack = [node]
@@ -422,6 +449,9 @@ def iter_invocations(node: "Node | None") -> Iterator[Invocation]:
         n = stack.pop()
         if n.type == "method_invocation":
             name_node = n.child_by_field_name("name")
+            if name_node is None:
+                stack.extend(n.children)
+                continue
             obj_node = n.child_by_field_name("object")
             args_node = n.child_by_field_name("arguments")
             args = list(args_node.named_children) if args_node is not None else []
@@ -431,9 +461,28 @@ def iter_invocations(node: "Node | None") -> Iterator[Invocation]:
                 object_node=obj_node,
                 args=args,
                 arg_count=len(args),
-                line=_line(n),
+                line=_line(name_node),
+                col=_char_col(name_node),
+                kind="invocation",
                 node=n,
             )
+        elif include_refs and n.type == "method_reference":
+            # tree-sitter-java 0.21 的 method_reference 没有 field name；scope 是首个 named
+            # child，方法名/构造器 new 是末 child（中间可能夹 type_arguments）。
+            obj_node = n.children[0] if n.children else None
+            name_node = n.children[-1] if n.children else None
+            if name_node is not None:
+                yield Invocation(
+                    name=_text(name_node),
+                    object_text=_text(obj_node),
+                    object_node=obj_node,
+                    args=[],
+                    arg_count=None,
+                    line=_line(name_node),
+                    col=_char_col(name_node),
+                    kind="method_reference",
+                    node=n,
+                )
         stack.extend(n.children)
 
 

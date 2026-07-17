@@ -5,7 +5,7 @@
 - :func:`plan`：**只读探测**——环境 / 候选（源码根、dym/cr/zip、db 配置）/ 已有产物（KB、Skill、
   MCP）/ 同名冲突，产出 `questions` / `planned_actions` / `manual_actions`。无任何副作用。
 - :func:`apply`：**确定顺序、每步幂等、可断点续跑**——写 `install.json` → 装两份 Skill → 建 KB →
-  `doctor`(+可选 coverage) → 注册 MCP → 四工具校验 → 输出重连步骤。
+  `doctor`(+可选 coverage) → 注册 MCP → 五工具校验 → 输出重连步骤。
 - :func:`status`：读 `install.json` + 各步产物，报告已完成 / 待做。
 
 两条红线：`install.json` 及一切返回体 **绝不写数据库口令**（红线 #1）；数据库口令走单进程
@@ -119,6 +119,8 @@ def _step_build_kb(project, kb_path, opts: dict[str, Any], *, rebuild: bool, dry
         db_config=opts.get("db_config"),
         isv=opts.get("isv"),
         vendor=opts.get("vendor"),
+        classpath_dir=list(opts.get("classpath_dirs") or []),
+        no_symbols=bool(opts.get("no_symbols", False)),
         creating=True,
         db=str(kb_path),
     )
@@ -315,7 +317,7 @@ def plan(
         + ("（已存在，续跑会跳过）" if store.kb_exists(str(kb_path)) else ""),
         "跑 doctor 自检资产",
         f"注册 MCP server cosmic_kb 到 {mcp['shared_path']}（+ TRAE 导入包）",
-        f"子进程校验四工具可用: {', '.join(mcp_register.REQUIRED_TOOLS)}",
+        f"子进程校验五工具可用: {', '.join(mcp_register.REQUIRED_TOOLS)}",
     ]
 
     return {
@@ -361,6 +363,8 @@ def apply(
     run_coverage: bool = False,
     rebuild: bool = False,
     dry_run: bool = False,
+    classpath_dirs: Sequence[str] | None = None,
+    no_symbols: bool = False,
     source: str = "source",
     db_password_reader: Callable[[str], str] = getpass.getpass,
 ) -> tuple[dict[str, Any], int]:
@@ -397,6 +401,8 @@ def apply(
         "vendor": list(vendor) if vendor else None,
         "template_dir": template_dir,
         "follow_symlinks": follow_symlinks,
+        "classpath_dirs": list(classpath_dirs or []),
+        "no_symbols": no_symbols,
     }
 
     steps: list[dict[str, Any]] = []
@@ -407,7 +413,7 @@ def apply(
     build_ok = steps[-1]["status"] in ("done", "skipped_exists", "would_build")
     steps.append(_step_doctor(run_coverage=run_coverage, kb_path=kb_path))
     steps.append(_step_register_mcp(project, kb_path, selected, home=home_path, force=force_mcp, dry_run=dry_run))
-    # 建库失败时四工具校验必然失败（KB 缺）；跳过以免噪声，标 skipped。
+    # 建库失败时五工具校验必然失败（KB 缺）；跳过以免噪声，标 skipped。
     if build_ok:
         steps.append(_step_verify_mcp(kb_path, dry_run=dry_run))
     else:

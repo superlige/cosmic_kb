@@ -38,7 +38,7 @@
 ```
 段一 本地确定性扫描器(Python)：Ingestion 摄取 → Metadata 解析 → Java 静态分析 → 桥接
                               → Cosmic KB(SQLite 图谱 + FTS5 + JSON 快照) → 可信度/理解报告
-段二 AI 理解层(CLI/MCP)：宿主大模型直调确定性取证工具(trace/bill/resolve_fields/cosmic_semantics)
+段二 AI 理解层(CLI/MCP)：宿主大模型直调确定性取证工具(trace/bill/resolve_fields/callers/cosmic_semantics)
                         → 挂苍穹 Skill → 带证据的解释
 ```
 
@@ -52,21 +52,23 @@
 
 - ✅ 阶段 0–4：脚手架 + 源码摄取 + 元数据解析(dym/zip/底层库) + 元数据↔源码桥接 + KB 图谱存储 + 本地 Web。
 - ✅ 阶段 5–7（旗舰）：字段级排障引擎——字段 → 读写插件+事件函数+是否落库+行号，按坐标分组；Java 语义层持续加固，真实库 form_key NULL 率 60.3%→34.07%。
-- ✅ 阶段 10：MCP 封装，工具面 `trace`/`bill`/`resolve_fields`/`cosmic_semantics`（4 个）。
+- ✅ 阶段 10+12.3：MCP 工具面 `trace`/`bill`/`resolve_fields`/`callers`/`cosmic_semantics`（5 个）。
 - ✅ 信任优先：`coverage`/`scan-compare`（CLI-only 可信度审计）+ `null_reason`（未定位成因诊断，成因码均附中文标签）。
 - 🗑 `read_source`/`method_calls`：曾上线，均已整体退役，改走宿主自带 reader 读源码 + `resolve_fields("实体key.字段key")` 精确核对。
 - 🗑 阶段 9 `ask`（NL→意图→确定性证据包）+ 其依附的 `semantic.resolver`/`context.builder`/`plugin_explain`：
   已整体退役（2026-07），改为让宿主大模型直接判断该调 trace/bill/resolve_fields 里的哪个（宿主本就
   比关键词分类器更擅长选工具），KB 收缩回纯确定性字段/分录级取证 + 源码理解辅助两类能力。
-- 🚧 阶段 12（编译期符号解析，3 子阶段）：12.1 ✅ 类路径发现（IDEA/.iml + Gradle 模板 + 显式兜底，
+- ✅ 阶段 12（编译期符号解析，3 子阶段全部完成）：12.1 ✅ 类路径发现（IDEA/.iml + Gradle 模板 + 显式兜底，
   两真实样本 3678/4441 jar 全中）+ JVM 微工具（JavaParser Symbol Solver fat jar 随包
   `java/vendor/symsolver.jar`，两层解析 expr→scope）+ runner/看门狗/软降级 + doctor 环境段；
-  12.2 ⬜ 符号表注入 java/ 管线 + schema v18；12.3 ⬜ call_edge 持久化 + callers 反查工具。
+  12.2 ✅ 符号表注入 java/ 管线 + schema v18；12.3 ✅ call_edge 持久化 + callers 反查工具。
 - ⬜ 阶段 8（业务流）拍板搁置；阶段 11（增量重扫+GitNexus）待开发。
 
-当前 schema **v17**（v17 新增 `operation_trigger` 程序化操作触发点表，隐藏坑 #1）；
+当前 schema **v19**（v19 新增全量 `call_edge` 与正反索引，供 `callers` 反查）；
 `pytest -q` 结果以 codex 最近一次全量执行为准。详细清单/每条验收结论见
-`docs/核心/阶段验收.md`；后续隐藏坑待办见 `docs/设计方案/隐藏坑排障扩展待办.md`。
+`docs/核心/阶段验收.md`；阶段 12 对工具能力的整体提升见
+`docs/核心/阶段12工具能力提升总结.md`；后续隐藏坑待办见
+`docs/设计方案/隐藏坑排障扩展待办.md`。
 
 > ⚠️ MCP server 常驻，改 MCP/取证源码后需**重连/重启 MCP** 才生效；改 schema 后需 `cosmic_kb build` 重建 KB。
 
@@ -74,15 +76,16 @@
 
 ```powershell
 pip install -e ".[parse,encoding,dev,mcp]"  # 解析+编码+测试+MCP（mcp 可选）
-pytest -q                                # 跑测试（当前 631 passed, 4 skipped）
+pytest -q                                # 跑测试（当前 647 passed, 4 skipped）
 cosmic_kb --version                      # 版本
 cosmic_kb doctor                         # 资产体检（随包 semantics/templates/symsolver.jar 是否就位 + java 环境探测，缺 java 只提示符号解析降级不算失败）
 cosmic_kb ingest "<项目源码根>"          # 阶段1：摄取 + 覆盖率/可信度报告（--json 可留档）
 cosmic_kb meta "<dym|cr 或整包 zip>"     # 阶段2：解析元数据(含转换规则 .cr)，分类计数/JSON 快照
 cosmic_kb bridge "<项目源码根>" "<dym|zip|目录>"  # 阶段3：ClassName↔源码桥接报告（--json）
-cosmic_kb build "<项目源码根>" ["<dym|zip|目录> ..."] [--db-config <配置> [--isv <ISV>]]  # 阶段4+5：建 KB（含字段级分析）；给了 --db-config 自动全量同步本项目二开 form/entity/转换规则当前内容（纯 DB 冷启动可省略 dym/zip 参数）
+cosmic_kb build "<项目源码根>" ["<dym|zip|目录> ..."] [--db-config <配置> [--isv <ISV>]]  # 阶段4+5：建 KB（含字段级分析）；给了 --db-config 自动全量同步本项目二开 form/entity/转换规则当前内容（纯 DB 冷启动可省略 dym/zip 参数）；全程 stderr 进度显示 [k/N] 阶段+子步骤百分比（cosmic_kb/progress.py，TTY 单行刷新/管道限频换行）
 cosmic_kb trace "单据.字段|单据.分录.字段|单据.分录.子分录.字段"  # 旗舰：按层级精确定位字段→谁改了它/事件函数/是否落库（裸字段若跨单据有歧义会反问指定单据，不再聚合列出全部单据证据）
 cosmic_kb trace "单据.操作key" --kind operation  # 隐藏坑#1：操作坐标→程序化触发链（谁 executeOperate/invokeOperation 触发了它/操作 key 或目标单据解不出而无法排除的入站嫌疑 suspect_reason 注明成因——挂不上操作坐标的表单插件外发已并入，对该操作的调用一次即完整/它又对外触发谁+下一跳坐标；kind 纯显式不自动猜；bill 的每操作 programmatic_trigger_count 是发现入口，outbound_triggers 收窄为影响面视图）
+cosmic_kb callers "ContractService.updateRlateAssets"  # 阶段12.3：反查某 Java 方法的全部调用点（含 Class::method）；0 结果必带符号覆盖率，降级口径不足以断言死代码
 cosmic_kb bill "<单据标识>"              # 单据钻取：操作集/插件/字段触达/风险
 cosmic_kb source "<相对源码根的源文件路径>"      # CLI 人工排障：读源码（野生编码正确解码）+ 自动标注其中字段 key 真实中文名（--lines A-B 读区间）；同名跨单据按本文件数据包来源三档消歧（unique/resolved/⚠️ambiguous 别默认当前单据）。段二（AI）已改走宿主自带 reader + resolve_fields，本命令只服务人工终端排障
 cosmic_kb coverage                       # 信任优先·手段一：字段覆盖率（元数据为分母）+ 扫描质量分解

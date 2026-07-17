@@ -174,7 +174,14 @@ def _resolve_operation(
 def _parse_operations(
     entity_meta: ET.Element, template_map: dict[str, OperationDef]
 ) -> tuple[list[MetaOperation], list[MetaPlugin], list[str]]:
-    """解析 <Operations> 下全部操作与其操作插件（操作插件回填绑定操作）。"""
+    """解析业务操作并补齐继承根模板的预制操作。
+
+    业务 dym / DB fdata 只会写出自定义操作和被当前单据覆盖过的继承操作；完全沿用模板
+    默认值的 ``refresh`` 等预制操作不会再次出现在业务 XML 中。若这里只解析显式节点，
+    最终 KB 的操作集就会把这些真实可调用的预制操作漏掉。
+
+    显式业务节点优先：同 key 的自定义/覆盖操作保留其自身语义和插件，模板只补缺失项。
+    """
     operations: list[MetaOperation] = []
     op_plugins: list[MetaPlugin] = []
     warnings: list[str] = []
@@ -192,6 +199,23 @@ def _parse_operations(
                     plugin.operation_name = meta_op.name
                     plugin.operation_oid = meta_op.oid
                     op_plugins.append(plugin)
+
+    # 继承根模板定义的是该 ModelType 的完整预制操作集。业务 XML 中未出现的条目不是
+    # “当前单据没有”，而是“完全沿用模板、因此没有生成 action=edit 节点”。按 key 补齐，
+    # 已显式出现的操作（含自定义同名覆盖）拥有更高优先级，不重复追加。
+    explicit_keys = {op.key for op in operations if op.key}
+    for defn in template_map.values():
+        if not defn.key or defn.key in explicit_keys:
+            continue
+        operations.append(MetaOperation(
+            key=defn.key,
+            name=defn.name,
+            operation_type=defn.operation_type,
+            id=None,
+            oid=defn.oid,
+            resolved_from="template",
+        ))
+        explicit_keys.add(defn.key)
     return operations, op_plugins, warnings
 
 
