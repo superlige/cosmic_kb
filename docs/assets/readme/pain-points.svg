@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1080" width="1600" height="1080" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC','Segoe UI',Helvetica,Arial,sans-serif">
+  <defs>
+    <pattern id="dots3" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.1" fill="#16233b" />
+    </pattern>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24" />
+    </marker>
+    <marker id="arrowCyan3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#22d3ee" />
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1600" height="1080" fill="#0b1220" />
+  <rect x="0" y="0" width="1600" height="1080" fill="url(#dots3)" />
+
+  <text x="800" y="54" text-anchor="middle" font-size="30" font-weight="700" fill="#f1f5f9">接手苍穹老项目最痛的三类坑，都被这样堵上</text>
+  <text x="800" y="86" text-anchor="middle" font-size="16" fill="#94a3b8">每一行：左边是没有 cosmic_kb 时的窘境，右边是接入后怎么解决</text>
+
+  <!-- ROW 1 -->
+  <g transform="translate(0,120)">
+    <rect x="60" y="0" width="1480" height="290" rx="18" fill="#0f172a" stroke="#1e293b" stroke-width="1" />
+    <rect x="90" y="22" width="300" height="38" rx="19" fill="#1e293b" stroke="#475569" stroke-width="1" />
+    <text x="240" y="47" text-anchor="middle" font-size="16" font-weight="600" fill="#e2e8f0">元数据与苍穹私有框架侧</text>
+
+    <!-- pain: designer tabs switching + guessed field -->
+    <rect x="150" y="100" width="90" height="56" rx="6" fill="#1e293b" stroke="#475569" stroke-width="1.5" opacity="0.75" />
+    <rect x="150" y="100" width="90" height="14" rx="6" fill="#334155" opacity="0.75" />
+    <rect x="185" y="135" width="100" height="62" rx="6" fill="#1e293b" stroke="#fbbf24" stroke-width="1.5" />
+    <rect x="185" y="135" width="100" height="15" rx="6" fill="#3a2a06" />
+    <text x="235" y="180" text-anchor="middle" font-size="22" fill="#f87171">?</text>
+    <path d="M296,98 A14,14 0 1 1 282,112" fill="none" stroke="#fbbf24" stroke-width="2.5" marker-end="url(#arrowAmber)" />
+    <path d="M282,126 A14,14 0 1 1 296,112" fill="none" stroke="#fbbf24" stroke-width="2.5" marker-end="url(#arrowAmber)" />
+    <rect x="155" y="210" width="140" height="32" rx="16" fill="#3f1418" stroke="#f87171" stroke-width="1" />
+    <text x="225" y="231" text-anchor="middle" font-size="13" fill="#fca5a5" font-family="'Cascadia Code','Consolas','SFMono-Regular',Menlo,monospace">cqkd_zkd = ?</text>
+
+    <text x="360" y="160" font-size="17" fill="#fca5a5">字段靠拼音瞎猜</text>
+    <text x="360" y="188" font-size="17" fill="#fca5a5">设计器三页来回切</text>
+
+    <text x="800" y="182" text-anchor="middle" font-size="36" fill="#475569">→</text>
+
+    <!-- fix: resolve_fields result card -->
+    <rect x="900" y="130" width="190" height="90" rx="14" fill="#08202a" stroke="#22d3ee" stroke-width="1.5" />
+    <text x="920" y="168" font-size="20" font-weight="700" fill="#e2e8f0">转款单</text>
+    <text x="920" y="196" font-size="13" fill="#7dd3fc" font-family="'Cascadia Code','Consolas','SFMono-Regular',Menlo,monospace">entity=cqkd_zkd</text>
+    <circle cx="1074" cy="146" r="14" fill="#052e16" stroke="#4ade80" stroke-width="1.5" />
+    <path d="M1068,146 L1072,150 L1080,140" stroke="#4ade80" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+
+    <text x="1110" y="160" font-size="17" fill="#67e8f9">resolve_fields 核对</text>
+    <text x="1110" y="188" font-size="17" fill="#67e8f9">中文名 + 元数据坐标</text>
+  </g>
+
+  <!-- ROW 2 -->
+  <g transform="translate(0,436)">
+    <rect x="60" y="0" width="1480" height="290" rx="18" fill="#0f172a" stroke="#1e293b" stroke-width="1" />
+    <rect x="90" y="22" width="300" height="38" rx="19" fill="#1e293b" stroke="#475569" stroke-width="1" />
+    <text x="240" y="47" text-anchor="middle" font-size="16" font-weight="600" fill="#e2e8f0">源码搜索侧</text>
+
+    <!-- pain: file cluster + magnifier with X -->
+    <g stroke="#f87171" stroke-width="1.8" stroke-opacity="0.6" stroke-dasharray="4 3" fill="none">
+      <path d="M160,140 C190,110 210,150 200,120" />
+      <path d="M200,120 C230,150 160,180 180,190" />
+      <path d="M180,190 C210,160 170,120 160,140" />
+    </g>
+    <g transform="translate(160,140) rotate(-8)">
+      <rect x="-17" y="-22" width="34" height="44" rx="3" fill="#1e293b" stroke="#475569" stroke-width="1.2" />
+      <rect x="-10" y="-8" width="20" height="3" rx="1.5" fill="#64748b" />
+      <rect x="-10" y="2" width="20" height="3" rx="1.5" fill="#64748b" />
+    </g>
+    <g transform="translate(200,120) rotate(6)">
+      <rect x="-17" y="-22" width="34" height="44" rx="3" fill="#1e293b" stroke="#475569" stroke-width="1.2" />
+      <rect x="-10" y="-8" width="20" height="3" rx="1.5" fill="#64748b" />
+      <rect x="-10" y="2" width="20" height="3" rx="1.5" fill="#64748b" />
+    </g>
+    <g transform="translate(180,190) rotate(-5)">
+      <rect x="-17" y="-22" width="34" height="44" rx="3" fill="#1e293b" stroke="#475569" stroke-width="1.2" />
+      <rect x="-10" y="-8" width="20" height="3" rx="1.5" fill="#64748b" />
+      <rect x="-10" y="2" width="20" height="3" rx="1.5" fill="#64748b" />
+    </g>
+    <circle cx="292" cy="205" r="16" fill="none" stroke="#94a3b8" stroke-width="3" />
+    <line x1="304" y1="217" x2="318" y2="231" stroke="#94a3b8" stroke-width="3" stroke-linecap="round" />
+    <g stroke="#f87171" stroke-width="2.5" stroke-linecap="round">
+      <path d="M285,198 L299,212 M299,198 L285,212" />
+    </g>
+
+    <text x="360" y="160" font-size="17" fill="#fca5a5">全局搜索几十个插件</text>
+    <text x="360" y="188" font-size="17" fill="#fca5a5">翻到崩溃还是没答案</text>
+
+    <text x="800" y="182" text-anchor="middle" font-size="36" fill="#475569">→</text>
+
+    <!-- fix: metadata <-> source bridge -->
+    <circle cx="920" cy="150" r="14" fill="#0f172a" stroke="#22d3ee" stroke-width="2" />
+    <circle cx="1040" cy="150" r="14" fill="#0f172a" stroke="#22d3ee" stroke-width="2" />
+    <line x1="934" y1="150" x2="1026" y2="150" stroke="#22d3ee" stroke-width="3" />
+    <text x="920" y="180" text-anchor="middle" font-size="11" fill="#7dd3fc">元数据</text>
+    <text x="1040" y="180" text-anchor="middle" font-size="11" fill="#7dd3fc">源码</text>
+    <rect x="900" y="200" width="180" height="32" rx="16" fill="#0f172a" stroke="#4ade80" stroke-width="1" />
+    <text x="990" y="221" text-anchor="middle" font-size="12" fill="#86efac" font-family="'Cascadia Code','Consolas','SFMono-Regular',Menlo,monospace">...Plugin.java : 142</text>
+
+    <text x="1110" y="160" font-size="17" fill="#67e8f9">元数据 ↔ 源码桥接</text>
+    <text x="1110" y="188" font-size="17" fill="#67e8f9">直达那一行，不用翻</text>
+  </g>
+
+  <!-- ROW 3 -->
+  <g transform="translate(0,752)">
+    <rect x="60" y="0" width="1480" height="290" rx="18" fill="#0f172a" stroke="#1e293b" stroke-width="1" />
+    <rect x="90" y="22" width="300" height="38" rx="19" fill="#1e293b" stroke="#475569" stroke-width="1" />
+    <text x="240" y="47" text-anchor="middle" font-size="16" font-weight="600" fill="#e2e8f0">调用链侧</text>
+
+    <!-- pain: manually tracing back up an uncertain call chain -->
+    <path d="M220,230 C185,205 160,175 148,145" stroke="#475569" stroke-width="1.5" stroke-dasharray="3 3" fill="none" />
+    <path d="M220,230 C220,195 220,160 220,124" stroke="#f87171" stroke-width="2" stroke-dasharray="4 3" fill="none" />
+    <path d="M220,230 C255,205 280,175 292,150" stroke="#475569" stroke-width="1.5" stroke-dasharray="3 3" fill="none" />
+    <circle cx="148" cy="138" r="8" fill="#1e293b" stroke="#64748b" stroke-width="1.2" />
+    <circle cx="220" cy="115" r="9" fill="#1e293b" stroke="#f87171" stroke-width="1.8" />
+    <circle cx="292" cy="143" r="8" fill="#1e293b" stroke="#64748b" stroke-width="1.2" />
+    <text x="220" y="97" text-anchor="middle" font-size="20" fill="#f87171">?</text>
+    <circle cx="220" cy="230" r="11" fill="#1e293b" stroke="#f87171" stroke-width="1.5" />
+    <text x="220" y="252" text-anchor="middle" font-size="10" fill="#fca5a5" font-family="'Cascadia Code','Consolas','SFMono-Regular',Menlo,monospace">method()</text>
+
+    <text x="360" y="160" font-size="17" fill="#fca5a5">调用链人肉逐层回溯</text>
+    <text x="360" y="188" font-size="17" fill="#fca5a5">触发源头、入口绑没绑定都说不清</text>
+
+    <text x="800" y="182" text-anchor="middle" font-size="36" fill="#475569">→</text>
+
+    <!-- fix: automatic backtrace to the plugin entry + registry check -->
+    <circle cx="905" cy="232" r="9" fill="#08202a" stroke="#22d3ee" stroke-width="2" />
+    <line x1="905" y1="223" x2="905" y2="193" stroke="#22d3ee" stroke-width="2.2" marker-end="url(#arrowCyan3)" />
+    <circle cx="905" cy="184" r="9" fill="#08202a" stroke="#22d3ee" stroke-width="2" />
+    <line x1="905" y1="175" x2="905" y2="146" stroke="#22d3ee" stroke-width="2.2" marker-end="url(#arrowCyan3)" />
+    <polygon points="905,114 919,122 919,138 905,146 891,138 891,122" fill="#082f3a" stroke="#22d3ee" stroke-width="2" />
+    <line x1="923" y1="130" x2="956" y2="130" stroke="#22d3ee" stroke-width="2.2" marker-end="url(#arrowCyan3)" />
+    <text x="905" y="254" text-anchor="middle" font-size="11" fill="#67e8f9">自动回溯到入口</text>
+
+    <rect x="962" y="108" width="118" height="44" rx="10" fill="#052e16" stroke="#4ade80" stroke-width="1.5" />
+    <text x="1021" y="127" text-anchor="middle" font-size="12" font-weight="600" fill="#4ade80">已注册 · 启用</text>
+    <text x="1021" y="144" text-anchor="middle" font-size="10" fill="#86efac">✓ 反查通过</text>
+
+    <text x="1110" y="160" font-size="17" fill="#67e8f9">callers 自动回溯到入口</text>
+    <text x="1110" y="188" font-size="17" fill="#67e8f9">反查是否绑定 · 是否启用</text>
+  </g>
+
+  <text x="1500" y="1064" text-anchor="end" font-size="14" fill="#475569">cosmic_kb</text>
+</svg>
