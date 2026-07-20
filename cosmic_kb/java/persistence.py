@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 # 落库 sink：显式持久化/事务调用。按「接收者类名 + 方法名」识别。
 _SINK_RULES: list[tuple[str, set[str], str]] = [
     ("SaveServiceHelper", {"save", "update", "saveOperate"}, "SaveServiceHelper 保存"),
-    ("OperationServiceHelper", {"executeOperate", "execOperate"}, "OperationServiceHelper 执行操作"),
+    ("OperationServiceHelper", {"executeOperate"}, "OperationServiceHelper 执行操作"),
     ("BusinessDataServiceHelper", {"save"}, "BusinessDataServiceHelper 保存"),
     ("DeleteServiceHelper", {"delete"}, "DeleteServiceHelper 删除"),
     ("DB", {"execute", "update", "executeBatch", "insert"}, "DB 直写"),
@@ -35,7 +35,7 @@ _SINK_FQN_RULES: dict[str, tuple[set[str], str]] = {
     "kd.bos.servicehelper.operation.SaveServiceHelper": (
         {"save", "update", "saveOperate"}, "SaveServiceHelper 保存"),
     "kd.bos.servicehelper.operation.OperationServiceHelper": (
-        {"executeOperate", "execOperate"}, "OperationServiceHelper 执行操作"),
+        {"executeOperate"}, "OperationServiceHelper 执行操作"),
     "kd.bos.servicehelper.BusinessDataServiceHelper": (
         {"save"}, "BusinessDataServiceHelper 保存"),
     "kd.bos.servicehelper.operation.DeleteServiceHelper": (

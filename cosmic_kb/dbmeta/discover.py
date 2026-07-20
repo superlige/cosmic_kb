@@ -261,7 +261,7 @@ def _resolve_op_call_entity(
     recv_tail = inv.object_text.strip().rsplit(".", 1)[-1].split("(", 1)[0]
     name = inv.name
 
-    if recv_tail == "OperationServiceHelper" and name in ("executeOperate", "execOperate"):
+    if recv_tail == "OperationServiceHelper" and name == "executeOperate":
         return _arg_value(inv, 1, const_table), None
     if recv_tail == "DeleteServiceHelper" and name == "delete":
         return _arg_value(inv, 0, const_table), None

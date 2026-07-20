@@ -8,10 +8,11 @@
 只存**单跳原子事实**，不预拼多跳链（A→B→C 级联由段二 agent 递归查 bill/trace 拼出）：
 预拼会遇到 unknown 传播/环/组合爆炸，违背「确定性事实 + 宿主推理」的两段式哲学。
 
-识别三种调用（persistence.py 的 sink 口径 + dbmeta/discover.py 的实参位先例）：
+识别两种调用（persistence.py 的 sink 口径 + dbmeta/discover.py 的实参位先例）：
   * `OperationServiceHelper.executeOperate(opKey, entityNumber, ...)` —— arg0=操作 key，
     arg1=目标单据（discover.py `_resolve_op_call_entity` 已证明的参数位）。
-  * `execOperate` —— 同签名别名。
+    苍穹平台没有 `execOperate` 这个方法（曾误当作同签名别名识别，2026-07-20 经用户核实后
+    去掉，避免把项目里自定义同名方法误判成平台触发）。
   * `view.invokeOperation(opKey, ...)` —— 操作 key 在 arg0，**目标单据不在实参里**
     （触发的是当前视图绑定单据自己的操作），由调用方传入 enclosing 类的唯一绑定单据；
     绑多张/未绑定则标 unknown，不臆造。
@@ -42,7 +43,7 @@ class OperationTriggerRow:
     caller_method: str             # 调用点所在方法名
     line: int
     source_relpath: str
-    via: str                       # executeOperate | execOperate | invokeOperation
+    via: str                       # executeOperate | invokeOperation
     op_key: str | None             # 操作 key（audit/submit/...）；解不出为 None
     op_key_resolution: str         # literal | constant | ambiguous | dynamic | unknown
     op_key_confidence: float
@@ -93,7 +94,7 @@ def find_operation_triggers(
         if resolved_site:
             helper_match = site.declaring == "kd.bos.servicehelper.operation.OperationServiceHelper"
             receiver_source = "symbol"
-        if helper_match and inv.name in ("executeOperate", "execOperate"):
+        if helper_match and inv.name == "executeOperate":
             op_val, op_kind, op_conf, op_note = _resolution(const.resolve_arg(inv, 0))
             tgt_val, tgt_kind, tgt_conf, tgt_note = _resolution(const.resolve_arg(inv, 1))
             notes = [n for n in (op_note, tgt_note) if n]

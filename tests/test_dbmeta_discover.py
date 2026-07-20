@@ -216,6 +216,18 @@ def test_from_operation_calls_execute_operate_takes_arg1_not_op_code():
     assert "save" not in hits   # 操作编码（arg0）不当实体
 
 
+def test_from_operation_calls_ignores_nonexistent_exec_operate_alias():
+    java = (
+        'public class Foo {\n'
+        '    public void run() {\n'
+        '        OperationServiceHelper.execOperate("save", "bd_customer", pks, option);\n'
+        '    }\n'
+        '}\n'
+    )
+    hits = from_operation_calls(_scan_result({"Foo.java": java}), set(), set(), _const({"Foo.java": java}))
+    assert hits == {}
+
+
 def test_from_operation_calls_delete_service_helper_takes_arg0():
     java = (
         'public class Foo {\n'

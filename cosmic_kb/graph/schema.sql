@@ -223,7 +223,7 @@ CREATE TABLE operation_trigger (
     caller_method       TEXT,             -- 调用点所在方法名
     line                INTEGER,          -- 调用所在行号（直达源码）
     source_relpath      TEXT,             -- 源文件（相对源码根）
-    via                 TEXT,             -- executeOperate/execOperate/invokeOperation
+    via                 TEXT,             -- executeOperate/invokeOperation
     op_key              TEXT,             -- 操作 key（audit/submit/…）；解不出为 NULL
     op_key_resolution   TEXT,             -- literal/constant/ambiguous/dynamic/unknown
     op_key_confidence   REAL,

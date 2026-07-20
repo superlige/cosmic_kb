@@ -1,7 +1,7 @@
 """隐藏坑 #1 · 程序化操作触发链验收测试。
 
 覆盖三层：
-  * 提取层（java/op_trigger.py）：executeOperate/execOperate/invokeOperation 三种调用的
+  * 提取层（java/op_trigger.py）：executeOperate/invokeOperation 两种调用的
     操作 key + 目标单据实参解析（字面量/常量/表达式→dynamic/绑定推断/unknown，绝不臆造）；
   * 管线层（analyze → store）：真实小项目 build_kb 后 operation_trigger 表落库，
     操作坐标追踪（trace --kind operation）正查 + bill 计数/外发反查；
@@ -34,7 +34,8 @@ TRIGGER_SRC = """package cqspb.am;
 public class TriggerSvc {
   public void go(DynamicObject[] bills) {
     OperationServiceHelper.executeOperate("audit", "cqkd_b", bills, OperateOption.create());
-    OperationServiceHelper.execOperate(BillConst.OP_SUBMIT, BillConst.ENTITY_B, bills, null);
+    OperationServiceHelper.executeOperate(BillConst.OP_SUBMIT, BillConst.ENTITY_B, bills, null);
+    OperationServiceHelper.execOperate("close", "cqkd_b", bills, null);
     String op = compute();
     OperationServiceHelper.executeOperate(op, "cqkd_b", bills, null);
   }
@@ -79,7 +80,7 @@ def _const_table(*srcs: str):
 
 
 def test_find_triggers_literal_constant_dynamic():
-    """字面量=1.0；类.常量=0.95；局部变量实参→unknown（值 None 不臆造）。"""
+    """识别 executeOperate，忽略不存在的平台方法 execOperate，并保留解析置信度。"""
     pytest.importorskip("tree_sitter_java")
     from cosmic_kb.java import op_trigger as ot
 
@@ -95,7 +96,7 @@ def test_find_triggers_literal_constant_dynamic():
     assert (lit.target_form_key, lit.target_resolution) == ("cqkd_b", "literal")
 
     const = rows[1]
-    assert (const.via, const.op_key, const.op_key_resolution) == ("execOperate", "submit", "constant")
+    assert (const.via, const.op_key, const.op_key_resolution) == ("executeOperate", "submit", "constant")
     assert (const.target_form_key, const.target_confidence) == ("cqkd_b", 0.95)
 
     dyn = rows[2]

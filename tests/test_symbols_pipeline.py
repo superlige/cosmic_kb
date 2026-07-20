@@ -113,6 +113,16 @@ class Caller { void run() { save(); SaveServiceHelper::save; } }
     assert persistence.find_sinks(root, symbols=fake, relpath="P.java") == []
 
 
+def test_persistence_ignores_nonexistent_exec_operate_alias():
+    src = """package p;
+class Caller { void run() {
+  OperationServiceHelper.execOperate("audit", "cqkd_bill", null, null);
+} }
+"""
+    root = ax.parse_tree(src)
+    assert persistence.find_sinks(root, relpath="P.java") == []
+
+
 def test_operation_trigger_receiver_symbol_confirms_or_rejects_homonym():
     src = """package p;
 class Caller { void run() {
