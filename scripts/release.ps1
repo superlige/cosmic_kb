@@ -205,7 +205,18 @@ Write-Host "[3/5] 构建与校验产物" -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot "make_dist.ps1")
 Check-Native "构建离线包"
 
-Invoke-Quiet "构建 wheel" { python -m build --wheel }
+$sourceDateEpoch = ConvertTo-Text (git show -s --format=%ct HEAD)
+Check-Native "读取发布提交时间"
+$oldSourceDateEpoch = $env:SOURCE_DATE_EPOCH
+try {
+    # wheel/zip 元数据默认写当前时间，导致同一提交失败续跑时每次重建的 SHA256 不同。
+    # 固定为 Git 提交时间，使同一 HEAD 的 wheel 可复现，PyPI 摘要门禁才有意义。
+    $env:SOURCE_DATE_EPOCH = $sourceDateEpoch
+    Invoke-Quiet "构建 wheel" { python -m build --wheel }
+}
+finally {
+    $env:SOURCE_DATE_EPOCH = $oldSourceDateEpoch
+}
 
 $wheelPath = Join-Path $RepoRoot "dist\cosmic_kb-$Version-py3-none-any.whl"
 if (-not (Test-Path -LiteralPath $wheelPath)) { Fail "找不到 wheel：$wheelPath" }
