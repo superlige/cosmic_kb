@@ -23,8 +23,10 @@ parse = ["tree-sitter>=0.21", "tree-sitter-java>=0.21"]
 encoding = ["charset-normalizer>=3.0"]
 # 段二接入：MCP 服务器（把取证命令暴露成 MCP 工具供 LLM 宿主调用）
 mcp = ["mcp>=1.0"]
-# 底层库元数据源：直连苍穹平台库（只读）取原厂/扩展元数据。当前实现 PostgreSQL
+# 底层库元数据源：直连苍穹平台库（只读）取原厂/扩展元数据。
 postgres = ["psycopg2-binary>=2.9"]
+# 同上，Oracle 底层库。python-oracledb 默认 thin 模式（纯 Python，无需 Instant Client）
+oracle = ["oracledb>=1.4"]
 # 首装收敛：一次装齐段一+段二的完整能力（Java 解析 / 编码探测 / MCP / 只读库）。
 # 对话式安装口令固定装这一组，保证首装依赖集合固定、可复现。自引用保持与各分组同步。
 complete = ["cosmic-kb[parse,encoding,mcp,postgres]"]

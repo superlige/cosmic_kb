@@ -1,13 +1,14 @@
 """DB 元数据源配置 —— 连接底层库所需的信息，只读、可扩展多数据库。
 
 配置项（用户 2026-07-02 拍板需支持）：
-    driver          数据库类型，当前只实现 postgresql，字段留出扩展位（mysql/oracle/...）
-    host / port     底层库 IP / 端口
-    database        初始数据库（连接握手用）
+    driver          数据库类型，已实现 postgresql / oracle，字段留出扩展位（mysql/达梦…）
+    host / port     底层库 IP / 端口（PostgreSQL 默认 5432，Oracle 默认 1521）
+    database        初始数据库（PostgreSQL 连接握手用的库名；Oracle 填 service 名）
     user / password 账号口令（password 可用环境变量 COSMIC_DB_PASSWORD 覆盖，避免明文落盘）
     table_database  元数据表所在库名（PostgreSQL 不能跨库查询，实际取数连的就是它；
-                    留空则回落到 database）
-    schema          表所在 schema（PostgreSQL 命名空间，默认 public）
+                    Oracle 无跨库概念，留空回落 database 即所连 service；留空则回落到 database）
+    schema          表所在 schema（PostgreSQL 命名空间默认 public；Oracle 里是对象 owner，
+                    通常为大写用户名，需按实际填写）
 
 红线：本配置驱动的连接**强制只读**（见 connection.py），配置里没有、也不接受任何写入开关。
 """
@@ -167,6 +168,8 @@ def sample_config_text() -> str:
     header = (
         "// 苍穹底层库元数据源配置（只读）。password 建议留空、改用环境变量 "
         "COSMIC_DB_PASSWORD。\n"
+        "// driver：postgresql（默认，port 5432）或 oracle（port 1521，装 pip install "
+        "oracledb；database 填 service 名、schema 填对象 owner 通常为大写用户名）。\n"
         "// table_database：元数据表所在库名，留空则用 database。\n"
     )
     return header + json.dumps(template, ensure_ascii=False, indent=2)

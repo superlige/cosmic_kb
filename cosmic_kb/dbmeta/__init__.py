@@ -10,7 +10,8 @@
 
 模块：
     config.py      连接配置 DbConfig（ip/端口/初始库/账号/口令/表所在库/schema），可扩展多库
-    connection.py  只读驱动抽象 + PostgresDriver（SQL 白名单 + 会话只读 + 永不提交）
+    connection.py  只读驱动抽象 + PostgresDriver/OracleDriver（SQL 白名单 + 会话只读 +
+                   永不提交）+ SqlDialect 方言层（占位符/成员判定/空串/取时间的库差异）
     reader.py      按 fnumber 取两表 fdata → 合成 MetaModel；ping 自检
     assemble.py    两段 fdata XML 套回 DeployMetadata 骨架 → 复用 metadata.parse_element（零改动）
     discover.py    发现代码库里引用到、本地元数据没有的候选原厂 key（三类确定性信号：

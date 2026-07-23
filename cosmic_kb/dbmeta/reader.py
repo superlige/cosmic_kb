@@ -9,9 +9,12 @@
 一次通常有几十个候选 fnumber，若逐个 `read_model`/`read_model_via_local_ext` 循环调用，
 就是"N 个候选 = N×2 次网络往返"——候选一多、DB 又不在本机，摄取会被网络延迟拖得很慢
 （红线 #3：规模大，要性能）。`fetch_fdata_bulk`/`fetch_fdata_via_local_ext_bulk` 把同一
-批候选各自的两张表查询各自合并成**一条** `WHERE fnumber = ANY(%s)`，无论候选多少个，
-每次 `apply_vendor_metadata` 只发固定 4 条 SQL（有本地扩展的一组 2 条 + 无本地扩展的
-一组 2 条），不是 O(N)。
+批候选各自的两张表查询各自合并成一条成员判定查询（PostgreSQL `= ANY(?)` 单参数、
+无长度限制；Oracle `IN (...)` 有 1000 上限，按方言的 `in_chunk_size` 自动切块），
+候选量小时每次 `apply_vendor_metadata` 只发固定 4 条 SQL，不是 O(N)。
+
+方言无关：本模块拼 SQL 一律用中性 `?` 占位符 + `SqlDialect`（占位符/成员判定/空串/
+取时间的库差异都收敛在方言里），由 `_query` 统一 finalize 后执行，reader 不感知具体库。
 
 严格只读：所有 SQL 走 connection 层的白名单校验；本模块只发 SELECT。
 """
@@ -24,7 +27,7 @@ from ..metadata.model import MetaModel
 from ..metadata.template_loader import TemplateRegistry
 from .assemble import assemble_convert_rule, assemble_model
 from .config import DbConfig
-from .connection import MetaDbDriver, get_driver
+from .connection import MetaDbDriver, SqlDialect, get_dialect, get_driver
 
 
 def _qualified(schema: str, table: str) -> str:
@@ -64,12 +67,27 @@ class DbMetaReader:
     def __init__(self, config: DbConfig, *, template_registry: TemplateRegistry | None = None) -> None:
         self.config = config
         self._driver: MetaDbDriver | None = None
+        # 方言按 config.driver 取，独立于活动连接——拼 SQL 只依赖它，假驱动测试也拿得到。
+        self._dialect: SqlDialect = get_dialect(config)
         self._registry = template_registry or TemplateRegistry()
 
     # ── 连接生命周期 ────────────────────────────────────────────
     def open(self) -> None:
         self._driver = get_driver(self.config)
         self._driver.connect()
+
+    # ── SQL 执行 / 分批 helper（方言差异统一收口于此）────────────────────
+    def _query(self, sql: str, params: tuple = ()) -> list[tuple]:
+        """把中性 `?` 占位符 SQL 交方言 finalize 后执行。所有取数都走这里，
+        reader 其余代码只写库无关的 `?` 占位符。"""
+        assert self._driver is not None, "请先 open()"
+        return self._driver.query(self._dialect.finalize(sql), params)
+
+    def _chunks(self, keys: list[str]) -> Iterable[list[str]]:
+        """按方言的 IN/成员判定上限把候选切块（PG 上限极大 → 永远一块；Oracle 1000 一块）。"""
+        size = self._dialect.in_chunk_size
+        for i in range(0, len(keys), size):
+            yield keys[i:i + size]
 
     def close(self) -> None:
         if self._driver is not None:
@@ -86,11 +104,10 @@ class DbMetaReader:
     # ── 取数（单个 fnumber）────────────────────────────────────────
     def _fetch_one_fdata(self, table: str, fnumber: str) -> bytes | None:
         """从单表按 fnumber 取 fdata；无记录返回 None。"""
-        assert self._driver is not None, "请先 open()"
         cfg = self.config
         rel = _qualified(cfg.schema, table)
-        sql = f"SELECT {cfg.data_column} FROM {rel} WHERE {cfg.number_column} = %s"
-        rows = self._driver.query(sql, (fnumber,))
+        sql = f"SELECT {cfg.data_column} FROM {rel} WHERE {cfg.number_column} = ?"
+        rows = self._query(sql, (fnumber,))
         if not rows or rows[0][0] is None:
             return None
         return _to_bytes(rows[0][0])
@@ -122,16 +139,15 @@ class DbMetaReader:
         `cqkd_cas_bankjournalf_ext` 反推出 `cas_bankjournalf`，但真实原厂标识其实是
         `cas_bankjournalformrpt`）；`fmasterid` 是库内主键关系，不受命名截断影响。
         """
-        assert self._driver is not None, "请先 open()"
         cfg = self.config
         rel = _qualified(cfg.schema, table)
         sql = (
             f"SELECT t2.{cfg.data_column}, t2.{cfg.number_column} "
             f"FROM {rel} t1 INNER JOIN {rel} t2 "
             f"ON t1.{cfg.master_id_column} = t2.{cfg.id_column} "
-            f"WHERE t1.{cfg.number_column} = %s"
+            f"WHERE t1.{cfg.number_column} = ?"
         )
-        rows = self._driver.query(sql, (local_key,))
+        rows = self._query(sql, (local_key,))
         if not rows or rows[0][0] is None:
             return None, (rows[0][1] if rows else None)
         value, master_fnumber = rows[0]
@@ -166,17 +182,24 @@ class DbMetaReader:
 
     # ── 取数（批量：一批 fnumber/local_key 只发 2 条 SQL，不逐个循环）─────
     def _fetch_bulk_fdata(self, table: str, keys: list[str]) -> dict[str, bytes]:
-        """从单表一次性按 `fnumber = ANY(%s)` 取回一批 fdata，key→fdata。"""
-        assert self._driver is not None, "请先 open()"
+        """从单表按成员判定一次性取回一批 fdata，key→fdata。
+
+        PG 一条 `= ANY(?)` 全查；Oracle 按 1000 一批 `IN (...)` 切块，无论多少个 key
+        对 PG 仍是 1 条 SQL、对 Oracle 是 ⌈N/1000⌉ 条（成员判定方言差异见 SqlDialect）。
+        """
         cfg = self.config
         rel = _qualified(cfg.schema, table)
-        sql = f"SELECT {cfg.number_column}, {cfg.data_column} FROM {rel} WHERE {cfg.number_column} = ANY(%s)"
-        rows = self._driver.query(sql, (list(keys),))
-        return {fn: _to_bytes(value) for fn, value in rows if value is not None}
+        out: dict[str, bytes] = {}
+        for chunk in self._chunks(keys):
+            frag, params = self._dialect.membership(cfg.number_column, chunk)
+            sql = f"SELECT {cfg.number_column}, {cfg.data_column} FROM {rel} WHERE {frag}"
+            rows = self._query(sql, params)
+            out.update({fn: _to_bytes(value) for fn, value in rows if value is not None})
+        return out
 
     def fetch_fdata_bulk(self, fnumbers: Iterable[str]) -> dict[str, tuple[bytes | None, bytes | None]]:
-        """批量取 (form_fdata, entity_fdata)：每张表只发一条 `ANY(%s)` SELECT，
-        不管 `fnumbers` 有多少个，固定 2 次网络往返（替代逐个 `fetch_fdata` 循环）。
+        """批量取 (form_fdata, entity_fdata)：每张表一条成员判定 SELECT（PG 无长度限制→
+        固定 2 次网络往返；Oracle 按 1000 上限切块），替代逐个 `fetch_fdata` 循环。
         """
         keys = list(dict.fromkeys(fnumbers))  # 去重且保序，避免同 key 出现在 IN 列表里两次
         if not keys:
@@ -199,28 +222,31 @@ class DbMetaReader:
         return out
 
     def _fetch_master_fdata_bulk(self, table: str, local_keys: list[str]) -> dict[str, tuple[bytes, str]]:
-        """单表一次性按本地 key 批量走 `fmasterid = fid` 自关联，取回一批母体 fdata。"""
-        assert self._driver is not None, "请先 open()"
+        """单表按本地 key 批量走 `fmasterid = fid` 自关联，取回一批母体 fdata（按方言分批）。"""
         cfg = self.config
         rel = _qualified(cfg.schema, table)
-        sql = (
-            f"SELECT t1.{cfg.number_column}, t2.{cfg.data_column}, t2.{cfg.number_column} "
-            f"FROM {rel} t1 INNER JOIN {rel} t2 "
-            f"ON t1.{cfg.master_id_column} = t2.{cfg.id_column} "
-            f"WHERE t1.{cfg.number_column} = ANY(%s)"
-        )
-        rows = self._driver.query(sql, (list(local_keys),))
-        return {
-            local_key: (_to_bytes(value), master_fnumber)
-            for local_key, value, master_fnumber in rows
-            if value is not None
-        }
+        out: dict[str, tuple[bytes, str]] = {}
+        for chunk in self._chunks(local_keys):
+            frag, params = self._dialect.membership(f"t1.{cfg.number_column}", chunk)
+            sql = (
+                f"SELECT t1.{cfg.number_column}, t2.{cfg.data_column}, t2.{cfg.number_column} "
+                f"FROM {rel} t1 INNER JOIN {rel} t2 "
+                f"ON t1.{cfg.master_id_column} = t2.{cfg.id_column} "
+                f"WHERE {frag}"
+            )
+            rows = self._query(sql, params)
+            out.update({
+                local_key: (_to_bytes(value), master_fnumber)
+                for local_key, value, master_fnumber in rows
+                if value is not None
+            })
+        return out
 
     def fetch_fdata_via_local_ext_bulk(
         self, local_keys: Iterable[str]
     ) -> dict[str, tuple[bytes | None, bytes | None, str | None]]:
-        """批量版 `fetch_fdata_via_local_ext`：每张表一条 `ANY(%s)` 自关联 SELECT，
-        固定 2 次网络往返，不随本地扩展 key 数量线性增长。
+        """批量版 `fetch_fdata_via_local_ext`：每张表一条成员判定自关联 SELECT（PG 固定
+        2 次往返，Oracle 按 1000 上限切块），不随本地扩展 key 数量线性增长。
         """
         keys = list(dict.fromkeys(local_keys))
         if not keys:
@@ -257,15 +283,14 @@ class DbMetaReader:
         不在这里排除 kingdee 等平台内建 ISV——排除策略是业务决策，属于
         `sync.py::resolve_isv`，这里只如实取数。
         """
-        assert self._driver is not None, "请先 open()"
         cfg = self.config
         rel = _qualified(cfg.schema, cfg.form_table)
         sql = (
             f"SELECT {cfg.isv_column}, count(*) FROM {rel} "
-            f"WHERE {cfg.isv_column} IS NOT NULL AND {cfg.isv_column} != '' "
+            f"WHERE {self._dialect.non_empty(cfg.isv_column)} "
             f"GROUP BY {cfg.isv_column}"
         )
-        rows = self._driver.query(sql)
+        rows = self._query(sql)
         return {isv: count for isv, count in rows}
 
     def list_changed_keys(self, table: str, isv: str, since_ts: str | None) -> list[str]:
@@ -275,15 +300,14 @@ class DbMetaReader:
         `None`（每次全量同步，见其模块docstring），此处仍保留 `since_ts` 形参只是复用同一
         条查询语句，不是给调用方挑"增量/全量"用的开关。
         """
-        assert self._driver is not None, "请先 open()"
         cfg = self.config
         rel = _qualified(cfg.schema, table)
-        sql = f"SELECT {cfg.number_column} FROM {rel} WHERE {cfg.isv_column} = %s"
+        sql = f"SELECT {cfg.number_column} FROM {rel} WHERE {cfg.isv_column} = ?"
         params: tuple = (isv,)
         if since_ts is not None:
-            sql += f" AND {cfg.modify_time_column} > %s"
+            sql += f" AND {cfg.modify_time_column} > ?"
             params = (isv, since_ts)
-        rows = self._driver.query(sql, params)
+        rows = self._query(sql, params)
         return [r[0] for r in rows if r[0] is not None]
 
     def list_changed_form_and_entity_keys(self, isv: str, since_ts: str | None) -> list[str]:
@@ -295,44 +319,44 @@ class DbMetaReader:
     def list_changed_convert_rule_ids(self, isv: str, since_ts: str | None) -> list[str]:
         """同 `list_changed_keys`，但固定查 `convert_rule_table`、取 `id_column`
         （这张表没有 `fnumber`，标识是 `fid`）。"""
-        assert self._driver is not None, "请先 open()"
         cfg = self.config
         rel = _qualified(cfg.schema, cfg.convert_rule_table)
-        sql = f"SELECT {cfg.id_column} FROM {rel} WHERE {cfg.isv_column} = %s"
+        sql = f"SELECT {cfg.id_column} FROM {rel} WHERE {cfg.isv_column} = ?"
         params: tuple = (isv,)
         if since_ts is not None:
-            sql += f" AND {cfg.modify_time_column} > %s"
+            sql += f" AND {cfg.modify_time_column} > ?"
             params = (isv, since_ts)
-        rows = self._driver.query(sql, params)
+        rows = self._query(sql, params)
         return [r[0] for r in rows if r[0] is not None]
 
     def _fetch_convert_rule_rows_bulk(self, fids: list[str]) -> dict[str, dict]:
-        """一条 `fid = ANY(%s)` 取回一批转换规则行（含 fdata 与关系本体列）。
+        """按 `fid` 成员判定取回一批转换规则行（含 fdata 与关系本体列；按方言分批）。
 
         `fenabled`/`fsourceentitynumber`/`ftargetentitynumber` 是这张表的专属列，
         直接写死列名（不做成 `DbConfig` 字段——只有 `convert_rule_table`/
         `isv_column`/`modify_time_column` 需要跨表可配置）。
         """
-        assert self._driver is not None, "请先 open()"
         cfg = self.config
         rel = _qualified(cfg.schema, cfg.convert_rule_table)
-        sql = (
-            f"SELECT {cfg.id_column}, {cfg.data_column}, {cfg.isv_column}, "
-            f"fenabled, fsourceentitynumber, ftargetentitynumber "
-            f"FROM {rel} WHERE {cfg.id_column} = ANY(%s)"
-        )
-        rows = self._driver.query(sql, (list(fids),))
         out: dict[str, dict] = {}
-        for fid, fdata, isv, enabled, source_entity, target_entity in rows:
-            if fdata is None:
-                continue
-            out[fid] = {
-                "fdata": _to_bytes(fdata),
-                "isv": isv,
-                "enabled": _to_optional_bool(enabled),
-                "source_entity": source_entity,
-                "target_entity": target_entity,
-            }
+        for chunk in self._chunks(list(fids)):
+            frag, params = self._dialect.membership(cfg.id_column, chunk)
+            sql = (
+                f"SELECT {cfg.id_column}, {cfg.data_column}, {cfg.isv_column}, "
+                f"fenabled, fsourceentitynumber, ftargetentitynumber "
+                f"FROM {rel} WHERE {frag}"
+            )
+            rows = self._query(sql, params)
+            for fid, fdata, isv, enabled, source_entity, target_entity in rows:
+                if fdata is None:
+                    continue
+                out[fid] = {
+                    "fdata": _to_bytes(fdata),
+                    "isv": isv,
+                    "enabled": _to_optional_bool(enabled),
+                    "source_entity": source_entity,
+                    "target_entity": target_entity,
+                }
         return out
 
     def fetch_convert_rule_fdata_bulk(self, fids: Iterable[str]) -> dict[str, bytes]:
@@ -369,8 +393,7 @@ class DbMetaReader:
         `sync.py` 必须在发起变更查询**之前**调用这个方法记录水位——否则同步过程中
         新提交的变更会被这一轮漏掉、且下一轮的 since_ts 已经晚于它，永久漏同步。
         """
-        assert self._driver is not None, "请先 open()"
-        rows = self._driver.query("SELECT CURRENT_TIMESTAMP")
+        rows = self._query(self._dialect.now_sql())
         value = rows[0][0]
         if isinstance(value, str):
             return value
@@ -378,13 +401,12 @@ class DbMetaReader:
 
     def ping(self) -> dict:
         """连接自检：确认只读会话可用，回报两张表能否 SELECT（不写任何数据）。"""
-        assert self._driver is not None, "请先 open()"
         cfg = self.config
         out: dict = {"read_database": cfg.read_database, "schema": cfg.schema, "tables": {}}
         for table in (cfg.form_table, cfg.entity_table):
             rel = _qualified(cfg.schema, table)
             try:
-                rows = self._driver.query(f"SELECT count(*) FROM {rel}")
+                rows = self._query(f"SELECT count(*) FROM {rel}")
                 out["tables"][table] = {"ok": True, "count": rows[0][0]}
             except Exception as e:  # 表不存在/无权限都如实回报，不臆断
                 out["tables"][table] = {"ok": False, "error": str(e)}
