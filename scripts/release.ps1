@@ -240,7 +240,9 @@ else {
 }
 
 $verified = $null
-for ($i = 0; $i -lt 5; $i++) {
+# PyPI 上传接口成功后，公共 JSON/CDN 偶尔需要十几秒才可见。等待最多 30 秒，
+# 避免已成功上传却因短暂 404 被误判为发布失败。
+for ($i = 0; $i -lt 15; $i++) {
     $verified = Get-PypiRelease $Version
     if ($verified) { break }
     Start-Sleep -Seconds 2
