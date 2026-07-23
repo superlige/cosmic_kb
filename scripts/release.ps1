@@ -46,8 +46,18 @@ function Check-Native([string]$Step) {
 }
 
 function Invoke-Quiet([string]$Step, [scriptblock]$Command) {
-    $output = @(& $Command 2>&1)
-    $code = $LASTEXITCODE
+    # 许多正常 CLI（如 `python -m build`）会把进度写到 stderr。PowerShell 5.1 在
+    # ErrorActionPreference=Stop 下会把这些行包装成 NativeCommandError 并提前终止，
+    # 因此捕获期间临时降为 Continue，最终只按真实进程退出码判断成败。
+    $oldErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = @(& $Command 2>&1)
+        $code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+    }
     $nonEmpty = @($output | Where-Object { ([string]$_).Trim() })
     if ($code -ne 0) {
         $nonEmpty | Select-Object -Last 120 | ForEach-Object { Write-Host $_ }
